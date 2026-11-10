@@ -1,0 +1,2338 @@
+/* ============================================================================
+ * vmaxDiagnosisRules.ts —— 投诉诊断的判据、阈值、评分与结论规则
+ * ============================================================================
+ *
+ * 【为什么规则放前端】
+ *   方案 §4.2 要求「切换投诉类型不重新取数，只重算诊断」——秒切。
+ *   若把评分与结论放后端，每切一次页签就要多打一次上游（上游限并发、
+ *   1300 三页要 12s），体验与上游压力都不允许。
+ *   因此：**取数在后端（/api/vmax-diagnosis 一次拉齐四个源），
+ *   评分与结论在前端**（纯函数，入参是原始行）。
+ *
+ *   代价是规则要前后端一致 —— 所以阈值集中在本文件的 `THRESHOLDS`
+ *   与后端 `vmax_diag_rules.json` 两处，改动必须同步（后端只做透传，
+ *   真正生效的是这里）。这一点写在文档里，避免日后漂移。
+ *
+ * 【判据来源，全部为实测可用字段】（2026-10-31 现网 645 条样本回放；
+ *   2026-11-08 列头探查 get_xdrheader_info 复核并修正 1100 列名）
+ *   1100 会话/信令面：后端已归一为 procedure_type / procedure_status /
+ *        request_cause / fail_cause / interface（分表真实列名带 $ 前缀，
+ *        见 backend vmax_diagnosis.py _norm_1100_row）
+ *   1300 用户面       ：$first_resp_delay / $tcp_resp_delay / ul|dl_avg_rtt /
+ *                       retrans_pkt / disorder_pkt / duration / service / subservice
+ *   32   RAN          ：serving_rsrp / serving_rsrq / ulsinr / cqi / neighbor_rsrp /
+ *                       neighbor_rsrq（按 IMSI 查，见方案 §5.1）
+ *
+ * 【三条不许越界的红线】（写进帮助文档，也在页面上明说）
+ *   1. XDR 里**没有 SIP / RTP**（实测 protocol ∈ {SIP,RTP} 命中 0）
+ *      → OTT 语音只能给「通话期网络质量」，不能给「对方拒接/注册失败」。
+ *   2. RAN 表的 `$msisdn` 列全为空 → 拿不到 IMSI 的用户**无法定位无线侧**，
+ *      结论必须写「无数据可判」，绝不能写「正常」。
+ *   3. `qci=0` 的记录实测是 DNS 小包，不是语音承载 → 判 VoLTE 只认 `qci=1`。
+ * ========================================================================== */
+
+import type { Dayjs } from 'dayjs'
+
+/* ---------------------------------------------------------------------------
+ * 〇、国际化：本文件所有「会显示给人看的文字」一律不写字符串字面量
+ * ------------------------------------------------------------------------ *
+ * 规则层是纯函数、不依赖 React，拿不到 `t()`。而它产出的结论、证据、建议
+ * 全是要渲染到页面上（以及导出 Excel/PDF）的文案 —— 早期版本这些文案直接
+ * 写成中文字面量，导致**英文界面下整个诊断结论区都是中文**，而
+ * `check:i18n` 扫不到（它只扫 JSX 文本与 t() 的入参）。
+ *
+ * 因此规则层只产出 `{ key, params }`，由渲染层 `t(key, params)` 翻译。
+ * 好处：① 规则层仍是纯函数、可单测；② 中英两版文案都在字典里，跑
+ * `check:i18n` 就能保证不缺键；③ 参数与文案分离，改文案不用动逻辑。
+ *
+ * 约定：key 一律以 `vmaxq.vd.` 开头（vd = verdict/diagnosis 规则层）。
+ */
+export type I18nText = {
+  /** 字典键，如 `vmaxq.vd.headline.voiceNone` */
+  key: string
+  /** 插值参数（字典里写成 `{{name}}`） */
+  params?: Record<string, string | number | I18nText>
+}
+
+/**
+ * 构造 I18nText 的简写。
+ *
+ * `params` 里允许再放 `I18nText`（嵌套），用于「一句话里嵌一个可变短语」的场景，
+ * 例如「无线侧不可判：{{why}}」的 why 本身又是一句已翻译的话。
+ * 嵌套项**不在这里展开**（规则层没有 t），而是原样保留，交给渲染层的
+ * `renderI18n()` 递归解析 —— 这样规则层仍不需要知道当前语言。
+ */
+export const tx = (key: string, params?: Record<string, string | number | I18nText>): I18nText =>
+  (params ? { key, params } : { key })
+
+/** 判断某个值是不是 I18nText（渲染层递归解析时用） */
+export const isI18nText = (v: unknown): v is I18nText =>
+  !!v && typeof v === 'object' && typeof (v as I18nText).key === 'string'
+
+/* ---------------------------------------------------------------------------
+ * 一、类型：四个数据源的行与诊断结果
+ * ------------------------------------------------------------------------ */
+
+/** 投诉类型（一级页签）—— 决定「先看哪一维」，不是过滤器 */
+export type ComplaintKey = 'all' | 'voice' | 'ott' | 'video' | 'game' | 'slow'
+
+export const COMPLAINT_KEYS: ComplaintKey[] = ['all', 'voice', 'ott', 'video', 'game', 'slow']
+
+export const isComplaintKey = (v: string): v is ComplaintKey =>
+  (COMPLAINT_KEYS as string[]).includes(v)
+
+/** 视图页签 —— 每个页签回答一个问题 */
+export type DiagViewKey = 'diagnosis' | 'flow' | 'connect' | 'radio'
+
+export const isDiagViewKey = (v: string): v is DiagViewKey =>
+  v === 'diagnosis' || v === 'flow' || v === 'connect' || v === 'radio'
+
+/** 上游 XDR 行：字段名随表而变，统一按字符串字典处理 */
+export type XdrRow = Record<string, string | number | null | undefined>
+
+/** 单个数据源的取数结果（单源失败不影响其它源） */
+export type SourceResult = {
+  /** 上游表名，如 1300 / 1100 / 32 / 1301 */
+  key: string
+  /**
+   * i18n key（后端给，如 `vmaxq.diag.src.1300`）。
+   * 有它就按当前语言渲染；没有则回退 `label`（中文原文）。
+   * 为什么不由前端按 key 反查：`key` 是表号，"32" 这种还要拼 "RAN"，
+   * 语义分散在服务端，让服务端直接给 key 最不容易漂移。
+   */
+  label_key?: string
+  /** 人类可读名（界面上「已查数据源」那一行），中文兜底 */
+  label: string
+  ok: boolean
+  rows: XdrRow[]
+  /** ok=false 时的原因（超时 / 无 IMSI 映射 / 上游报错） */
+  error?: string
+  /** 是否因为条数上限被截断（要在界面上明说） */
+  truncated?: boolean
+}
+
+/** 诊断接口的整体响应 */
+export type DiagnosisPayload = {
+  window: { start: string; end: string }
+  sources: SourceResult[]
+  /** MSISDN → IMSI 的映射结果；空 = 拿不到，无线侧无法判 */
+  imsi?: string
+  cell?: string
+  /**
+   * P0'-1：诊断附带的流量聚合（复用 1300/1301 行算好，不再打上游）。
+   * 前端优先用它渲染「业务流量」页签；为 null 时回退调 /api/vmax-flow-xdr。
+   * 类型用 unknown 避免循环 import（FlowData 在组件层定义）。
+   */
+  flow?: unknown | null
+  /** flow 是否复用成功（false = 前端需要回退单查） */
+  flow_reused?: boolean
+}
+
+/* ---------------------------------------------------------------------------
+ * 二、阈值（与后端 vmax_diag_rules.json 同步）
+ * ------------------------------------------------------------------------ */
+
+export const THRESHOLDS = {
+  /** 过程失败率告警线 */
+  failRate: 5,
+  /** 首包时延 P90 告警线（ms）：实测均值 455ms、峰值 118765ms */
+  firstRespP90: 3000,
+  /** TCP 应答时延均值告警线（ms） */
+  tcpResp: 500,
+  /** 重传率告警线（%）：实测命中样本均值 ~0.2% */
+  retrans: 1,
+  /** 弱覆盖：serving_rsrp 低于此值（dBm） */
+  rsrp: -110,
+  /** 上行受限：ulsinr 低于此值（dB） */
+  sinr: 0,
+  /** CSFB 回落耗时偏慢线（ms） */
+  csfbFallback: 2000,
+  /** OTT 通话最短判定时长（s） */
+  ottMinDuration: 10,
+  /** OTT 通话体验偏差线：平均下行 RTT（ms）——buildVerdict 与工作台 m-ott 共用，
+   * 此前两处各写一份 150/60（2026-11-07 收敛为唯一出处） */
+  ottRttBad: 150,
+  /** OTT 通话体验偏差线：RTT 抖动（ms） */
+  ottJitterBad: 60,
+  /** 评分分档：>= 此值算正常 */
+  scoreGood: 80,
+  /** 评分分档：< 此值算异常 */
+  scoreBad: 50,
+  /** 邻区 RSRP「够好」线（dBm）：邻区 ≥ 此值而 serving 弱 → 优先怀疑切换参数，
+   *  而不是真弱覆盖（2026-11-08 P0-3） */
+  neighborGood: -100,
+  /** serving 与最佳邻区的差值（dB）：≥ 此值才算「有好邻区却没切走」 */
+  neighborGap: 10,
+  /** OTT 文本消息：双向流量低于此值（KB）视为「长连接空闲」，不能据此判发送失败 */
+  ottTextIdleKb: 50,
+} as const
+
+/* ---------------------------------------------------------------------------
+ * 三、小工具
+ * ------------------------------------------------------------------------ */
+
+const num = (v: unknown): number => {
+  if (v === null || v === undefined || v === '') return 0
+  const n = typeof v === 'number' ? v : Number(String(v))
+  return Number.isFinite(n) ? n : 0
+}
+
+const str = (v: unknown): string => (v == null ? '' : String(v).trim())
+
+const strU = (v: unknown): string => str(v).toUpperCase()
+
+/* ---------------------------------------------------------------------------
+ * RAN(32) 字段取值 —— 上游用**哨兵值**表示「未上报」，不是空串
+ *
+ * 2026-10-31 用真号码跑通 RAN 取数后实测（216 行 UEMR）：
+ *   - `cqi`      全部是 **65535**（= 0xFFFF，该次没上报 CQI）
+ *   - `ulsinr`   出现 **255**（UL SINR 实测正常范围 -10~30 dB）
+ *   - `phr`      出现 **255** 与 0
+ * 这些值如果直接进统计，会被算成真实电平：CQI 平均会变成 65535，
+ * SINR 的 P10/均值被拉高，结论从「干扰」翻成「正常」——比缺数据更危险。
+ * 所以三个字段各自按**物理取值范围**过滤，超范围一律当「无采样」。
+ * ------------------------------------------------------------------------ */
+
+/** RSRP：真实值必为负（-140 ~ -40 dBm）；0/正数是缺采样或哨兵 */
+const rsrpOf = (r: XdrRow): number => {
+  const v = num(r.serving_rsrp)
+  return v < 0 ? v : 0
+}
+
+/** UL SINR：合理区间 (-30, 40) dB；255 是哨兵 */
+const sinrOf = (r: XdrRow): number => {
+  const v = num(r.ulsinr)
+  return v > -30 && v < 40 ? v : 0
+}
+
+/** CQI：LTE 上报 0~15（少数厂商 0~31）；65535 是哨兵 */
+const cqiOf = (r: XdrRow): number => {
+  const v = num(r.cqi)
+  return v > 0 && v <= 31 ? v : 0
+}
+
+/** 小区名：RAN 表的列就叫 `cell`（不是 cellname / cell_name）。
+ *  2026-10-31 实测只有 `cell` 有值（如 "Methodist Compound-X1"）；
+ *  只读 cellname 会让所有行塌进「未知小区」，逐小区表和「最差点名」全失效。 */
+const cellOf = (r: XdrRow): string =>
+  str(r.cell) || str(r.cellname) || str(r.cell_name) || t_unknownCell()
+
+/** 百分位（p ∈ [0,1]）—— 上游没有分位数字段，只能客户端算 */
+function percentile(values: number[], p: number): number {
+  if (!values.length) return 0
+  const s = [...values].sort((a, b) => a - b)
+  const idx = Math.min(s.length - 1, Math.max(0, Math.round((s.length - 1) * p)))
+  return s[idx]
+}
+
+function mean(values: number[]): number {
+  if (!values.length) return 0
+  return values.reduce((a, b) => a + b, 0) / values.length
+}
+
+function stdDev(values: number[]): number {
+  if (values.length < 2) return 0
+  const m = mean(values)
+  return Math.sqrt(mean(values.map((v) => (v - m) ** 2)))
+}
+
+/** 上游的时间字段名随域而变：5gsa 用 start_time，RAN 用 btime */
+export function rowTime(row: XdrRow): string {
+  for (const k of ['start_time', 'btime', 'time', 'stat_time', 'procedure_start_time']) {
+    const v = str(row[k])
+    if (v && v !== '-') return v
+  }
+  return ''
+}
+
+/** 把 "2026-10-31 08:14:23.123" 这类串截成 "2026-10-31 08:14" 作为分钟桶 */
+export function minuteKey(t: string): string {
+  const s = t.replace('T', ' ')
+  // "YYYY-MM-DD HH:MM..." → 前 16 字符
+  return s.length >= 16 ? s.slice(0, 16) : s
+}
+
+/** 只取 "HH:mm"，时间线表格里空间有限 */
+export function hhmm(t: string): string {
+  const s = t.replace('T', ' ')
+  return s.length >= 16 ? s.slice(11, 16) : s
+}
+
+export const pct = (v: number, digits = 1): string => `${v.toFixed(digits)}%`
+
+export const ms = (v: number): string => (v >= 1000 ? `${(v / 1000).toFixed(2)} s` : `${Math.round(v)} ms`)
+
+/** 毫秒 / 秒转 "m:ss" 或 "N s"，给通话时长用 */
+/**
+ * 时长的可翻译表示。**不能返回字符串**：中文是「204 分 6 秒」、英文是
+ * "204 min 6 s"，单位本身就是文案。返回 `I18nText` 由渲染层翻译。
+ */
+export function durText(v: number, unit: 'ms' | 's' = 's'): I18nText {
+  const sec = unit === 'ms' ? v / 1000 : v
+  if (sec < 60) return tx('vmaxq.vd.durSec', { v: Math.round(sec) })
+  const m = Math.floor(sec / 60)
+  const s = Math.round(sec % 60)
+  return tx('vmaxq.vd.durMinSec', { m, s })
+}
+
+/* ---------------------------------------------------------------------------
+ * 四、四个分项评分
+ * ------------------------------------------------------------------------ */
+
+export type ScoreKey = 'availability' | 'latency' | 'transport' | 'radio'
+
+export type DimensionScore = {
+  key: ScoreKey
+  /** 0-100，越低越差；null = 无数据（不是 0 分！） */
+  score: number | null
+  /** 卡片副标题里的关键数字（i18n key + 参数，由渲染层翻译） */
+  sub: I18nText | null
+  /** 该维的原始口径数字，供导出与证据展示 */
+  detail: Record<string, number | string>
+  /** 有哪几条证据支持这个分（证据条渲染用） */
+  evidence: I18nText[]
+}
+
+const clamp = (v: number, lo = 0, hi = 100) => Math.min(hi, Math.max(lo, v))
+
+/**
+ * 分项评分：把「实测值 / 阈值」映射到 0-100。
+ * 口径刻意做成**线性衰减**而不是阶梯：阶梯会让「刚过线」和「远超线」
+ * 得到同一个分数，排障时看不出「差多少」。
+ *
+ * @param value 实测值（越大越差）
+ * @param bad   阈值（到阈值时 = 60 分）
+ * @param worst 极端值（到极端值时 = 0 分）
+ */
+function inverseScore(value: number, bad: number, worst: number): number {
+  if (value <= 0) return 100
+  if (value <= bad) return clamp(100 - 40 * (value / bad))
+  if (value >= worst) return 0
+  return clamp(60 - 60 * ((value - bad) / (worst - bad)))
+}
+
+/** 反向（越小越差，如 RSRP）：-85 好、-110 告警、-125 极端 */
+function rsrpScore(rsrp: number): number {
+  if (rsrp === 0) return 100 // 没采样不扣分（无数据在调用处单独处理）
+  if (rsrp >= -85) return 100
+  if (rsrp >= THRESHOLDS.rsrp) return clamp(100 - 40 * ((-85 - rsrp) / (-85 - THRESHOLDS.rsrp)))
+  return clamp(60 - 60 * ((THRESHOLDS.rsrp - rsrp) / 15))
+}
+
+function sinrScore(sinr: number): number {
+  if (sinr === 0) return 100
+  if (sinr >= 12) return 100
+  if (sinr >= THRESHOLDS.sinr) return clamp(100 - 40 * ((12 - sinr) / 12))
+  return clamp(60 - 60 * ((-sinr) / 5))
+}
+
+/* ---------------------------------------------------------------------------
+ * 五、四个维度的取数（每个函数只认自己那几条字段）
+ * ------------------------------------------------------------------------ */
+
+/** 从 sources 里按 key 取行 */
+export function rowsOf(sources: SourceResult[], key: string): XdrRow[] {
+  return sources.find((s) => s.key === key)?.rows || []
+}
+
+/**
+ * 数据源显示名 —— 后端优先给 `label_key`，缺键时回退中文 `label`。
+ *
+ * 三个地方共用（数据源标签行 / 空态说明 / 失败原因拼接），必须同一个实现：
+ * 曾经三处各自写 `s.label`，改造 i18n 时只改了其中一处，
+ * 英文界面就出现「1300 是英文、空态那行还是中文」的割裂。
+ */
+export function sourceLabel(t: (k: string) => string, s: SourceResult): string {
+  return s.label_key ? t(s.label_key) : s.label
+}
+
+/**
+ * 业务可用性 —— 1100 的 procedure_status 分布 + S1-U Path Failure 硬扣分。
+ *
+ * 实测：754 Success / 8 Timeout / 4 Failure / 12 条 S1-U Path Failure。
+ * `S1-U Path Failure` 单独看是因为它意味着**用户面断了**，
+ * 但它在 procedure_status 里往往还是 Success（Failure 是"送达"，不是"成功"），
+ * 只按 status 算会把「断网」算成「正常」——这是现场最容易误判的一处。
+ */
+export function scoreAvailability(sources: SourceResult[]): DimensionScore {
+  const rows = rowsOf(sources, '1100')
+  if (!rows.length) {
+    return { key: 'availability', score: null, sub: null, detail: {}, evidence: [] }
+  }
+  let success = 0
+  let timeout = 0
+  let failure = 0
+  let pathFail = 0
+  for (const r of rows) {
+    const st = strU(r.procedure_status)
+    if (st === 'SUCCESS') success += 1
+    else if (st === 'TIMEOUT') timeout += 1
+    else if (st) failure += 1
+    if (strU(r.request_cause).includes('S1-U PATH FAILURE')) pathFail += 1
+  }
+  const total = success + timeout + failure
+  const bad = timeout + failure
+  const failRate = total ? (bad / total) * 100 : 0
+  // 基础分：失败率线性衰减；再叠 S1-U Path Failure 硬扣分
+  let score = inverseScore(failRate, THRESHOLDS.failRate, 40)
+  const pathPenalty = Math.min(40, pathFail * 3.5)
+  score = clamp(score - pathPenalty)
+
+  const evidence: I18nText[] = []
+  if (bad) evidence.push(tx('vmaxq.vd.ev.availBad', { bad, timeout, failure, rate: pct(failRate) }))
+  if (pathFail) evidence.push(tx('vmaxq.vd.ev.availPathFail', { n: pathFail }))
+  if (!evidence.length) evidence.push(tx('vmaxq.vd.ev.availAllOk', { total }))
+
+  return {
+    key: 'availability',
+    score: Math.round(score),
+    sub: bad ? tx('vmaxq.vd.sub.avail', { total, bad }) : tx('vmaxq.vd.sub.availOk', { total }),
+    detail: { total, success, timeout, failure, pathFail, failRate: +failRate.toFixed(2) },
+    evidence,
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * 五半、接入失败原因分型（2026-11-08 P0-1：账务 / EPS 拒绝 / 核心网拒绝）
+ * ---------------------------------------------------------------------------
+ * 背景：1100 源已取 `fail_cause`（backend vmax_diagnosis.py COLS_1100），
+ * 但旧逻辑从未用它 —— 所有接入失败都只计入 failRate，结论只能写
+ * 「连接失败为主因」，分不清「欠费被拒」和「网络真坏」。
+ *
+ * 分型原则（保守，避免误判）：
+ *  - billing（账务/订阅）：**只认强关键词**。EPS reject 的数字码（3/6/7/8/11/12/
+ *    22/95/111/112 等）语义是「未授权/拒绝」，不等于欠费，单凭数字码**不判账务**，
+ *    只归 attach_reject，并由结论页显式写「未查账务，不能排除欠费」。
+ *  - 数字码只作 attach_reject 的弱信号（核心网/订阅层拒绝），不直接指向账务。
+ * ------------------------------------------------------------------------ */
+
+export type FailCauseCategory =
+  | 'billing' | 'attach_reject' | 'core_reject' | 'radio_fail' | 'transport_fail' | 'unknown'
+
+/** 强账务关键词：命中才判 billing；数字码不进这里（见上文注释） */
+const BILLING_KEYWORDS = [
+  'INSUFFICIENT BALANCE', 'INSUFFICIENT CREDIT', 'CREDIT CONTROL', 'CREDIT LIMIT',
+  'CHARGING', 'OCS', 'GY INTERFACE', 'DATA QUOTA', 'QUOTA EXCEEDED', 'QUOTA EXHAUST',
+  'OVERDUE', 'ARREARS', 'UNPAID', 'BALANCE', 'DATA PACKAGE', 'PACKAGE EXHAUST',
+  'SUBSCRIBER BARRED', 'UE BARRED', 'BARRED DUE', 'SERVICE STOPPED DUE',
+]
+
+/** EPS/ESM 拒绝类（未授权 / APN / 拥塞 / 语音承载等）—— 订阅层或核心网层拒绝 */
+const ATTACH_REJECT_TOKENS = [
+  'EMM CAUSE', 'ESM CAUSE', 'EPS REJECT', 'ATTACH REJECT', 'SERVICE REJECT',
+  'NOT AUTHORIZED', 'NOT SUBSCRIBED', 'UNKNOWN APN', 'CONGESTION',
+  'SINGLE VOICE', 'UE IN USE', 'UE NOT RESPONDING', 'PROTOCOL ERROR',
+  // S6a/HSS 的 Diameter 订阅类拒绝（2026-11-08 列头探查：fact_pscp_s6a 的
+  // cause_name）—— 订阅/漫游类，**不是账务**，归 attach_reject 并显式待补账务。
+  'SUBSCRIBER NOT AVAILABLE', 'USER UNKNOWN', 'ROAMING NOT ALLOWED',
+  'DIAMETER_DATA', 'DIAMETER_USER', 'DIAMETER_ROAMING', 'DIAMETER_UNABLE',
+]
+
+/** 无线侧失败（接入网） */
+const RADIO_FAIL_TOKENS = [
+  'RADIO LINK FAILURE', 'RLF', 'OUT OF SERVICE', 'NO CELL', 'CELL BARRED',
+  'RACH', 'PREAMBLE', 'UL SYNCHRONIZATION', 'DL SYNCHRONIZATION',
+]
+
+/** 传输/承载侧失败 */
+const TRANSPORT_FAIL_TOKENS = [
+  'S1-U', 'S1AP', 'PATH FAILURE', 'BEARER', 'TRANSPORT', 'GTP',
+]
+
+/** fail_cause / request_cause 文本 → 原因类别（纯函数，可单测） */
+export function classifyFailCause(text: string): FailCauseCategory {
+  const t = strU(text)
+  if (!t) return 'unknown'
+  // Gy Diameter Credit-Control 结果码（RFC 4006，用户 2026-11-08 提供）：
+  // 4012 = CREDIT_LIMIT_REACHED（余额不足）→ billing；
+  // 4010 = SERVICE_REJECTED（服务被拒，账户/业务限制均可）→ attach_reject。
+  // 注：本部署 Talon XDR 未采 Gy 表（2026-11-08 探查），此映射为数据接入后即用。
+  if (/\b4012\b/.test(t)) return 'billing'
+  if (/\b4010\b/.test(t)) return 'attach_reject'
+  if (BILLING_KEYWORDS.some((k) => t.includes(k))) return 'billing'
+  if (ATTACH_REJECT_TOKENS.some((k) => t.includes(k))) return 'attach_reject'
+  if (RADIO_FAIL_TOKENS.some((k) => t.includes(k))) return 'radio_fail'
+  if (TRANSPORT_FAIL_TOKENS.some((k) => t.includes(k))) return 'transport_fail'
+  // 核心网拒绝的其它显式措辞（reject/failure + 核心网接口）
+  if (t.includes('REJECT') && (t.includes('MME') || t.includes('SGW') || t.includes('PGW') || t.includes('HSS'))) {
+    return 'core_reject'
+  }
+  return 'unknown'
+}
+
+/** 1100 接入过程的原因分型结果（供 verdict 的账务优先分支与假设排序用） */
+export type AccessAnalysis = {
+  total: number
+  bad: number
+  /** 按类别计数（只统计失败行，成功行不进） */
+  byCategory: Record<FailCauseCategory, number>
+  /** billing 命中的原文样例（最多 3 条，原文展示便于工单核对） */
+  billingExamples: string[]
+  /** attach_reject 命中的原文样例（最多 3 条） */
+  attachExamples: string[]
+  evidence: I18nText[]
+}
+
+/** 1100 的 fail_cause / request_cause 分型 —— 欠费等常规原因的第一道筛子 */
+export function analyzeAccess(sources: SourceResult[]): AccessAnalysis {
+  const rows = rowsOf(sources, '1100')
+  const byCategory: Record<FailCauseCategory, number> = {
+    billing: 0, attach_reject: 0, core_reject: 0, radio_fail: 0, transport_fail: 0, unknown: 0,
+  }
+  const billingExamples: string[] = []
+  const attachExamples: string[] = []
+  let bad = 0
+  for (const r of rows) {
+    const st = strU(r.procedure_status)
+    if (st === 'SUCCESS') continue
+    if (!st) continue
+    bad += 1
+    const texts = [str(r.fail_cause), str(r.request_cause)].filter(Boolean)
+    // 一行取最强的类别（billing 优先于其它，避免被附带的 S1-U 文本淹没）
+    let best: FailCauseCategory = 'unknown'
+    for (const text of texts) {
+      const c = classifyFailCause(text)
+      if (c === 'billing') { best = 'billing'; break }
+      if (best === 'unknown' && c !== 'unknown') best = c
+    }
+    byCategory[best] += 1
+    const raw = texts.join(' / ')
+    if (best === 'billing' && billingExamples.length < 3 && raw) billingExamples.push(raw)
+    if (best === 'attach_reject' && attachExamples.length < 3 && raw) attachExamples.push(raw)
+  }
+  const evidence: I18nText[] = []
+  if (byCategory.billing) {
+    evidence.push(tx('vmaxq.vd.ev.accessBilling', { n: byCategory.billing, ex: billingExamples[0] || '' }))
+  }
+  if (byCategory.attach_reject) {
+    evidence.push(tx('vmaxq.vd.ev.accessAttach', { n: byCategory.attach_reject, ex: attachExamples[0] || '' }))
+  }
+  return { total: rows.length, bad, byCategory, billingExamples, attachExamples, evidence }
+}
+
+/**
+ * 响应时延 —— 1300 的 `$first_resp_delay` P90 为主，`$tcp_resp_delay` 均值为辅。
+ *
+ * 为什么用 P90 而不是均值：实测同一窗口均值 455ms、峰值 118765ms。
+ * 均值会被大量小包拉平 —— 用户抱怨的恰恰是那几个「卡住 2 分钟」的请求。
+ */
+export function scoreLatency(sources: SourceResult[]): DimensionScore {
+  const rows = rowsOf(sources, '1300')
+  if (!rows.length) {
+    return { key: 'latency', score: null, sub: null, detail: {}, evidence: [] }
+  }
+  const first = rows.map((r) => num(r.$first_resp_delay)).filter((v) => v > 0)
+  const tcp = rows.map((r) => num(r.$tcp_resp_delay)).filter((v) => v > 0)
+  const ulRtt = rows.map((r) => num(r.ul_avg_rtt)).filter((v) => v > 0)
+  const dlRtt = rows.map((r) => num(r.dl_avg_rtt)).filter((v) => v > 0)
+
+  const p90 = percentile(first, 0.9)
+  const tcpAvg = mean(tcp)
+  // 首包时延是主判据（权重 0.7），TCP 应答时延是副判据（0.3）
+  const s1 = p90 > 0 ? inverseScore(p90, THRESHOLDS.firstRespP90, 30000) : 100
+  const s2 = tcpAvg > 0 ? inverseScore(tcpAvg, THRESHOLDS.tcpResp, 5000) : 100
+  const hasSignal = p90 > 0 || tcpAvg > 0
+  const score = hasSignal ? Math.round(s1 * 0.7 + s2 * 0.3) : null
+
+  const evidence: I18nText[] = []
+  if (p90 > 0) evidence.push(tx('vmaxq.vd.ev.latencyP90', { p90: ms(p90), mean: ms(mean(first)), max: ms(Math.max(...first)) }))
+  if (tcpAvg > 0) evidence.push(tx('vmaxq.vd.ev.latencyTcp', { v: ms(tcpAvg) }))
+  if (ulRtt.length) evidence.push(tx('vmaxq.vd.ev.latencyRtt', { ul: ms(mean(ulRtt)), dl: ms(mean(dlRtt)) }))
+
+  return {
+    key: 'latency',
+    score,
+    sub: p90 > 0 ? tx('vmaxq.vd.sub.latency', { v: ms(p90) }) : null,
+    detail: {
+      firstP90: Math.round(p90), firstAvg: Math.round(mean(first)),
+      firstMax: Math.round(first.length ? Math.max(...first) : 0),
+      tcpAvg: Math.round(tcpAvg),
+      ulRtt: Math.round(mean(ulRtt)), dlRtt: Math.round(mean(dlRtt)),
+    },
+    evidence,
+  }
+}
+
+/**
+ * 传输质量 —— 重传率 + 乱序率。
+ *
+ * 单位坑：上游 `ul_retrans_pkt` 是"包数"，`ul_pkt` 也是"包数"，
+ * 但有的记录单位是 KB（字段名不一致）→ 分母为 0 时不算率，只看绝对数。
+ */
+export function scoreTransport(sources: SourceResult[]): DimensionScore {
+  const rows = rowsOf(sources, '1300')
+  if (!rows.length) {
+    return { key: 'transport', score: null, sub: null, detail: {}, evidence: [] }
+  }
+  let ulPkt = 0, dlPkt = 0, retrans = 0, disorder = 0
+  for (const r of rows) {
+    ulPkt += num(r.ul_pkt); dlPkt += num(r.dl_pkt)
+    retrans += num(r.ul_retrans_pkt) + num(r.dl_retrans_pkt)
+    disorder += num(r.ul_disorder_pkt) + num(r.dl_disorder_pkt)
+  }
+  const totalPkt = ulPkt + dlPkt
+  const retransRate = totalPkt > 0 ? (retrans / totalPkt) * 100 : 0
+  const disorderRate = totalPkt > 0 ? (disorder / totalPkt) * 100 : 0
+
+  let score: number | null
+  if (totalPkt > 0) {
+    const s1 = inverseScore(retransRate, THRESHOLDS.retrans, 8)
+    const s2 = inverseScore(disorderRate, THRESHOLDS.retrans * 2, 15)
+    score = Math.round(s1 * 0.75 + s2 * 0.25)
+  } else {
+    score = null
+  }
+
+  const evidence: I18nText[] = []
+  if (totalPkt > 0) {
+    evidence.push(tx('vmaxq.vd.ev.transRetrans', { retrans: Math.round(retrans), total: Math.round(totalPkt), rate: pct(retransRate) }))
+    evidence.push(tx('vmaxq.vd.ev.transDisorder', { n: Math.round(disorder), rate: pct(disorderRate) }))
+  } else {
+    evidence.push(tx('vmaxq.vd.ev.transNoPacket'))
+  }
+
+  return {
+    key: 'transport',
+    score,
+    sub: totalPkt > 0 ? tx('vmaxq.vd.sub.transport', { v: pct(retransRate) }) : null,
+    detail: {
+      totalPkt: Math.round(totalPkt), retrans: Math.round(retrans), disorder: Math.round(disorder),
+      retransRate: +retransRate.toFixed(3), disorderRate: +disorderRate.toFixed(3),
+    },
+    evidence,
+  }
+}
+
+/**
+ * 无线质量 —— RAN(32) 的 serving_rsrp / ulsinr / cqi 的 P10。
+ *
+ * 用 P10 而不是均值：弱覆盖是「最差的那几分钟」导致的，
+ * 均值 -95 dBm 的用户照样可能在某个小区里掉到 -120 打不通电话。
+ */
+export function scoreRadio(sources: SourceResult[]): DimensionScore {
+  const rows = rowsOf(sources, '32')
+  if (!rows.length) {
+    const src = sources.find((s) => s.key === '32')
+    return {
+      key: 'radio', score: null, sub: null,
+      // detail 是「导出用的原始口径」，只放上游原文，不做翻译包装：
+      // 上游 error 本身就是英文（VMAX 门户/接口原文），空则留空串。
+      // 人要读的说明在 evidence 里（已走 i18n），两者职责不同。
+      detail: { reason: src?.error || '' },
+      evidence: src?.error ? [tx('vmaxq.vd.ev.radioSrcError', { msg: src.error })] : [tx('vmaxq.vd.ev.radioNoRecord')],
+    }
+  }
+  const rsrp = rows.map(rsrpOf).filter((v) => v !== 0)
+  const sinr = rows.map(sinrOf).filter((v) => v !== 0)
+  const cqi = rows.map(cqiOf).filter((v) => v > 0)
+
+  const rsrpP10 = percentile(rsrp, 0.1)
+  const sinrP10 = percentile(sinr, 0.1)
+  const cqiP10 = percentile(cqi, 0.1)
+
+  const parts: number[] = []
+  if (rsrp.length) parts.push(rsrpScore(rsrpP10))
+  if (sinr.length) parts.push(sinrScore(sinrP10))
+  if (!parts.length) {
+    return {
+      key: 'radio', score: null, sub: null,
+      detail: {},
+      evidence: [tx('vmaxq.vd.ev.radioNoSample')],
+    }
+  }
+  const score = Math.round(mean(parts))
+
+  const evidence: I18nText[] = []
+  if (rsrp.length) evidence.push(tx('vmaxq.vd.ev.radioRsrp', { p10: rsrpP10, mean: Math.round(mean(rsrp)), n: rsrp.length }))
+  if (sinr.length) evidence.push(tx('vmaxq.vd.ev.radioSinr', { p10: sinrP10, n: sinr.length }))
+  if (cqi.length) evidence.push(tx('vmaxq.vd.ev.radioCqi', { p10: cqiP10 }))
+
+  return {
+    key: 'radio',
+    score,
+    sub: rsrp.length ? tx('vmaxq.vd.sub.radio', { v: rsrpP10 }) : null,
+    detail: {
+      rsrpP10, sinrP10, cqiP10,
+      rsrpAvg: Math.round(mean(rsrp)), samples: rsrp.length,
+    },
+    evidence,
+  }
+}
+
+/** 四维一次算齐（顺序即卡片顺序） */
+export function scoreAll(sources: SourceResult[]): DimensionScore[] {
+  return [
+    scoreAvailability(sources),
+    scoreLatency(sources),
+    scoreTransport(sources),
+    scoreRadio(sources),
+  ]
+}
+
+/* ---------------------------------------------------------------------------
+ * 六、投诉类型 → 判据权重（不是过滤器，只换入口判据）
+ * ------------------------------------------------------------------------ */
+
+/**
+ * 每个投诉类型给四维的权重。
+ *
+ * 0 = 该维不参与本次判定（降权到底，但**仍然展示**分数 ——
+ * 用户需要看到"这一维其实也差"，只是本次不拿它做结论）。
+ * 这么做而不是隐藏：藏起来会让人以为我们没查。
+ */
+export const COMPLAINT_WEIGHTS: Record<ComplaintKey, Record<ScoreKey, number>> = {
+  all: { availability: 1, latency: 1, transport: 1, radio: 1 },
+  voice: { availability: 1.4, latency: 0.6, transport: 0.5, radio: 1.0 },
+  ott: { availability: 0.8, latency: 1.3, transport: 1.3, radio: 0.6 },
+  video: { availability: 0.8, latency: 1.3, transport: 1.0, radio: 1.0 },
+  game: { availability: 0.7, latency: 1.2, transport: 1.2, radio: 1.1 },
+  slow: { availability: 1.0, latency: 1.3, transport: 1.3, radio: 0.6 },
+}
+
+/** 加权总分（只在有分的维度上归一，避免「缺一维就低分」） */
+export function weightedScore(scores: DimensionScore[], complaint: ComplaintKey): number | null {
+  const w = COMPLAINT_WEIGHTS[complaint]
+  let sum = 0
+  let wsum = 0
+  for (const s of scores) {
+    if (s.score === null) continue
+    sum += s.score * w[s.key]
+    wsum += w[s.key]
+  }
+  return wsum ? Math.round(sum / wsum) : null
+}
+
+/* ---------------------------------------------------------------------------
+ * 七、语音：CSFB / VoLTE 双模式（方案 §4.4）
+ * ------------------------------------------------------------------------ */
+
+export type VoiceStep = {
+  time: string
+  iface: string
+  proc: string
+  cause: string
+  status: string
+  cell: string
+}
+
+export type VoiceResult = {
+  /** csfb / volte / none —— 本时段实际观察到的语音方式 */
+  mode: 'csfb' | 'volte' | 'none'
+  /** SGs 位置更新条数；0 且用户投诉语音 → CSFB 可能不可用 */
+  sgsCount: number
+  /** CS Fallback Triggered 次数 */
+  csfbTrigger: number
+  /** Extended Service Request（回落请求）条数 */
+  esrCount: number
+  /** 寻呼条数（被叫） */
+  pagingCount: number
+  /** 超时/失败条数 */
+  badCount: number
+  /** 起呼成功率（%），无起呼则 null */
+  successRate: number | null
+  /** 回落耗时（ms），只统计「ESR → UE context release」成对的样本 */
+  fallbackMs: number | null
+  /** 回落链明细（表格） */
+  steps: VoiceStep[]
+  /** 是否出现 QCI=1 承载（VoLTE 判据） */
+  qci1: number
+  /** 证据条文案 */
+  evidence: I18nText[]
+}
+
+/**
+ * 语音判定。
+ *
+ * CSFB 判据链（评审意见 3：「目前主要是 CSFB，要找 1100 的 SGs 接口记录来判」）：
+ *   SGs 位置更新 → Extended Service Request(CS Fallback Triggered) → 回落
+ *
+ * VoLTE 判据（预埋，上线即用）：
+ *   1100 出现 QCI=1 承载建立/修改，或 1300 出现 qci=1 话单。
+ *   ⚠ 不能用 qci=0 冒充 —— 实测 qci=0 的 49 条是 DNS 小包。
+ */
+export function analyzeVoice(sources: SourceResult[]): VoiceResult {
+  const r1100 = rowsOf(sources, '1100')
+  const r1300 = rowsOf(sources, '1300')
+
+  let sgsCount = 0, csfbTrigger = 0, esrCount = 0, pagingCount = 0, badCount = 0
+  let esrOk = 0, esrTotal = 0
+  const steps: VoiceStep[] = []
+  // 回落耗时配对：按时间排序后，ESR 之后第一条 UE context release 视为该次回落完成
+  const esrTimes: string[] = []
+  const releaseTimes: string[] = []
+
+  for (const r of r1100) {
+    const iface = strU(r.interface)
+    const proc = str(r.procedure_type)
+    const procU = strU(proc)
+    const cause = str(r.request_cause)
+    const status = strU(r.procedure_status)
+    const isBad = status === 'TIMEOUT' || status === 'FAILURE'
+
+    if (iface === 'SGS') sgsCount += 1
+    if (strU(cause).includes('CS FALLBACK TRIGGERED')) csfbTrigger += 1
+    if (procU.includes('EXTENDED SERVICE REQUEST')) {
+      esrCount += 1; esrTotal += 1
+      if (!isBad) esrOk += 1
+      esrTimes.push(rowTime(r))
+    }
+    if (procU.includes('PAGING')) {
+      pagingCount += 1
+      // 注意：badCount 只在下面那条通用判据里加一次。
+      // 这里原先还有一句 `if (isBad) badCount += 1`，同一条 PAGING 超时/失败行
+      // 会被计两遍（既进 PAGING 分支又进通用分支），把「超时/失败」卡片与
+      // 整卡告警等级一起抬高（2026-11-05 复扫时抓到并修掉）。
+    }
+    if (isBad) badCount += 1
+    if (procU.includes('UE CONTEXT RELEASE')) releaseTimes.push(rowTime(r))
+
+    // 明细表只收语音相关的四类过程，否则 766 条会把表撑爆
+    const relevant = iface === 'SGS'
+      || procU.includes('EXTENDED SERVICE REQUEST')
+      || procU.includes('PAGING')
+      || strU(cause).includes('CS FALLBACK TRIGGERED')
+    if (relevant) {
+      steps.push({
+        time: rowTime(r), iface: str(r.interface) || '—',
+        proc: proc || '—', cause: cause || '—',
+        status: str(r.procedure_status) || '—',
+        cell: str(r.cellname || r.cell || r.cellid) || '—',
+      })
+    }
+  }
+
+  // 1300 的 qci=1（VoLTE 语音承载）
+  let qci1 = 0
+  for (const r of r1300) {
+    if (str(r.qci) === '1') qci1 += 1
+  }
+
+  // 回落耗时：每次 ESR 找它之后最近的 release，差值 > 0 且 < 30s 才算有效样本
+  let fallbackMs: number | null = null
+  const deltas: number[] = []
+  const parse = (t: string) => {
+    const d = new Date(t.replace(' ', 'T').replace(/\.\d+$/, ''))
+    return Number.isNaN(d.getTime()) ? null : d.getTime()
+  }
+  for (const et of esrTimes) {
+    const e = parse(et)
+    if (e === null) continue
+    for (const rt of releaseTimes) {
+      const r = parse(rt)
+      if (r === null || r < e) continue
+      const d = r - e
+      if (d >= 0 && d <= 30000) { deltas.push(d); break }
+    }
+  }
+  if (deltas.length) fallbackMs = Math.round(mean(deltas))
+
+  const mode: VoiceResult['mode'] = qci1 > 0 ? 'volte' : (csfbTrigger > 0 || esrCount > 0 || sgsCount > 0 ? 'csfb' : 'none')
+  const successRate = esrTotal ? +((esrOk / esrTotal) * 100).toFixed(1) : null
+
+  const evidence: I18nText[] = []
+  if (mode === 'none') evidence.push(tx('vmaxq.vd.ev.voiceNone'))
+  if (sgsCount) evidence.push(tx('vmaxq.vd.ev.voiceSgs', { n: sgsCount }))
+  if (csfbTrigger) evidence.push(tx('vmaxq.vd.ev.voiceCsfb', { n: csfbTrigger }))
+  if (esrCount) evidence.push(tx('vmaxq.vd.ev.voiceEsr', { n: esrCount, ok: esrOk }))
+  if (fallbackMs !== null) {
+    // 「偏慢」单独成 key，不拼在句子尾巴上：中英文语序不同，
+    // 英文里要写成 "… (slow)" 跟在数值后，中文是「…（偏慢）」，
+    // 拼字符串的写法没法适配，所以用两个 key。
+    evidence.push(fallbackMs > THRESHOLDS.csfbFallback
+      ? tx('vmaxq.vd.ev.voiceFallbackSlow', { v: ms(fallbackMs) })
+      : tx('vmaxq.vd.ev.voiceFallback', { v: ms(fallbackMs) }))
+  }
+  if (qci1) evidence.push(tx('vmaxq.vd.ev.voiceQci1', { n: qci1 }))
+  if (pagingCount) {
+    evidence.push(badCount
+      ? tx('vmaxq.vd.ev.voicePagingBad', { n: pagingCount, bad: badCount })
+      : tx('vmaxq.vd.ev.voicePaging', { n: pagingCount }))
+  }
+
+  return {
+    mode, sgsCount, csfbTrigger, esrCount, pagingCount, badCount,
+    successRate, fallbackMs, steps, qci1, evidence,
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * 八、OTT 语音视频（方案 §4.7）—— 间接判据，不是应用层结论
+ * ------------------------------------------------------------------------ */
+
+export type OttSession = {
+  startTime: string
+  app: string
+  durationS: number
+  dlTraffic: string
+  dlRtt: number
+  ulRtt: number
+  retransRate: number
+}
+
+export type OttResult = {
+  sessions: OttSession[]
+  totalSessions: number
+  totalDurationS: number
+  avgDlRtt: number
+  jitter: number
+  retransRate: number
+  /** 基线（非通话时段）下行 RTT，用于对照「通话期间是否更差」 */
+  baselineRtt: number
+  evidence: I18nText[]
+}
+
+/**
+ * OTT 通话识别 —— 三路间接判据（方案 §4.7）。
+ *
+ * ⚠ 诚实的边界：**没有 SIP / RTP**。实测 1300 全量扫描 protocol ∈ {SIP,RTP}
+ *   命中 0 条；`service=VoIP` 的 20 条全部是 `subservice=STUN`。
+ *   所以这里只能识别「通话存在 + 通话期网络质量」，
+ *   不能识别「对方拒接 / 注册失败」——这条要写在页面上（vmaxq.ott.limitBody）。
+ */
+export function analyzeOtt(sources: SourceResult[]): OttResult {
+  const rows = rowsOf(sources, '1300')
+  const sessions: OttSession[] = []
+  const callRtts: number[] = []
+  const otherRtts: number[] = []
+  let retransSum = 0
+  let pktSum = 0
+
+  for (const r of rows) {
+    const sub = strU(r.subservice)
+    const app = strU(r.app_content_name)
+    const proto = strU(r.protocol)
+    const durMs = num(r.duration)
+    const dlRtt = num(r.dl_avg_rtt)
+    const dlTrafficKb = num(r.dl_traffic)
+
+    // 判据 ①：STUN（WebRTC 打洞，微信/WhatsApp 通话必经）
+    // 判据 ②：QUIC / WHATSAPP_* 长连接 + 时长 ≥ 10s + 码率低（长连接低码率 = 语音态）
+    const isStun = sub === 'STUN' || proto === 'STUN'
+    const lowBitrate = dlTrafficKb > 0 && (dlTrafficKb / Math.max(durMs / 1000, 1)) < 40
+    const isLongCall = (app.includes('WHATSAPP') || proto === 'QUIC' || sub.includes('VOIP'))
+      && durMs >= THRESHOLDS.ottMinDuration * 1000
+      && lowBitrate
+
+    if (isStun || isLongCall) {
+      const ul = num(r.ul_pkt)
+      const dl = num(r.dl_pkt)
+      const rt = num(r.ul_retrans_pkt) + num(r.dl_retrans_pkt)
+      sessions.push({
+        startTime: rowTime(r),
+        app: str(r.app_content_name) || str(r.subservice) || '—',
+        durationS: Math.round(durMs / 1000),
+        dlTraffic: dlTrafficKb >= 1024 ? `${(dlTrafficKb / 1024).toFixed(1)} MB` : `${Math.round(dlTrafficKb)} KB`,
+        dlRtt: Math.round(dlRtt),
+        ulRtt: Math.round(num(r.ul_avg_rtt)),
+        retransRate: (ul + dl) > 0 ? +((rt / (ul + dl)) * 100).toFixed(2) : 0,
+      })
+      if (dlRtt > 0) callRtts.push(dlRtt)
+      retransSum += rt
+      pktSum += ul + dl
+    } else if (dlRtt > 0) {
+      otherRtts.push(dlRtt)
+    }
+  }
+
+  const totalDurationS = sessions.reduce((a, s) => a + s.durationS, 0)
+  const avgDlRtt = Math.round(mean(callRtts))
+  const jitter = Math.round(stdDev(callRtts))
+  const retransRate = pktSum > 0 ? +((retransSum / pktSum) * 100).toFixed(2) : 0
+  const baselineRtt = Math.round(mean(otherRtts))
+
+  const evidence: I18nText[] = []
+  if (!sessions.length) {
+    evidence.push(tx('vmaxq.vd.ev.ottNone'))
+  } else {
+    evidence.push(tx('vmaxq.vd.ev.ottSessions', { n: sessions.length, dur: durText(totalDurationS) }))
+    evidence.push(tx('vmaxq.vd.ev.ottRtt', { rtt: avgDlRtt, jitter }))
+    if (baselineRtt) {
+      const ratio = baselineRtt ? +(avgDlRtt / baselineRtt).toFixed(1) : '—'
+      evidence.push(tx('vmaxq.vd.ev.ottBaseline', { base: baselineRtt, ratio }))
+    }
+  }
+  evidence.push(tx('vmaxq.vd.ev.ottNoSip'))
+
+  return { sessions, totalSessions: sessions.length, totalDurationS, avgDlRtt, jitter, retransRate, baselineRtt, evidence }
+}
+
+/* ---------------------------------------------------------------------------
+ * 八半、OTT 文本消息（WhatsApp 发消息，2026-11-08 P0-2）
+ * ---------------------------------------------------------------------------
+ * 与 analyzeOtt（通话）的区别：WhatsApp 发文本是**短连接**——DNS 解析 →
+ * TCP 建连 → TLS → 双向小包确认。它在 1300 里表现为小流量、短时长的
+ * WhatsApp 行。XDR 里**没有 DNS 结果、没有 TLS 结果、没有应用层 ack**，
+ * 所以这里只能判到「TCP 层之前/附近」，判不到「消息已送达」——
+ * 结论必须把这个边界写出来，不能硬下「发送失败」。
+ * DNS 专表 fact_5gsa_psup_dns 已在上游表清单里（vmax_xdr_client.py），
+ * 补 DNS 判据是 P1（需要新增一源取数）。
+ * ------------------------------------------------------------------------ */
+
+export type OttTextStage =
+  | 'unknown' | 'no_rows' | 'no_traffic' | 'handshake_slow' | 'small_idle' | 'bidirectional'
+
+export type OttTextResult = {
+  rows: number
+  /** WhatsApp 行的双向流量合计（KB，上游单位即 KB） */
+  trafficKb: number
+  ulKb: number
+  dlKb: number
+  /** 首包时延最大值（ms），无则 0 */
+  firstRespMax: number
+  stage: OttTextStage
+  evidence: I18nText[]
+}
+
+const isWhatsAppRow = (r: XdrRow): boolean => {
+  const blob = `${strU(r.app_content_name)} ${strU(r.subservice)} ${strU(r.protocol)} ${strU(r.service)}`
+  return blob.includes('WHATSAPP') || blob.includes('WHATSAPP_')
+}
+
+/** WhatsApp 文本消息的 TCP 层判据（诚实边界：判不到 DNS/TLS/ack） */
+export function analyzeOttText(sources: SourceResult[]): OttTextResult {
+  const rows = rowsOf(sources, '1300')
+  const wa = rows.filter(isWhatsAppRow)
+  if (!wa.length) {
+    return {
+      rows: 0, trafficKb: 0, ulKb: 0, dlKb: 0, firstRespMax: 0, stage: 'no_rows',
+      evidence: [tx('vmaxq.vd.ev.ottTextNone')],
+    }
+  }
+  let ulKb = 0, dlKb = 0, firstRespMax = 0
+  for (const r of wa) {
+    ulKb += num(r.ul_traffic)
+    dlKb += num(r.dl_traffic)
+    const fr = num(r.$first_resp_delay) || num(r.$first_req_delay)
+    if (fr > firstRespMax) firstRespMax = fr
+  }
+  const trafficKb = ulKb + dlKb
+  let stage: OttTextStage
+  if (trafficKb <= 0) stage = 'no_traffic'
+  else if (firstRespMax > THRESHOLDS.firstRespP90 && trafficKb < 1024) stage = 'handshake_slow'
+  else if (trafficKb < THRESHOLDS.ottTextIdleKb) stage = 'small_idle'
+  else stage = 'bidirectional'
+
+  const evidence: I18nText[] = [tx('vmaxq.vd.ev.ottTextRows', { n: wa.length, kb: Math.round(trafficKb) })]
+  if (stage === 'no_traffic') evidence.push(tx('vmaxq.vd.ev.ottTextNoTraffic'))
+  if (stage === 'handshake_slow') evidence.push(tx('vmaxq.vd.ev.ottTextSlow', { v: ms(firstRespMax) }))
+  if (stage === 'small_idle') evidence.push(tx('vmaxq.vd.ev.ottTextIdle'))
+  if (stage === 'bidirectional') evidence.push(tx('vmaxq.vd.ev.ottTextOk', { ul: Math.round(ulKb), dl: Math.round(dlKb) }))
+  evidence.push(tx('vmaxq.vd.ev.ottTextBoundary'))
+  return { rows: wa.length, trafficKb: Math.round(trafficKb), ulKb: Math.round(ulKb), dlKb: Math.round(dlKb), firstRespMax: Math.round(firstRespMax), stage, evidence }
+}
+
+/* ---------------------------------------------------------------------------
+ * 八半二、终端画像（2026-11-08）
+ * ---------------------------------------------------------------------------
+ * 回答「这是什么终端、在什么网络」：IMEI/机型/制式/APN/QCI。
+ * 边界（用户 2026-11-08 明确）：身份 ≠ 能力——IMEI/机型/RAT 不能证明
+ * 载波聚合/MIMO 层数；UE 能力要 UE-EUTRA-Capability，XDR 里没有。
+ * IMEI 仅作画像展示，不参与任何结论。
+ * ------------------------------------------------------------------------ */
+
+export type TerminalProfile = {
+  imei: string
+  model: string
+  brand: string
+  rat: string
+  apn: string
+  /** 主 QCI（出现最多的取值） */
+  qciMain: string
+  /** 终端字段填充行数（0 = 无画像） */
+  samples: number
+}
+
+/** 终端画像：1300/1100 的 imei/ue_model/rat_name/apn + 1300 的 qci 主值 */
+export function analyzeTerminal(sources: SourceResult[]): TerminalProfile {
+  const pick = (key: string, field: string): string => {
+    const rows = rowsOf(sources, key)
+    for (const r of rows) {
+      const v = str(r[field])
+      if (v && v !== '-' && v !== '--') return v
+    }
+    return ''
+  }
+  const qciRows = rowsOf(sources, '1300')
+  const qciCount = new Map<string, number>()
+  for (const r of qciRows) {
+    const q = str(r.qci)
+    if (q) qciCount.set(q, (qciCount.get(q) || 0) + 1)
+  }
+  let qciMain = ''
+  let best = 0
+  for (const [q, n] of qciCount) {
+    if (n > best) { best = n; qciMain = q }
+  }
+  return {
+    imei: pick('1300', 'imei') || pick('1100', 'imei'),
+    model: pick('1300', 'ue_model') || pick('1100', 'ue_model'),
+    brand: pick('1300', 'ue_brand') || pick('1100', 'ue_brand'),
+    rat: pick('1300', 'rat_name') || pick('1100', 'rat_name'),
+    apn: pick('1300', 'apn') || pick('1100', 'apn'),
+    qciMain,
+    samples: qciRows.length,
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * 八半三、限速推断（2026-11-08，间接证据）
+ * ---------------------------------------------------------------------------
+ * Gx 的授权带宽 AVP（Max-Requested-Bandwidth / APN-Aggregate / GBR）在本部署
+ * Talon 未采（见 README「Gy/Gx 可用性」），这里用 1300 的
+ * `dl/ul_throughput_max` 分布**间接推断有效天花板**：
+ *  - 样本 < 30 条或总流量 < 10MB：样本不足，显式说无法推断；
+ *  - 否则以 P90 为天花板估计（峰值易受单流抖动污染），并明确标注
+ *    「观测天花板 ≠ 授权上限」。
+ * ------------------------------------------------------------------------ */
+
+export type RateCeiling = {
+  qci: string
+  samples: number
+  /** 下行天花板估计（Kbps，P90） */
+  dlP90Kbps: number
+  /** 下行峰值（Kbps） */
+  dlPeakKbps: number
+  ulP90Kbps: number
+  ulPeakKbps: number
+  /** 是否可推断（样本与流量双门槛） */
+  inferable: boolean
+}
+
+export type RateCeilingResult = {
+  rows: RateCeiling[]
+  evidence: I18nText[]
+}
+
+/** 限速推断：每 QCI 的下/上行观测天花板（间接证据，非授权值） */
+export function analyzeRateCeiling(sources: SourceResult[]): RateCeilingResult {
+  const rows = rowsOf(sources, '1300')
+  const byQci = new Map<string, { dl: number[]; ul: number[]; traffic: number }>()
+  for (const r of rows) {
+    const q = str(r.qci) || '?'
+    let b = byQci.get(q)
+    if (!b) { b = { dl: [], ul: [], traffic: 0 }; byQci.set(q, b) }
+    const dl = num(r.dl_throughput_max)
+    const ul = num(r.ul_throughput_max)
+    if (dl > 0) b.dl.push(dl)
+    if (ul > 0) b.ul.push(ul)
+    b.traffic += num(r.ul_traffic) + num(r.dl_traffic)
+  }
+  const out: RateCeiling[] = [...byQci.entries()].map(([qci, b]) => ({
+    qci,
+    samples: b.dl.length,
+    dlP90Kbps: Math.round(percentile(b.dl, 0.9)),
+    dlPeakKbps: Math.round(b.dl.length ? Math.max(...b.dl) : 0),
+    ulP90Kbps: Math.round(percentile(b.ul, 0.9)),
+    ulPeakKbps: Math.round(b.ul.length ? Math.max(...b.ul) : 0),
+    // 双门槛：样本 >=30 且该 QCI 总流量 >= 10MB（10240KB）
+    inferable: b.dl.length >= 30 && b.traffic >= 10240,
+  })).sort((a, b) => b.samples - a.samples)
+
+  const evidence: I18nText[] = []
+  if (!out.length) {
+    evidence.push(tx('vmaxq.vd.ev.rateNoData'))
+  } else if (!out.some((r) => r.inferable)) {
+    evidence.push(tx('vmaxq.vd.ev.rateInsufficient', { n: out[0].samples }))
+  } else {
+    const best = out.find((r) => r.inferable)!
+    evidence.push(tx('vmaxq.vd.ev.rateCeiling', {
+      qci: best.qci, dl: best.dlP90Kbps, ul: best.ulP90Kbps, n: best.samples,
+    }))
+  }
+  evidence.push(tx('vmaxq.vd.ev.rateBoundary'))
+  return { rows: out, evidence }
+}
+
+/* ---------------------------------------------------------------------------
+ * 八半四、数据阻断嫌疑（2026-11-09：欠费的间接证据）
+ * ---------------------------------------------------------------------------
+ * Gy 未采、S6a 未采时，欠费/配额耗尽的**直接**证据拿不到。但有一组可
+ * 观测的组合指纹：附着成功（人在网）+ 有访问尝试（1300 里有小流量/慢首包
+ * 的行）+ 流量几乎为零（尝试没走通）。三者同时成立时，
+ * 「PGW 侧阻断数据业务」（配额耗尽/停机是其常见原因）嫌疑成立——
+ * 但这只是**嫌疑**：DNS/防火墙/应用本身也可能表现为同样指纹，
+ * 所以置信度封顶 60，且待补证据里显式列出 Gy 未查与基线未比。
+ * 反证：总流量 ≥1MB 即数据在走，不成立。
+ * ------------------------------------------------------------------------ */
+
+export type DataBlockResult = {
+  attachSuccess: number
+  totalTrafficKb: number
+  attemptedBlocked: number
+  voiceOk: boolean
+  suspect: boolean
+  evidence: I18nText[]
+}
+
+/** 数据阻断嫌疑：附着成功 + 有尝试无流量（欠费间接指纹） */
+export function analyzeDataBlock(sources: SourceResult[]): DataBlockResult {
+  const r1100 = rowsOf(sources, '1100')
+  const r1300 = rowsOf(sources, '1300')
+  let attachSuccess = 0
+  for (const r of r1100) {
+    if (strU(r.procedure_status) === 'SUCCESS') attachSuccess += 1
+  }
+  let totalTrafficKb = 0
+  let attemptedBlocked = 0
+  let voiceOk = false
+  for (const r of r1300) {
+    const kb = num(r.ul_traffic) + num(r.dl_traffic)
+    totalTrafficKb += kb
+    if (str(r.qci) === '1') voiceOk = true
+    const fr = num(r.$first_resp_delay)
+    const tcp = num(r.$tcp_resp_delay) || num(r.tcp_resp_delay)
+    // 有尝试无流量：流量极小但首包/握手很慢（请求发出、响应没回来）
+    if (kb < 1 && (fr > THRESHOLDS.firstRespP90 || tcp > THRESHOLDS.tcpResp)) {
+      attemptedBlocked += 1
+    }
+  }
+  const suspect = attachSuccess >= 5 && totalTrafficKb < 50 && attemptedBlocked >= 3
+  const evidence: I18nText[] = []
+  if (attachSuccess) evidence.push(tx('vmaxq.vd.ev.datablockAttach', { n: attachSuccess }))
+  if (attemptedBlocked) evidence.push(tx('vmaxq.vd.ev.datablockAttempt', { n: attemptedBlocked }))
+  if (voiceOk) evidence.push(tx('vmaxq.vd.ev.datablockVoice'))
+  if (suspect) evidence.push(tx('vmaxq.vd.ev.datablockSuspect'))
+  return { attachSuccess, totalTrafficKb: Math.round(totalTrafficKb), attemptedBlocked, voiceOk, suspect, evidence }
+}
+
+/* ---------------------------------------------------------------------------
+ * 九、游戏识别（方案 §4.3）—— 三档规则，关键词外置
+ * ------------------------------------------------------------------------ */
+
+/**
+ * 游戏关键词（与后端 `vmax_game_apps.json` 同步）。
+ * 评审意见 2：「话单里有时候会有 egame 之类的」→ 必须包含 egame。
+ */
+export const GAME_KEYWORDS = [
+  'egame', 'e-game', 'pubg', 'freefire', 'free fire', 'garena', 'mlbb',
+  'mobilelegends', 'mobile legends', 'genshin', 'honorofkings', 'honor of kings',
+  'clashofclans', 'clash of clans', 'crossfire', 'pointblank', 'point blank',
+  'callofduty', 'codmobile', 'roblox', 'minecraft', 'amongus', 'subwaysurf',
+  'kingofglory', 'arenaofvalor', 'mobile game', 'gameloft', 'supercell',
+  '王者荣耀', '和平精英', '原神', '崩坏', '荒野行动', '穿越火线', '皇室战争', '金铲铲',
+]
+
+/** 应用商店黑名单：名字里带 play / game 但不是游戏（实测误判源） */
+export const GAME_EXCLUDE = ['palmplaystore', 'googleplay', 'play store', 'appstore', 'app store', 'huawei_appgallery']
+
+export type GameHit = {
+  app: string
+  /** 命中档位：service / keyword / suspect */
+  tier: 'service' | 'keyword' | 'suspect'
+  records: number
+  trafficKb: number
+  avgRtt: number
+  jitter: number
+  retransRate: number
+}
+
+export type GameResult = {
+  hits: GameHit[]
+  totalSessions: number
+  evidence: I18nText[]
+}
+
+export function analyzeGame(sources: SourceResult[]): GameResult {
+  const rows = rowsOf(sources, '1300')
+  const agg = new Map<string, {
+    tier: GameHit['tier']; records: number; traffic: number
+    rtts: number[]; retrans: number; pkt: number
+  }>()
+
+  for (const r of rows) {
+    const service = strU(r.service)
+    const blob = `${strU(r.subservice)} ${strU(r.app_content_name)}`
+    const low = blob.toLowerCase()
+
+    // 商店先排除，再判游戏 —— 否则 PALMPLAYSTORE 会被 ③ 兜底误收
+    if (GAME_EXCLUDE.some((k) => low.includes(k))) continue
+
+    let tier: GameHit['tier'] | null = null
+    if (service === 'GAME' || service === 'GAMING') tier = 'service'
+    else if (GAME_KEYWORDS.some((k) => low.includes(k))) tier = 'keyword'
+    else if ((low.includes('game') || low.includes('play')) && service !== 'NETWORK STORAGE') tier = 'suspect'
+
+    if (!tier) continue
+
+    const app = str(r.app_content_name) || str(r.subservice) || str(r.service) || '—'
+    const cur = agg.get(app) || { tier, records: 0, traffic: 0, rtts: [], retrans: 0, pkt: 0 }
+    cur.records += 1
+    cur.traffic += num(r.ul_traffic) + num(r.dl_traffic)
+    cur.retrans += num(r.ul_retrans_pkt) + num(r.dl_retrans_pkt)
+    cur.pkt += num(r.ul_pkt) + num(r.dl_pkt)
+    const rtt = num(r.dl_avg_rtt) || num(r.ul_avg_rtt)
+    if (rtt > 0) cur.rtts.push(rtt)
+    agg.set(app, cur)
+  }
+
+  const hits: GameHit[] = [...agg.entries()].map(([app, v]) => ({
+    app,
+    tier: v.tier,
+    records: v.records,
+    trafficKb: Math.round(v.traffic),
+    avgRtt: Math.round(mean(v.rtts)),
+    jitter: Math.round(stdDev(v.rtts)),
+    retransRate: v.pkt > 0 ? +((v.retrans / v.pkt) * 100).toFixed(2) : 0,
+  })).sort((a, b) => b.records - a.records)
+
+  const totalSessions = hits.reduce((a, h) => a + h.records, 0)
+  const evidence: I18nText[] = []
+  if (!hits.length) {
+    evidence.push(tx('vmaxq.vd.ev.gameNone'))
+  } else {
+    evidence.push(tx('vmaxq.vd.ev.gameHits', { apps: hits.length, n: totalSessions }))
+    const worst = [...hits].sort((a, b) => b.avgRtt - a.avgRtt)[0]
+    if (worst && worst.avgRtt) evidence.push(tx('vmaxq.vd.ev.gameWorst', { app: worst.app, rtt: worst.avgRtt, jitter: worst.jitter }))
+    const suspected = hits.filter((h) => h.tier === 'suspect')
+    if (suspected.length) evidence.push(tx('vmaxq.vd.ev.gameSuspected', { n: suspected.length }))
+  }
+
+  return { hits, totalSessions, evidence }
+}
+
+/* ---------------------------------------------------------------------------
+ * 十、证据时间线（方案 §4.9）
+ * ------------------------------------------------------------------------ */
+
+export type TimelineCell = {
+  /** 该分钟该源的摘要文本（i18n key + 参数；纯数值/「—」也用 key，保持类型统一） */
+  text: I18nText
+  /** 严重度：驱动染色 */
+  level: 'ok' | 'warn' | 'bad' | 'none'
+  /** 下钻用的原始行 */
+  rows: XdrRow[]
+}
+
+export type TimelineRow = {
+  minute: string
+  traffic: TimelineCell
+  latency: TimelineCell
+  transport: TimelineCell
+  radio: TimelineCell
+  voice: TimelineCell
+  /** 本分钟的结论（由四源交叉得出） */
+  judge: I18nText
+  /** 结论严重度 */
+  level: 'ok' | 'warn' | 'bad' | 'none'
+}
+
+/* ---------------------------------------------------------------------------
+ * 六半、无线质量专项分析（Radio 页签）
+ * ------------------------------------------------------------------------ */
+
+/** 单个小区的 MR 聚合 */
+export type RadioCell = {
+  /** 小区名（上游原文，不翻译 —— 排障时要用它去对网管） */
+  cell: string
+  samples: number
+  rsrpAvg: number
+  /** 该小区最差的 10% 采样（边缘覆盖，比均值重要） */
+  rsrpP10: number
+  sinrAvg: number
+  cqiAvg: number
+  /** 综合严重度，驱动表格染色 */
+  level: 'ok' | 'warn' | 'bad'
+}
+
+/**
+ * 无线分型（2026-11-08 P0-3）：弱覆盖内部再细分。
+ *  - weak_coverage：serving 弱且邻区也弱/无邻区 —— 真覆盖问题
+ *  - handover_late_suspect：serving 弱但有好邻区却没切走 —— 参数/切换问题
+ *  - site_outage_suspect：阶跃消失（非渐变）—— 疑似断站，需告警侧核实
+ *  - interference：RSRP 够但 SINR 差 —— 干扰
+ *  - ok / unknown：正常 / 无数据
+ */
+export type RadioMode = 'weak_coverage' | 'handover_late_suspect' | 'site_outage_suspect' | 'interference' | 'ok' | 'unknown'
+
+/** 分钟桶里的无线趋势点 */
+export type RadioBucket = {
+  minute: string
+  rsrpAvg: number
+  rsrpP10: number
+  sinrAvg: number
+  samples: number
+}
+
+export type RadioAnalysis = {
+  /** 采样总数（0 = 本窗口没有 MR，后面所有字段都没意义） */
+  samples: number
+  rsrpAvg: number
+  rsrpP10: number
+  sinrAvg: number
+  sinrP10: number
+  cqiAvg: number
+  /** 制式分布，如 [{name:'LTE', n:118}, {name:'NR', n:2}] */
+  rats: { name: string; n: number }[]
+  buckets: RadioBucket[]
+  cells: RadioCell[]
+  /** 最差的小区（按 rsrpP10 排序），没有小区时为空串 */
+  worstCell: string
+  /** 一句话结论 */
+  headline: I18nText
+  /** 判据（逐条，界面上列点展示） */
+  basis: I18nText[]
+  /** 结论严重度 */
+  level: 'ok' | 'warn' | 'bad'
+  /** ---- P0-3 无线分型（新增字段；旧调用方不读也不受影响） ---- */
+  /** 无线分型：弱覆盖内部再细分（切换不及时 / 断站嫌疑 / 干扰） */
+  mode: RadioMode
+  /** 最佳邻区 RSRP 的 P10（dBm）；无邻区采样时为 0 */
+  neighborRsrpP10: number
+  /** 邻区采样条数 */
+  neighborSamples: number
+  /** 最佳邻区 − serving P10 的差值（dB）；无邻区时为 0 */
+  neighborGapDb: number
+  /** 是否阶跃消失（前段正常、后段突降且不恢复）—— 断站嫌疑的形态证据 */
+  abruptDrop: boolean
+  /** ---- 2026-11-09 位置/距离分型（新增字段） ---- */
+  /** TA 中位数（米）：到服务小区的距离 */
+  taMedianM: number
+  /** 用户位置中位数（MR 经纬度）；无有效经纬度时为 0 */
+  posLat: number
+  posLon: number
+  /** 位置离散程度（米）：小 = 固定点位，大 = 移动中 */
+  posSpreadM: number
+  /** 邻区数中位数（neighbor_cell_number）；无采样时为 -1 */
+  neighborCountMedian: number
+  /** 到服务站点的距离（km，后端 eflow_site 富化）；未匹配时为 -1 */
+  servingSiteKm: number
+  /** 到最近站点的距离（km）；未知时为 -1 */
+  nearestSiteKm: number
+  nearestSiteName: string
+}
+
+/**
+ * 无线侧专项分析 —— Radio 页签的数据源。
+ *
+ * 与 scoreRadio 的区别：那边只产出一个 0~100 的分数（给四维卡用），
+ * 这里要把「分数为什么是这个值」摊开：趋势、逐小区、结论与判据。
+ * 两者**必须用同一批阈值与同一批采样**，否则会出现
+ * 「评分卡说 62 分、Radio 页签说覆盖良好」这种自相矛盾。
+ *
+ * 只吃 source '32'（RAN/UEMR），不重新取数 —— 诊断接口已经拉过了。
+ */
+export function analyzeRadio(sources: SourceResult[]): RadioAnalysis | null {
+  const rows = rowsOf(sources, '32')
+  const src = sources.find((s) => s.key === '32')
+
+  const empty = (headline: I18nText, basis: I18nText[]): RadioAnalysis => ({
+    samples: 0, rsrpAvg: 0, rsrpP10: 0, sinrAvg: 0, sinrP10: 0, cqiAvg: 0,
+    rats: [], buckets: [], cells: [], worstCell: '',
+    headline, basis, level: 'warn',
+    mode: 'unknown', neighborRsrpP10: 0, neighborSamples: 0, neighborGapDb: 0, abruptDrop: false,
+    taMedianM: 0, posLat: 0, posLon: 0, posSpreadM: 0, neighborCountMedian: -1,
+    servingSiteKm: -1, nearestSiteKm: -1, nearestSiteName: '',
+  })
+
+  if (!rows.length) {
+    // 两种「空」要说清楚，否则用户只会以为「没数据」
+    return empty(
+      src?.error ? tx('vmaxq.radio.headline.err') : tx('vmaxq.radio.headline.empty'),
+      src?.error
+        ? [tx('vmaxq.radio.basis.err', { msg: src.error })]
+        : [tx('vmaxq.radio.basis.empty')],
+    )
+  }
+
+  const rsrpAll = rows.map(rsrpOf).filter((v) => v !== 0)
+  const sinrAll = rows.map(sinrOf).filter((v) => v !== 0)
+  const cqiAll = rows.map(cqiOf).filter((v) => v > 0)
+
+  if (!rsrpAll.length && !sinrAll.length) {
+    // 有 RAN 行但关键字段全空：上游表结构/权限变了，别当成"覆盖良好"
+    return empty(
+      tx('vmaxq.radio.headline.noSample'),
+      [tx('vmaxq.radio.basis.noSample', { n: rows.length })],
+    )
+  }
+
+  // ---- 制式分布 ----
+  const ratMap = new Map<string, number>()
+  for (const r of rows) {
+    const name = str(r.rat_name) || '—'
+    ratMap.set(name, (ratMap.get(name) || 0) + 1)
+  }
+  const rats = [...ratMap.entries()]
+    .map(([name, n]) => ({ name, n }))
+    .sort((a, b) => b.n - a.n)
+
+  // ---- 逐小区 ----
+  const cellMap = new Map<string, { rsrp: number[]; sinr: number[]; cqi: number[] }>()
+  for (const r of rows) {
+    const cell = cellOf(r)
+    let b = cellMap.get(cell)
+    if (!b) { b = { rsrp: [], sinr: [], cqi: [] }; cellMap.set(cell, b) }
+    const rp = rsrpOf(r); if (rp !== 0) b.rsrp.push(rp)
+    const sn = sinrOf(r); if (sn !== 0) b.sinr.push(sn)
+    const cq = cqiOf(r); if (cq > 0) b.cqi.push(cq)
+  }
+  const cells: RadioCell[] = [...cellMap.entries()].map(([cell, b]) => {
+    const p10 = b.rsrp.length ? percentile(b.rsrp, 0.1) : 0
+    const sa = b.sinr.length ? Math.round(mean(b.sinr) * 10) / 10 : 0
+    // 覆盖和干扰各判一次，取更差的那个：
+    // 信号强度够但 SINR 差（干扰）同样打不了电话，只看 RSRP 会漏判。
+    const lv = radioLevel(p10, sa)
+    return {
+      cell, samples: Math.max(b.rsrp.length, b.sinr.length),
+      rsrpAvg: b.rsrp.length ? Math.round(mean(b.rsrp)) : 0,
+      rsrpP10: p10,
+      sinrAvg: sa,
+      cqiAvg: b.cqi.length ? Math.round(mean(b.cqi) * 10) / 10 : 0,
+      level: lv,
+    }
+  })
+  // 最差的小区排前面 —— 投诉定位要的是"哪儿出的问题"，不是"一共几个小区"
+  cells.sort((a, b) => (a.rsrpP10 || -999) - (b.rsrpP10 || -999))
+
+  // ---- 分钟趋势（与证据时间线同一套桶） ----
+  const bucketMap = new Map<string, { rsrp: number[]; sinr: number[] }>()
+  for (const r of rows) {
+    const m = minuteKey(rowTime(r))
+    if (!m) continue
+    let b = bucketMap.get(m)
+    if (!b) { b = { rsrp: [], sinr: [] }; bucketMap.set(m, b) }
+    const rp = rsrpOf(r); if (rp !== 0) b.rsrp.push(rp)
+    const sn = sinrOf(r); if (sn !== 0) b.sinr.push(sn)
+  }
+  const buckets: RadioBucket[] = [...bucketMap.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([minute, b]) => ({
+      minute,
+      rsrpAvg: b.rsrp.length ? Math.round(mean(b.rsrp)) : 0,
+      rsrpP10: b.rsrp.length ? percentile(b.rsrp, 0.1) : 0,
+      sinrAvg: b.sinr.length ? Math.round(mean(b.sinr) * 10) / 10 : 0,
+      samples: b.rsrp.length,
+    }))
+
+  const rsrpP10 = rsrpAll.length ? percentile(rsrpAll, 0.1) : 0
+  const sinrP10 = sinrAll.length ? percentile(sinrAll, 0.1) : 0
+  const rsrpAvg = rsrpAll.length ? Math.round(mean(rsrpAll)) : 0
+  const sinrAvg = sinrAll.length ? Math.round(mean(sinrAll) * 10) / 10 : 0
+  const cqiAvg = cqiAll.length ? Math.round(mean(cqiAll) * 10) / 10 : 0
+
+  // ---- 结论：先判最硬的弱覆盖，再判干扰，最后才说正常 ----
+  const basis: I18nText[] = []
+  let level: 'ok' | 'warn' | 'bad' = 'ok'
+  let headline: I18nText
+
+  if (rsrpAll.length) {
+    basis.push(tx('vmaxq.radio.basis.rsrp', {
+      p10: rsrpP10, avg: rsrpAvg, n: rsrpAll.length,
+    }))
+  }
+  if (sinrAll.length) {
+    basis.push(tx('vmaxq.radio.basis.sinr', { p10: sinrP10, avg: sinrAvg }))
+  }
+
+  // ---- P0-3 邻区：UEMR 有 neighbor_* 列（docs/VMAX_DIAGNOSIS_REDESIGN.md:108），
+  // 后缀未确证，故按前缀通用提取，不写死某一个后缀 ----
+  const neighborAll: number[] = []
+  for (const r of rows) {
+    for (const k of Object.keys(r)) {
+      const lk = k.toLowerCase()
+      if ((lk.startsWith('neighbor_') || lk.startsWith('neigh_') || lk.startsWith('target_'))
+        && lk.includes('rsrp')) {
+        const v = num(r[k])
+        if (v < 0) neighborAll.push(v)
+      }
+    }
+  }
+
+  // ---- 2026-11-09 位置/距离：TA（到服务小区距离）+ MR 经纬度 + 站点距离 ----
+  const taAll = rows.map((r) => num(r.ta_ts)).filter((v) => v > 0)
+  const taMedianM = taAll.length ? Math.round(percentile(taAll, 0.5)) : 0
+  const posAll: Array<{ lat: number; lon: number }> = []
+  for (const r of rows) {
+    const la = num(r.mrlat)
+    const lo = num(r.mrlon)
+    // 哨兵值 -90/-180（上游未定位占位，2026-11-09 实测）与 0 都不算有效位置
+    if (la && lo && Math.abs(la) < 90 && Math.abs(lo) < 180) posAll.push({ lat: la, lon: lo })
+  }
+  const posLat = posAll.length ? percentile(posAll.map((p) => p.lat), 0.5) : 0
+  const posLon = posAll.length ? percentile(posAll.map((p) => p.lon), 0.5) : 0
+  let posSpreadM = 0
+  if (posAll.length > 1) {
+    const dLat = Math.max(...posAll.map((p) => p.lat)) - Math.min(...posAll.map((p) => p.lat))
+    const dLon = Math.max(...posAll.map((p) => p.lon)) - Math.min(...posAll.map((p) => p.lon))
+    posSpreadM = Math.round(Math.sqrt((dLat * 111000) ** 2 + (dLon * 111000 * Math.cos((posLat * Math.PI) / 180)) ** 2))
+  }
+  const nbCount = rows.map((r) => num(r.neighbor_cell_number)).filter((v) => v >= 0)
+  const neighborCountMedian = nbCount.length ? Math.round(percentile(nbCount, 0.5)) : -1
+  // 站点距离（后端 _enrich_site_dist 富化；-1 = 未匹配/未知，不猜）
+  const svKm = rows.map((r) => num(r._site_km_serving)).filter((v) => v >= 0)
+  const nrKm = rows.map((r) => num(r._site_km_nearest)).filter((v) => v >= 0)
+  const servingSiteKm = svKm.length ? Math.round(percentile(svKm, 0.5) * 100) / 100 : -1
+  const nearestSiteKm = nrKm.length ? Math.round(percentile(nrKm, 0.5) * 100) / 100 : -1
+  const nearestSiteName = str(rows.find((r) => str(r._site_nearest))?._site_nearest) || ''
+  const neighborRsrpP10 = neighborAll.length ? percentile(neighborAll, 0.1) : 0
+  const neighborGapDb = neighborAll.length && rsrpAll.length
+    ? Math.round((neighborRsrpP10 - rsrpP10) * 10) / 10 : 0
+
+  // ---- P0-3 阶跃消失：分钟均值从 ≥-95 突降到 ≤-115 且之后不恢复 ----
+  // 渐变弱（覆盖边缘来回走）不会命中：中间桶会先出现过渡值。
+  let abruptDrop = false
+  {
+    const vals = buckets.map((b) => b.rsrpAvg).filter((v) => v !== 0)
+    for (let i = 1; i < vals.length; i += 1) {
+      if (vals[i - 1] >= -95 && vals[i] <= THRESHOLDS.rsrp - 5
+        && vals.slice(i).every((v) => v < -100)) {
+        abruptDrop = true
+        break
+      }
+    }
+  }
+
+  const weak = rsrpAll.length && rsrpP10 < THRESHOLDS.rsrp
+  const noisy = sinrAll.length && sinrP10 < THRESHOLDS.sinr
+  const hasGoodNeighbor = neighborAll.length > 0
+    && neighborRsrpP10 >= THRESHOLDS.neighborGood && neighborGapDb >= THRESHOLDS.neighborGap
+
+  let mode: RadioMode = 'ok'
+  if (weak && abruptDrop) {
+    mode = 'site_outage_suspect'
+    level = 'bad'
+    headline = tx('vmaxq.radio.headline.siteSuspect', { v: rsrpP10 })
+    basis.push(tx('vmaxq.radio.basis.siteSuspect'))
+  } else if (weak && hasGoodNeighbor) {
+    mode = 'handover_late_suspect'
+    level = 'bad'
+    headline = tx('vmaxq.radio.headline.handover', { v: rsrpP10, nb: neighborRsrpP10 })
+    basis.push(tx('vmaxq.radio.basis.handover', { gap: neighborGapDb }))
+  } else if (weak) {
+    mode = 'weak_coverage'
+    level = 'bad'
+    headline = tx('vmaxq.radio.headline.weak', { v: rsrpP10 })
+    if (!neighborAll.length) basis.push(tx('vmaxq.radio.basis.noNeighbor'))
+  } else if (noisy) {
+    mode = 'interference'
+    level = 'warn'
+    headline = tx('vmaxq.radio.headline.noisy', { v: sinrP10 })
+  } else {
+    headline = tx('vmaxq.radio.headline.ok')
+  }
+  if (neighborAll.length) {
+    basis.push(tx('vmaxq.radio.basis.neighbor', { p10: neighborRsrpP10, n: neighborAll.length }))
+  }
+  if (abruptDrop && mode !== 'site_outage_suspect') {
+    basis.push(tx('vmaxq.radio.basis.abrupt'))
+    if (level === 'ok') level = 'warn'
+  }
+  // ---- 2026-11-09 距离/位置细化（只加证据，不改 mode 枚举） ----
+  if (taAll.length) {
+    basis.push(tx('vmaxq.radio.basis.ta', { v: taMedianM }))
+    if (weak && taMedianM > 3000 && !hasGoodNeighbor) {
+      basis.push(tx('vmaxq.radio.basis.farWeak'))
+    }
+    if (weak && taMedianM <= 1000) {
+      basis.push(tx('vmaxq.radio.basis.nearWeak'))
+    }
+  }
+  if (posAll.length) {
+    basis.push(tx('vmaxq.radio.basis.pos', {
+      lat: posLat.toFixed(4), lon: posLon.toFixed(4), spread: posSpreadM,
+    }))
+    if (nearestSiteKm >= 0) {
+      basis.push(tx('vmaxq.radio.basis.nearestSite', {
+        km: nearestSiteKm, name: nearestSiteName || '—',
+        sv: servingSiteKm >= 0 ? servingSiteKm : '—',
+      }))
+      // 用户在站点旁边（<500m）却驻留弱 serving 且邻区更好 → 切换/站点侧问题
+      if (weak && nearestSiteKm < 0.5 && hasGoodNeighbor) {
+        basis.push(tx('vmaxq.radio.basis.atSite'))
+      }
+    }
+  }
+  if (neighborCountMedian === 0 && weak) {
+    basis.push(tx('vmaxq.radio.basis.isolated'))
+  }
+
+  // 只在"确实存在明显更差的小区"时才点名，避免大窗口里正常波动也报小区
+  const worst = cells.find((c) => c.level === 'bad') || cells.find((c) => c.level === 'warn')
+  if (worst && (weak || noisy)) {
+    basis.push(tx('vmaxq.radio.basis.worstCell', {
+      cell: worst.cell, rsrp: worst.rsrpP10, sinr: worst.sinrAvg, n: worst.samples,
+    }))
+  }
+  if (buckets.length > 1) {
+    // 波动大 = 用户在移动/边缘来回切，比"平均差"更值得提示
+    const vals = buckets.map((b) => b.rsrpAvg).filter((v) => v !== 0)
+    if (vals.length > 1) {
+      const lo = Math.min(...vals)
+      const hi = Math.max(...vals)
+      if (hi - lo >= 15) {
+        basis.push(tx('vmaxq.radio.basis.fluctuate', { lo, hi }))
+        if (level === 'ok') level = 'warn'
+      }
+    }
+  }
+
+  return {
+    samples: Math.max(rsrpAll.length, sinrAll.length),
+    rsrpAvg, rsrpP10, sinrAvg, sinrP10, cqiAvg,
+    rats, buckets, cells,
+    worstCell: worst?.cell || '',
+    headline, basis, level,
+    mode, neighborRsrpP10, neighborSamples: neighborAll.length, neighborGapDb, abruptDrop,
+    taMedianM, posLat, posLon, posSpreadM, neighborCountMedian,
+    servingSiteKm, nearestSiteKm, nearestSiteName,
+  }
+}
+
+/** 未带 cellname 的行归到这一类（上游偶发缺字段） */
+const t_unknownCell = (): string => '—'
+
+/** 覆盖 + 干扰取更差（与 cells 里同一判据，抽出来避免两处漂移） */
+function radioLevel(rsrpP10: number, sinrAvg: number): 'ok' | 'warn' | 'bad' {
+  if (rsrpP10 !== 0 && rsrpP10 < THRESHOLDS.rsrp) return 'bad'
+  if (sinrAvg !== 0 && sinrAvg < THRESHOLDS.sinr) return 'bad'
+  if (rsrpP10 !== 0 && rsrpP10 < -100) return 'warn'
+  if (sinrAvg !== 0 && sinrAvg < 5) return 'warn'
+  return 'ok'
+}
+
+/**
+ * 按分钟桶聚合四源。
+ *
+ * 为什么按分钟：投诉说的是「八点十几分视频卡」，分钟粒度刚好对得上，
+ * 又不会被单条话单（秒级）淹没。跨源交叉判断必须落在同一个桶里。
+ */
+export function buildTimeline(sources: SourceResult[]): TimelineRow[] {
+  type Bucket = {
+    traffic: number; firstResp: number[]; retrans: number; pkt: number
+    rsrp: number[]; sinr: number[]
+    voiceBad: number; voiceOk: number; csfb: number
+    rows: Record<string, XdrRow[]>
+  }
+  const buckets = new Map<string, Bucket>()
+  const get = (m: string): Bucket => {
+    let b = buckets.get(m)
+    if (!b) {
+      b = {
+        traffic: 0, firstResp: [], retrans: 0, pkt: 0,
+        rsrp: [], sinr: [], voiceBad: 0, voiceOk: 0, csfb: 0,
+        rows: { '1300': [], '1100': [], '32': [] },
+      }
+      buckets.set(m, b)
+    }
+    return b
+  }
+
+  for (const r of rowsOf(sources, '1300')) {
+    const m = minuteKey(rowTime(r))
+    if (!m) continue
+    const b = get(m)
+    b.traffic += num(r.ul_traffic) + num(r.dl_traffic)
+    const fr = num(r.$first_resp_delay)
+    if (fr > 0) b.firstResp.push(fr)
+    b.retrans += num(r.ul_retrans_pkt) + num(r.dl_retrans_pkt)
+    b.pkt += num(r.ul_pkt) + num(r.dl_pkt)
+    b.rows['1300'].push(r)
+  }
+  for (const r of rowsOf(sources, '1100')) {
+    const m = minuteKey(rowTime(r))
+    if (!m) continue
+    const b = get(m)
+    const st = strU(r.procedure_status)
+    if (st === 'TIMEOUT' || st === 'FAILURE') b.voiceBad += 1
+    else if (st === 'SUCCESS') b.voiceOk += 1
+    if (strU(r.request_cause).includes('CS FALLBACK TRIGGERED')) b.csfb += 1
+    b.rows['1100'].push(r)
+  }
+  for (const r of rowsOf(sources, '32')) {
+    const m = minuteKey(rowTime(r))
+    if (!m) continue
+    const b = get(m)
+    const rsrp = num(r.serving_rsrp)
+    if (rsrp !== 0) b.rsrp.push(rsrp)
+    const sinr = num(r.ulsinr)
+    if (sinr !== 0) b.sinr.push(sinr)
+    b.rows['32'].push(r)
+  }
+
+  const kb = (v: number) => (v < 1024 ? `${Math.round(v)} KB` : `${(v / 1024).toFixed(1)} MB`)
+
+  const out: TimelineRow[] = [...buckets.entries()].map(([minute, b]) => {
+    const traffic: TimelineCell = b.traffic > 0
+      ? { text: tx('vmaxq.vd.tl.kb', { v: kb(b.traffic) }), level: 'none', rows: b.rows['1300'] }
+      : { text: tx('vmaxq.vd.dash'), level: 'none', rows: [] }
+
+    const p90 = percentile(b.firstResp, 0.9)
+    const latency: TimelineCell = p90 > 0
+      ? {
+        text: tx('vmaxq.vd.tl.firstResp', { v: ms(p90) }),
+        level: p90 > THRESHOLDS.firstRespP90 ? 'bad' : p90 > THRESHOLDS.firstRespP90 / 2 ? 'warn' : 'ok',
+        rows: b.rows['1300'],
+      }
+      : { text: tx('vmaxq.vd.dash'), level: 'none', rows: [] }
+
+    const rr = b.pkt > 0 ? (b.retrans / b.pkt) * 100 : 0
+    const transport: TimelineCell = b.pkt > 0
+      ? {
+        text: tx('vmaxq.vd.tl.retrans', { v: pct(rr) }),
+        level: rr > THRESHOLDS.retrans ? 'bad' : rr > THRESHOLDS.retrans / 2 ? 'warn' : 'ok',
+        rows: b.rows['1300'],
+      }
+      : { text: tx('vmaxq.vd.dash'), level: 'none', rows: [] }
+
+    const rsrpMin = b.rsrp.length ? Math.min(...b.rsrp) : 0
+    const sinrMin = b.sinr.length ? Math.min(...b.sinr) : 0
+    const radioLevel: TimelineCell['level'] = !b.rsrp.length && !b.sinr.length
+      ? 'none'
+      : (rsrpMin < THRESHOLDS.rsrp || sinrMin < THRESHOLDS.sinr) ? 'bad'
+        : (rsrpMin < THRESHOLDS.rsrp + 10) ? 'warn' : 'ok'
+    const radio: TimelineCell = {
+      text: b.rsrp.length
+        ? tx(b.sinr.length ? 'vmaxq.vd.tl.radioBoth' : 'vmaxq.vd.tl.radioRsrp', { rsrp: rsrpMin, sinr: sinrMin })
+        : tx('vmaxq.vd.dash'),
+      level: radioLevel,
+      rows: b.rows['32'],
+    }
+
+    const voiceLevel: TimelineCell['level'] = b.voiceBad > 0 ? 'bad' : b.csfb > 0 ? 'warn' : b.voiceOk > 0 ? 'ok' : 'none'
+    // 不做「片段拼接」：中文是「CSFB 41 / 失败 3」，英文语序是 "CSFB 41 / 3 failed"，
+    // 拼字符串两个语言总有一个别扭。所以按情形各给一个整句 key。
+    const voice: TimelineCell = {
+      text: b.csfb
+        ? (b.voiceBad
+          ? tx('vmaxq.vd.tl.voiceMixed', { csfb: b.csfb, bad: b.voiceBad })
+          : tx('vmaxq.vd.tl.voiceCsfb', { csfb: b.csfb }))
+        : (b.voiceOk ? tx('vmaxq.vd.tl.voiceOk', { n: b.voiceOk }) : tx('vmaxq.vd.dash')),
+      level: voiceLevel,
+      rows: b.rows['1100'],
+    }
+
+    // 交叉结论：这是整个时间线存在的理由 —— 单看一列永远得不出下面这几句
+    let judge = tx('vmaxq.vd.tl.normal')
+    let level: TimelineRow['level'] = 'ok'
+    if (voiceLevel === 'bad') { judge = tx('vmaxq.vd.tl.voiceFail'); level = 'bad' }
+    else if (radioLevel === 'bad' && traffic.level !== 'none' && b.traffic > 0) {
+      judge = tx('vmaxq.vd.tl.weakWithTraffic'); level = 'bad'
+    } else if (radioLevel === 'bad') { judge = tx('vmaxq.vd.tl.weakCoverage'); level = 'warn' }
+    else if (latency.level === 'bad') { judge = tx('vmaxq.vd.tl.firstRespBad'); level = 'bad' }
+    else if (transport.level === 'bad') { judge = tx('vmaxq.vd.tl.retransHigh'); level = 'warn' }
+    else if (latency.level === 'none' && traffic.level === 'none' && voiceLevel === 'none' && radioLevel === 'none') {
+      judge = tx('vmaxq.vd.tl.noData'); level = 'none'
+    }
+
+    return { minute, traffic, latency, transport, radio, voice, judge, level }
+  }).sort((a, b) => a.minute.localeCompare(b.minute))
+
+  return out
+}
+
+/* ---------------------------------------------------------------------------
+ * 十一、结论生成（方案 §4.8：确定性规则，不用 LLM）
+ * ------------------------------------------------------------------------ */
+
+/* ---------------------------------------------------------------------------
+ * 十一半、假设排序（2026-11-08 P0-4：从「单结论」到「假设-证据-反证」）
+ * ---------------------------------------------------------------------------
+ * buildVerdict 仍是唯一结论来源（对外契约不变），这里新增的是**并列的假设表**：
+ * 每条假设带支持证据 / 反证 / 待补证据 / 责任方，按证据强度排序。
+ * 规则仍是确定性的（方案 §4.8），不用 LLM；置信度只由证据数与反证决定，
+ * 不写死映射。缺失证据显式列出 —— 「未查账务」不能默认无问题。
+ * ------------------------------------------------------------------------ */
+
+export type HypothesisOwner = 'billing' | 'ran' | 'core' | 'transport' | 'app' | 'terminal'
+
+export type Hypothesis = {
+  id: string
+  /** 假设标签 i18n key（vmaxq.vd.hyp.*） */
+  labelKey: string
+  /** 0-100 证据强度（支持证据数与反证共同决定） */
+  confidence: number
+  support: I18nText[]
+  refute: I18nText[]
+  /** 待补证据（缺失即显式列出，不沉默） */
+  missing: I18nText[]
+  owner: HypothesisOwner
+}
+
+/** 假设排序：账务（强指纹）> 接入拒绝 > 无线分型 > 传输/时延 > OTT 文本 */
+export function buildHypotheses(input: {
+  access: AccessAnalysis
+  ottText: OttTextResult
+  radio: RadioAnalysis | null
+  scores: DimensionScore[]
+  dataBlock?: DataBlockResult | null
+}): Hypothesis[] {
+  const out: Hypothesis[] = []
+  const { access, ottText, radio, scores, dataBlock } = input
+  const scoreOf = (k: ScoreKey) => scores.find((s) => s.key === k)?.score ?? null
+  const bad = (k: ScoreKey) => {
+    const s = scoreOf(k)
+    return s !== null && s < THRESHOLDS.scoreBad
+  }
+
+  // 账务/订阅：强关键词命中即置顶
+  if (access.byCategory.billing > 0) {
+    out.push({
+      id: 'h-billing', labelKey: 'vmaxq.vd.hyp.billing',
+      confidence: Math.min(95, 60 + access.byCategory.billing * 10),
+      support: [tx('vmaxq.vd.ev.accessBilling', { n: access.byCategory.billing, ex: access.billingExamples[0] || '' })],
+      refute: [],
+      missing: [tx('vmaxq.vd.hyp.missing.billing')],
+      owner: 'billing',
+    })
+  } else if (access.byCategory.attach_reject > 0) {
+    out.push({
+      id: 'h-attach', labelKey: 'vmaxq.vd.hyp.attach',
+      confidence: Math.min(80, 45 + access.byCategory.attach_reject * 8),
+      support: [tx('vmaxq.vd.ev.accessAttach', { n: access.byCategory.attach_reject, ex: access.attachExamples[0] || '' })],
+      refute: [],
+      // 数字码拒绝不等于欠费：账务未查必须显式列出
+      missing: [tx('vmaxq.vd.hyp.missing.billing')],
+      owner: 'core',
+    })
+  }
+
+  // 无线分型
+  if (radio && radio.mode !== 'ok' && radio.mode !== 'unknown') {
+    const labelKey = radio.mode === 'handover_late_suspect' ? 'vmaxq.vd.hyp.handover'
+      : radio.mode === 'site_outage_suspect' ? 'vmaxq.vd.hyp.site'
+      : radio.mode === 'interference' ? 'vmaxq.vd.hyp.interference'
+      : 'vmaxq.vd.hyp.weak'
+    const missing: I18nText[] = []
+    if (radio.mode === 'handover_late_suspect') missing.push(tx('vmaxq.vd.hyp.missing.handoverEvent'))
+    if (radio.mode === 'site_outage_suspect') missing.push(tx('vmaxq.vd.hyp.missing.siteAlarm'))
+    if (!radio.neighborSamples) missing.push(tx('vmaxq.vd.hyp.missing.neighbor'))
+    if (radio.mode === 'weak_coverage') missing.push(tx('vmaxq.vd.hyp.missing.baseline'))
+    out.push({
+      id: 'h-radio', labelKey,
+      confidence: radio.mode === 'site_outage_suspect' ? 55
+        : radio.mode === 'handover_late_suspect' ? 70 : 65,
+      support: radio.basis.slice(0, 3),
+      refute: [],
+      missing,
+      owner: 'ran',
+    })
+  }
+
+  // 传输 / 时延（症状层，置后）
+  if (bad('transport')) {
+    out.push({
+      id: 'h-transport', labelKey: 'vmaxq.vd.hyp.transport', confidence: 55,
+      support: scores.find((s) => s.key === 'transport')?.evidence || [],
+      refute: [], missing: [tx('vmaxq.vd.hyp.missing.baseline')], owner: 'transport',
+    })
+  }
+  if (bad('latency')) {
+    out.push({
+      id: 'h-latency', labelKey: 'vmaxq.vd.hyp.latency', confidence: 50,
+      support: scores.find((s) => s.key === 'latency')?.evidence || [],
+      refute: [], missing: [tx('vmaxq.vd.hyp.missing.dns')], owner: 'app',
+    })
+  }
+
+  // 数据阻断嫌疑（欠费间接指纹）：附着成功 + 有尝试无流量。
+  // 只在「流量几乎为零且有阻断尝试」时挂假设；流量在走（≥1MB）直接反证。
+  if (dataBlock && dataBlock.suspect) {
+    out.push({
+      id: 'h-datablock', labelKey: 'vmaxq.vd.hyp.datablock', confidence: 60,
+      support: dataBlock.evidence,
+      refute: [],
+      missing: [tx('vmaxq.vd.hyp.missing.billing'), tx('vmaxq.vd.hyp.missing.baseline')],
+      owner: 'billing',
+    })
+  }
+
+  // OTT 文本（WhatsApp 发消息）
+  if (ottText.stage === 'handshake_slow' || ottText.stage === 'no_traffic') {
+    out.push({
+      id: 'h-otttext', labelKey: 'vmaxq.vd.hyp.ottText', confidence: 60,
+      support: ottText.evidence.slice(0, 2),
+      refute: [],
+      missing: [tx('vmaxq.vd.hyp.missing.dns'), tx('vmaxq.vd.hyp.missing.appAck')],
+      owner: 'app',
+    })
+  }
+
+  return out.sort((a, b) => b.confidence - a.confidence)
+}
+
+export type Verdict = {
+  /** 一句话结论 */
+  headline: I18nText
+  /** 判定依据（多行） */
+  basis: I18nText[]
+  /** 处理建议 */
+  suggestion: I18nText
+  /** 置信度 */
+  confidence: 'high' | 'mid' | 'low'
+  /** 是否复现了用户投诉的现象 */
+  reproduced: boolean
+  /** 触发结论的分项（用于把对应评分卡高亮） */
+  focus: ScoreKey | 'voice' | 'ott' | 'game' | 'none'
+  /** P0-4 假设排序（新增；旧调用方不读） */
+  hypotheses: Hypothesis[]
+  /** P0-4 待补证据汇总（新增；旧调用方不读） */
+  missingEvidence: I18nText[]
+}
+
+/**
+ * 按投诉类型生成结论。
+ *
+ * 顺序很重要：**先看该投诉类型专属的那条判据链**，再回落到四维评分。
+ * 这样「语音投诉」不会因为用户同时看了 300MB 视频而被判成「上网慢」。
+ */
+function buildVerdictCore(
+  complaint: ComplaintKey,
+  scores: DimensionScore[],
+  voice: VoiceResult,
+  ott: OttResult,
+  game: GameResult,
+  sources: SourceResult[],
+): Omit<Verdict, 'hypotheses' | 'missingEvidence'> {
+  const by = (k: ScoreKey) => scores.find((s) => s.key === k)?.score ?? null
+  const av = by('availability'), la = by('latency'), tr = by('transport'), ra = by('radio')
+
+  // 无线侧拿不到数据时，结论必须说清楚「查不到」，不能装正常
+  const radioSrc = sources.find((s) => s.key === '32')
+  const radioUnavailable = ra === null
+  const radioWhy: I18nText = radioSrc?.error
+    ? tx('vmaxq.vd.ev.radioSrcError', { msg: radioSrc.error })
+    : tx(radioSrc?.ok ? 'vmaxq.vd.ev.radioNoRecord' : 'vmaxq.vd.radioNotQueried')
+
+  // ---- P0-1 账务优先（排除法第一步）：强关键词命中直接定账务，
+  // 不再让欠费用户的大量回溯去查核心网/无线。数字码拒绝不走这里（见 classifyFailCause）。
+  const access = analyzeAccess(sources)
+  if (access.byCategory.billing > 0) {
+    return {
+      headline: tx('vmaxq.vd.headline.billing', { n: access.byCategory.billing }),
+      basis: [
+        tx('vmaxq.vd.ev.accessBilling', { n: access.byCategory.billing, ex: access.billingExamples[0] || '' }),
+        tx('vmaxq.vd.basis.billingNotChecked'),
+      ],
+      suggestion: tx('vmaxq.vd.sugg.billing'),
+      confidence: 'high', reproduced: true, focus: 'availability',
+    }
+  }
+
+  switch (complaint) {
+    case 'voice': {
+      if (voice.mode === 'none') {
+        return {
+          headline: tx('vmaxq.vd.headline.voiceNone'),
+          basis: [
+            tx('vmaxq.vd.basis.voiceNone1'),
+            tx('vmaxq.vd.basis.voiceNone2'),
+            voice.sgsCount === 0
+              ? tx('vmaxq.vd.basis.voiceNoSgs')
+              : tx('vmaxq.vd.basis.voiceSgsOk', { n: voice.sgsCount }),
+            tx('vmaxq.vd.basis.voiceNoneHint'),
+          ],
+          suggestion: tx('vmaxq.vd.sugg.voiceNone'),
+          confidence: 'low',
+          reproduced: false,
+          focus: 'voice',
+        }
+      }
+      const bad = voice.badCount > 0 || (voice.successRate !== null && voice.successRate < 90)
+      const slow = voice.fallbackMs !== null && voice.fallbackMs > THRESHOLDS.csfbFallback
+      if (bad || slow) {
+        return {
+          headline: voice.mode === 'volte'
+            ? tx('vmaxq.vd.headline.voiceVolteBad', { n: voice.qci1 })
+            : tx(bad ? 'vmaxq.vd.headline.voiceCsfbFail' : 'vmaxq.vd.headline.voiceCsfbSlow'),
+          basis: voice.evidence,
+          suggestion: tx(bad ? 'vmaxq.vd.sugg.voiceFail' : 'vmaxq.vd.sugg.voiceSlow'),
+          confidence: 'high',
+          reproduced: true,
+          focus: 'voice',
+        }
+      }
+      return {
+        headline: tx('vmaxq.vd.headline.voiceOk', { mode: voice.mode === 'volte' ? 'VoLTE' : 'CSFB' }),
+        basis: voice.evidence,
+        suggestion: tx('vmaxq.vd.sugg.voiceOk'),
+        confidence: 'mid',
+        reproduced: false,
+        focus: 'voice',
+      }
+    }
+
+    case 'ott': {
+      // P0-2：无通话但 WhatsApp 文本通道异常（发消息投诉）—— 不能用 ottNone 概括
+      const ottText = analyzeOttText(sources)
+      if (!ott.totalSessions && (ottText.stage === 'handshake_slow' || ottText.stage === 'no_traffic')) {
+        return {
+          headline: tx('vmaxq.vd.headline.ottTextBad', { st: ottText.stage }),
+          basis: ottText.evidence,
+          suggestion: tx('vmaxq.vd.sugg.ottText'),
+          confidence: 'mid', reproduced: true, focus: 'ott',
+        }
+      }
+      if (!ott.totalSessions) {
+        return {
+          headline: tx('vmaxq.vd.headline.ottNone'),
+          basis: ott.evidence,
+          suggestion: tx('vmaxq.vd.sugg.ottNone'),
+          confidence: 'low',
+          reproduced: false,
+          focus: 'ott',
+        }
+      }
+      const badRtt = ott.avgDlRtt > THRESHOLDS.ottRttBad
+      const badJitter = ott.jitter > THRESHOLDS.ottJitterBad
+      const badRetrans = ott.retransRate > THRESHOLDS.retrans
+      const worse = badRtt || badJitter || badRetrans
+      return {
+        headline: worse
+          ? tx('vmaxq.vd.headline.ottWorse', { rtt: ott.avgDlRtt, jitter: ott.jitter })
+          : tx('vmaxq.vd.headline.ottOk', { n: ott.totalSessions }),
+        basis: [
+          ...ott.evidence,
+          tx(worse ? 'vmaxq.vd.basis.ottWorse' : 'vmaxq.vd.basis.ottNormal'),
+        ],
+        suggestion: tx(worse ? 'vmaxq.vd.sugg.ottWorse' : 'vmaxq.vd.sugg.ottNormal'),
+        confidence: worse ? 'mid' : 'mid',
+        reproduced: worse,
+        focus: 'ott',
+      }
+    }
+
+    case 'video': {
+      if (la !== null && la < THRESHOLDS.scoreBad) {
+        return {
+          headline: tx('vmaxq.vd.headline.videoLatency'),
+          basis: scores.find((s) => s.key === 'latency')?.evidence || [],
+          suggestion: tx('vmaxq.vd.sugg.videoLatency'),
+          confidence: 'high', reproduced: true, focus: 'latency',
+        }
+      }
+      if (ra !== null && ra < THRESHOLDS.scoreBad) {
+        return {
+          headline: tx('vmaxq.vd.headline.videoRadio'),
+          basis: scores.find((s) => s.key === 'radio')?.evidence || [],
+          suggestion: tx('vmaxq.vd.sugg.videoRadio'),
+          confidence: 'high', reproduced: true, focus: 'radio',
+        }
+      }
+      // P0'-5 无分类时代判（单账号约束下上游常无 Video/Game 专类）：
+      // 上游 service 取值域里只有 Video/Web Browse 等 10 类能直接对上页签，
+      // 实测多数窗口没有 Video 专类行 —— 此时不说「无法判定」，
+      // 改用传输/时延/无线三维代理指标给结论（重传率/首包P90/RSRP P10）。
+      // 只有三维全空（1300/32 都无行）才保留 unknown。
+      if (radioUnavailable) {
+        const trScore = scores.find((s) => s.key === 'transport')?.score ?? null
+        const trBad = trScore !== null && trScore < THRESHOLDS.scoreBad
+        const laBad = la !== null && la < THRESHOLDS.scoreBad
+        if (trBad || laBad) {
+          const basis = [
+            ...(scores.find((s) => s.key === 'transport')?.evidence || []),
+            ...(scores.find((s) => s.key === 'latency')?.evidence || []),
+            tx('vmaxq.vd.basis.videoProxyRadio', { why: radioWhy }),
+          ]
+          return {
+            headline: tx('vmaxq.vd.headline.videoProxyBad'),
+            basis,
+            suggestion: tx('vmaxq.vd.sugg.videoProxyBad'),
+            confidence: 'mid', reproduced: true, focus: 'transport',
+          }
+        }
+        // 业务面有行（1300 非空）但无线不可判：代理判正常，不断言弱覆盖
+        const hasTraffic = rowsOf(sources, '1300').length > 0
+        if (hasTraffic) {
+          return {
+            headline: tx('vmaxq.vd.headline.videoProxyOk'),
+            basis: [
+              ...(scores.find((s) => s.key === 'latency')?.evidence || []),
+              ...(scores.find((s) => s.key === 'transport')?.evidence || []),
+              tx('vmaxq.vd.basis.videoProxyRadio', { why: radioWhy }),
+            ],
+            suggestion: tx('vmaxq.vd.sugg.videoProxyOk'),
+            confidence: 'low', reproduced: false, focus: 'none',
+          }
+        }
+        return {
+          headline: tx('vmaxq.vd.headline.videoRadioUnknown', { why: radioWhy }),
+          basis: [tx('vmaxq.vd.basis.videoRadioUnknown1'), tx('vmaxq.vd.basis.videoRadioUnknown2', { why: radioWhy })],
+          suggestion: tx('vmaxq.vd.sugg.radioUnknown'),
+          confidence: 'low', reproduced: false, focus: 'none',
+        }
+      }
+      return {
+        headline: tx('vmaxq.vd.headline.videoOk'),
+        basis: [...(scores.find((s) => s.key === 'latency')?.evidence || []), ...(scores.find((s) => s.key === 'radio')?.evidence || [])],
+        suggestion: tx('vmaxq.vd.sugg.videoOk'),
+        confidence: 'mid', reproduced: false, focus: 'none',
+      }
+    }
+
+    case 'game': {
+      // P0'-5 无分类时代判：上游 service 无 GAME 类是常态（实测 1558 条 0 命中），
+      // analyzeGame 关键词也未命中时，不直接说「无数据」，改看三维代理指标。
+      // 三维全空才保留 gameNone（真无话单，不是分类缺失）。
+      if (!game.totalSessions) {
+        const trScore = scores.find((s) => s.key === 'transport')?.score ?? null
+        const hasAnySignal = la !== null || trScore !== null || ra !== null
+        if (hasAnySignal) {
+          const badProxy = (la !== null && la < THRESHOLDS.scoreBad)
+            || (trScore !== null && trScore < THRESHOLDS.scoreBad)
+            || (ra !== null && ra < THRESHOLDS.scoreBad)
+          const basis = [
+            tx('vmaxq.vd.basis.gameProxyNoHit'),
+            ...(scores.find((s) => s.key === 'latency')?.evidence || []),
+            ...(scores.find((s) => s.key === 'transport')?.evidence || []),
+            ...(ra !== null
+              ? (scores.find((s) => s.key === 'radio')?.evidence || [])
+              : [tx('vmaxq.vd.basis.videoProxyRadio', { why: radioWhy })]),
+          ]
+          if (badProxy) {
+            return {
+              headline: tx('vmaxq.vd.headline.gameProxyBad'),
+              basis,
+              suggestion: tx('vmaxq.vd.sugg.gameProxyBad'),
+              confidence: 'mid', reproduced: true, focus: 'game',
+            }
+          }
+          return {
+            headline: tx('vmaxq.vd.headline.gameProxyOk'),
+            basis,
+            suggestion: tx('vmaxq.vd.sugg.gameProxyOk'),
+            confidence: 'low', reproduced: false, focus: 'game',
+          }
+        }
+        return {
+          headline: tx('vmaxq.vd.headline.gameNone'),
+          basis: game.evidence,
+          suggestion: tx('vmaxq.vd.sugg.gameNone'),
+          confidence: 'low', reproduced: false, focus: 'game',
+        }
+      }
+      const worst = [...game.hits].sort((a, b) => b.jitter - a.jitter)[0]
+      const badGame = worst && (worst.avgRtt > 100 || worst.jitter > 40 || worst.retransRate > THRESHOLDS.retrans)
+      if (badGame) {
+        return {
+          headline: tx('vmaxq.vd.headline.gameBad', { app: worst.app, rtt: worst.avgRtt, jitter: worst.jitter }),
+          basis: [...game.evidence, ...(ra !== null && ra < THRESHOLDS.scoreBad ? scores.find((s) => s.key === 'radio')?.evidence || [] : [])],
+          suggestion: tx('vmaxq.vd.sugg.gameBad'),
+          confidence: 'high', reproduced: true, focus: 'game',
+        }
+      }
+      return {
+        headline: tx('vmaxq.vd.headline.gameOk', { n: game.totalSessions }),
+        basis: game.evidence,
+        suggestion: tx('vmaxq.vd.sugg.gameOk'),
+        confidence: 'mid', reproduced: false, focus: 'game',
+      }
+    }
+
+    case 'slow':
+    default: {
+      // 「全部投诉」与「上网慢」共用四维链，但上网慢把语音降权
+      if (av !== null && av < THRESHOLDS.scoreBad) {
+        return {
+          headline: tx('vmaxq.vd.headline.availBad'),
+          basis: scores.find((s) => s.key === 'availability')?.evidence || [],
+          suggestion: tx('vmaxq.vd.sugg.availBad'),
+          confidence: 'high', reproduced: true, focus: 'availability',
+        }
+      }
+      if (la !== null && la < THRESHOLDS.scoreBad) {
+        return {
+          headline: tx('vmaxq.vd.headline.latencyBad'),
+          basis: scores.find((s) => s.key === 'latency')?.evidence || [],
+          suggestion: tx('vmaxq.vd.sugg.latencyBad'),
+          confidence: 'high', reproduced: true, focus: 'latency',
+        }
+      }
+      // P0-3 无线分型：弱覆盖内部先分「切换不及时 / 断站嫌疑」，再回落通用 radioBad
+      {
+        const radioNow = analyzeRadio(sources)
+        if (radioNow && radioNow.mode === 'handover_late_suspect') {
+          return {
+            headline: tx('vmaxq.vd.headline.radioHandover', { v: radioNow.rsrpP10, nb: radioNow.neighborRsrpP10 }),
+            basis: radioNow.basis,
+            suggestion: tx('vmaxq.vd.sugg.radioHandover'),
+            confidence: 'mid', reproduced: true, focus: 'radio',
+          }
+        }
+        if (radioNow && radioNow.mode === 'site_outage_suspect') {
+          return {
+            headline: tx('vmaxq.vd.headline.radioSiteSuspect', { v: radioNow.rsrpP10 }),
+            basis: [...radioNow.basis, tx('vmaxq.vd.basis.radioSiteAlarm')],
+            suggestion: tx('vmaxq.vd.sugg.radioSite'),
+            confidence: 'mid', reproduced: true, focus: 'radio',
+          }
+        }
+      }
+      if (ra !== null && ra < THRESHOLDS.scoreBad) {
+        return {
+          headline: tx('vmaxq.vd.headline.radioBad'),
+          basis: scores.find((s) => s.key === 'radio')?.evidence || [],
+          suggestion: tx('vmaxq.vd.sugg.radioBad'),
+          confidence: 'mid', reproduced: true, focus: 'radio',
+        }
+      }
+      if (tr !== null && tr < THRESHOLDS.scoreBad) {
+        return {
+          headline: tx('vmaxq.vd.headline.transportBad'),
+          basis: scores.find((s) => s.key === 'transport')?.evidence || [],
+          suggestion: tx('vmaxq.vd.sugg.transportBad'),
+          confidence: 'mid', reproduced: true, focus: 'transport',
+        }
+      }
+      if (av === null && la === null && radioUnavailable) {
+        return {
+          headline: tx('vmaxq.vd.headline.allEmpty'),
+          basis: [tx('vmaxq.vd.basis.allEmpty1'), tx('vmaxq.vd.basis.allEmpty2')],
+          suggestion: tx('vmaxq.vd.sugg.allEmpty'),
+          confidence: 'low', reproduced: false, focus: 'none',
+        }
+      }
+      return {
+        headline: tx('vmaxq.vd.headline.allOk'),
+        basis: scores.filter((s) => s.score !== null).flatMap((s) => s.evidence),
+        suggestion: tx('vmaxq.vd.sugg.allOk'),
+        confidence: 'mid', reproduced: false, focus: 'none',
+      }
+    }
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * 十二、工具：窗口 → 参数串 / 时长
+ * ------------------------------------------------------------------------ */
+
+export const toApiTime = (d: Dayjs): string => d.format('YYYY-MM-DD HH:mm:ss')
+
+export const rangeLabel = (start: Dayjs, end: Dayjs): string =>
+  `${start.format('YYYY-MM-DD HH:mm')} ~ ${end.format('HH:mm')}`
+
+/* ---------------------------------------------------------------------------
+ * buildVerdict（对外契约，P0-4）：核心结论 + 假设排序并列挂载。
+ * 核心结论的判定顺序不变（buildVerdictCore），假设表只作并列解释，
+ * 不篡改 headline —— 与 vmaxWorkspaceRules 「不改 verdict」纪律一致。
+ * ------------------------------------------------------------------------ */
+export function buildVerdict(
+  complaint: ComplaintKey,
+  scores: DimensionScore[],
+  voice: VoiceResult,
+  ott: OttResult,
+  game: GameResult,
+  sources: SourceResult[],
+): Verdict {
+  const core = buildVerdictCore(complaint, scores, voice, ott, game, sources)
+  const hypotheses = buildHypotheses({
+    access: analyzeAccess(sources),
+    ottText: analyzeOttText(sources),
+    radio: analyzeRadio(sources),
+    scores,
+    dataBlock: analyzeDataBlock(sources),
+  })
+  const seen = new Set<string>()
+  const missingEvidence: I18nText[] = []
+  for (const h of hypotheses) {
+    for (const m of h.missing) {
+      if (!seen.has(m.key)) { seen.add(m.key); missingEvidence.push(m) }
+    }
+  }
+  // 2026-11-08：账务状态 XDR 里没有源（Gy 未采、S6a 未采），**无论有没有假设
+  // 都要显式提示「账务未查」**——否则用户会把「没看到欠费」误读成「已排除欠费」。
+  // 已命中账务（h-billing）的结论本身就是账务答案，不再重复提示。
+  if (!hypotheses.some((h) => h.id === 'h-billing') && !seen.has('vmaxq.vd.hyp.missing.billing')) {
+    missingEvidence.unshift(tx('vmaxq.vd.hyp.missing.billing'))
+  }
+  return { ...core, hypotheses, missingEvidence }
+}

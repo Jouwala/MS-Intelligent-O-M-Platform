@@ -1,0 +1,17 @@
+{
+  "sites": [
+    "Jahtondo Town",
+    "Brewerville 4",
+    "Zwedru 4"
+  ],
+  "full_kpi": {
+    "enabled": true,
+    "workers": 8,
+    "budget_s": 200
+  },
+  "full_shard": {
+    "enabled": true,
+    "max_sites": 60,
+    "budget_s": 70
+  }
+}

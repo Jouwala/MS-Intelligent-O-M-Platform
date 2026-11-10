@@ -1,0 +1,107 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+
+# 运行时数据：本机「保存为默认目录」写入的全局默认看板目录
+portal-default.json
+
+# 运行时数据：鉴权用户表（含加盐密码哈希），严禁入库
+auth-data/
+
+# 运行时数据：WhatsApp 智能助手的每日报告（2026-09-30 新增）
+#
+# 由 `scripts/whatsapp_analysis` 的 node-cron 定时任务逐日生成，文件名就是日期。
+# 它自己的 `docs/README.md` 写得很明确：「所有数据只保存在本机（`data/assistant.db`
+# 与 `reports/`）」—— 所以这是产出数据，不是源码。`data/` 早就被根 `.gitignore` 的
+# `data/` 挡住了，`reports/` 因为名字里没有 data 而一直漏在外面，实测已有 26 份入库，
+# 并且每天 +1（本次核查时 `2026-09-30.md` 正挂在 `??` 上等着被误提交）。
+# 内容是群聊里 @我 的待办正文，属于业务对话数据，按 AGENTS.md 第四节第 2 条不该进库。
+# 同门的 `auth-data/` 是同一种东西，只是这里更隐蔽：它长得像文档（.md）。
+scripts/whatsapp_analysis/reports/
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 一次性探针 / 转储 / 运行日志（2026-09-24 新增）
+#
+# 这份清单**不是新发明的**，它和 vite.config.ts:242-267 的 server.watch.ignored
+# 是同一套判断 —— 那个列表早就把「什么不是源码、什么会触发无意义的整页刷新」
+# 想清楚并逐条写了理由，只是从来没有同步给 git。于是同一个文件在 dev 里被
+# 当垃圾忽略、在版本库里却被当源码跟踪：225 个探针/日志/缓存文件入库，占本仓库
+# 506 个跟踪文件的 44%。两边必须一起改，别再只改一处。
+#
+# 注意：MsPortal/ OlrPortal/ olbrportal/ 是**手写静态壳**（nginx.conf:102/108
+# 直接 alias 发它们），是源码不是产物，下面的规则刻意没有整目录忽略它们。
+# ─────────────────────────────────────────────────────────────────────────────
+# QC 脚本与人工排查留下的一次性转储（实测本仓库所有 _ 前缀的已入库文件都是这类）
+_*
+# 反向豁免：`_*` 是任意层级匹配的，不豁免的话将来有人在源码目录里建
+# `_shared.ts` 会被 git 静默忽略掉 —— 那是比噪声更糟的失败模式。
+#
+# 2026-09-25 修正：原来只写了 `!src/_*` / `!server/_*`，但 gitignore 的 `_*`
+# 是**递归**匹配、而 `!src/_*` 只豁免 `src/` 的**直接子项** —— 两者不对称，
+# 于是嵌套路径照样被忽略。实测 `src/pages/_TemplatePage.tsx` 命中 L29 的
+# `_*` 而被忽略（git check-ignore 可复现），正是下面想防的那个失败模式，
+# 只是没防住嵌套层级。改用 `**` 递归豁免。
+# 与 vite.config.ts 的 server.watch.ignored 是一对，改一个必须改另一个。
+!src/**/_*
+!src/_*
+!server/**/_*
+!server/_*
+.tmp_*
+tmp_*
+temp_*
+seg*.txt
+listing.txt
+out.txt
+*.tmp
+*.old
+
+# 手工快照（改大文件前的 _bak_<日期>_<说明>，AGENTS.md 原则 9 认可的做法，
+# 但它属于磁盘上的回滚手段，不需要进版本库）
+*.bak
+*.bak_*
+*_bak_*
+# 2026-09-25 补：快照命名实测有 5 种分隔写法，上面三条只盖住了两种。
+# 磁盘 134 个快照里 `_bak_` 99 / `.bak_` 31 / `.bak-` 2 / `.bak.` 1 / 裸后缀 1，
+# 漏掉的那 4 个里 `MsPortal/assets/portal.js.qcbak` 真的因此入了库
+# （HEAD 里躺到 2026-09-25 才发现，已 git rm --cached）。
+*.bak-*
+*.bak.*
+*bak
+# 2026-10-01 补：B5 就绪度检测发现另两种"归档/停用"后缀没被覆盖，
+# 且它们会被 nginx 当静态文件直接发出去（实测可下载）：
+#   MsPortal/assets/portal.js.fixed                 → 240,919 字节
+#   MsPortal/tailwind.config.v3.js.archived         → 936 字节
+# 与上面的快照规则同类，都属磁盘回滚件，不该进版本库。
+*.fixed
+*.archived
+
+# 运行日志与构建缓存
+log/
+tsconfig.tsbuildinfo
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 真源码资产豁免（2026-10-13 补；`git ls-files -i -c --exclude-standard`
+# 权威审计发现 5 个已跟踪文件命中过宽规则）
+#
+# 这些文件早已入库，跟踪状态本身不受忽略规则影响；缺豁免的真实危害是
+# 「新增/重建同类文件时被 git 静默吃掉」—— 本机跑得好好的，别人 clone 缺文件：
+#   · MsPortal/assets/favicon-{16,32,180}.png   MsPortal 手写壳的站点图标。
+#     根 .gitignore 的 `*.png` 按**文件名**直接匹配，目录级取反救不了；
+#     根的 `!**/assets/logo-*.png` 只认 logo-* 前缀，favicon 不在其中。
+#   · assets/logo/zte-z-116.png                  门户顶栏品牌图标，同上。
+#   · src/data/initialDashboards.ts              内置初始看板目录（服务端
+#     portal-default.json 缺失时的前端兜底）。根 .gitignore 的 `data/` 按
+#     **目录名**匹配吃掉了 src/data/ —— 与 my_app `backend/data/gis` 同一
+#     事故模式（先例见 Task\my_app\.gitignore 的 `!backend/data/` 例外块）。
+# 注：`!src/data/` 一条只豁免目录——目录不被忽略后，里面的 .ts 自身不命中
+# 任何文件级规则即可入库；日后若在其中放图片等资产，需照前两条加文件级豁免。
+# 注2：本次只加取反豁免、不动忽略清单，vite.config.ts 的 server.watch.ignored
+# 无需同步（两边配对约束只针对上面的 `_*` 探针块，且 vite ignored 不支持 `!`）。
+!**/assets/favicon-*.png
+!assets/logo/*.png
+!src/data/

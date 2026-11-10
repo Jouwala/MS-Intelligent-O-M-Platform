@@ -1,0 +1,2681 @@
+/* Inter 随项目本地部署（2026-10-29）。
+   为什么不走 Google Fonts CDN：本系统跑在内网，外网字体请求会失败或被网关改写；
+   字体一挂，地图标签悄悄退回 Segoe UI，**字宽随之变化**，而县名标签的避让包围盒
+   是按实测像素算的（gismap/countyLabelLayout.ts 的 PERSON_LABEL_SIZE），字宽一变
+   叠字判定就失准 —— 所以这不是「换个字体」的观感问题，是会让布局算错的功能问题。
+   文件取自 @fontsource/inter 的 latin 子集（400/500/700 三档，合计 72KB），已入库。
+   font-display: swap —— 本地文件没有网络往返，swap 只兜极端情况下的首帧不可见。 */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./assets/fonts/inter-latin-400-normal.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+2074, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF;
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('./assets/fonts/inter-latin-500-normal.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+2074, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF;
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('./assets/fonts/inter-latin-700-normal.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+2074, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF;
+}
+
+/* 主题变量：默认深色（跟随系统由 index.html 内联脚本在首帧前设置 data-theme） */
+:root {
+  --wh-bg: linear-gradient(180deg, #02050c 0%, #04091a 52%, #02050c 100%);
+  --wh-card-bg: linear-gradient(180deg, #08122c 0%, #050d22 100%);
+  --wh-card-border: 1px solid #153db0;
+  --wh-card-border-hover: 1px solid #258cff;
+  --wh-teal: #00d9ff;
+  --wh-blue: #258cff;
+  /* MTTR 双轴图固定语义色：柱 = 中兴蓝 #0072BC（渐变起点提亮），线 = 橙（深色主题） */
+  --wh-zte-blue: #0072BC;
+  --wh-zte-blue-light: #3d9be9;
+  --wh-zte-orange: #ff922b;
+  --wh-indigo: #7c8ff0;
+  /* Speedtest by Ookla 标识的墨色（深色主题）。官方对深底给的是白色版 lockup，
+     深蓝 #172143 画在深底上等于看不见，所以这里换成浅色。
+     与 --wh-text 刻意分开：那是正文色，这是**品牌色**，两者语义不同。 */
+  --wh-ookla-ink: #ccd9f0;
+  --wh-text: #f5f7ff;
+  --wh-text-muted: #aebbd4;
+  --wh-text-dim: #6f8cb4;
+  /* 品牌青实心底上的前景字色。深色档 --wh-teal 是亮青（#00d9ff），配深墨字；
+     浅色档换成深青（#0d9488），配白字。Segmented 选中档等实心品牌块用它，
+     不要复用 --wh-text（那是给普通底色上的正文用的）。 */
+  --wh-on-accent: #041227;
+  --wh-accent-grad: linear-gradient(135deg, #00d9ff, #258cff);
+  --wh-sev-critical: #ff5c6c;
+  --wh-sev-major: #ff922b;
+  --wh-sev-warning: #f6cf00;
+  --wh-sev-info: #258cff;
+  --wh-teal-20: rgba(0, 217, 255, 0.20);
+  --wh-teal-27: rgba(0, 217, 255, 0.27);
+  --wh-teal-40: rgba(0, 217, 255, 0.40);
+  --wh-teal-53: rgba(0, 217, 255, 0.53);
+  /* 页面底色（body/antd 未覆盖处兜底） */
+  --wh-page-bg: #02050c;
+  --wh-hover-row: rgba(37, 140, 255, 0.10);
+  --wh-table-sort-icon: #aebbd4;
+  --wh-seg-bg: rgba(255, 255, 255, 0.06);
+  /* 语义辅助色 */
+  --wh-subtle-bg: rgba(37, 140, 255, 0.06);
+  --wh-subtle-border: #173158;
+  --wh-error-text: #ffb3bc;
+  --wh-success-text: #0bc78c;
+  --wh-warn-text: #f6cf00;
+  /* 状态色（保存状态 / 只读提示 / 隐藏目录等交互反馈共用） */
+  --wh-ok: #0bc78c;
+  --wh-danger: #ff5c6c;
+  --wh-warn: #f6cf00;
+  /* 任务分发时间线的三个语义点色（Task Manager 的 Task Distribution Timeline）。
+     原来在 DataSync.tsx 里写死 antd 预设色（#8c8c8c / #b7eb8f / #ff4d4f），
+     深色下与 vmax 的深空蓝+电光青体系脱节 —— 实测时间线上有 1300+ 个点，
+     是 ?page=sync 深色页面里最大的一块非 vmax 色。这里收进令牌，深浅各一档。 */
+  --wh-tl-done: #6f8cb4;
+  --wh-tl-fail: #ff5c6c;
+  --wh-tl-plan: #8ff0cc;
+  --wh-input-bg: rgba(9, 34, 74, 0.60);
+  --wh-input-border: #17499c;
+  /* ================= 液态玻璃体系（深浅主题共用同一套变量名） =================
+   * 四个空间层级，模糊强度与不透明度自下而上递增：
+   *   panel   顶栏 / 侧栏 —— 覆盖在内容之上，模糊最强、最「实」
+   *   card    卡片 / 统计块 —— 中间层，带渐变与折射高光
+   *   control Select / Input / Button / 表格头 —— 贴在卡片之上，轻薄
+   *   overlay Dropdown / Modal / Popover —— 浮在最上，对比度最高
+   * 每个层级都配一个 *-solid 值：无 backdrop-filter 时由 @supports 统一降级，
+   * 避免半透明底直接透出内容导致文字不可读（见文件末尾降级段）。 */
+  --wh-glass-panel: rgba(8, 15, 67, 0.70);
+  --wh-glass-panel-solid: #070d31;
+  --wh-glass-card: linear-gradient(145deg, rgba(8, 18, 44, 0.72), rgba(5, 13, 34, 0.56));
+  --wh-glass-card-solid: linear-gradient(180deg, #08122c, #050d22);
+  --wh-glass-control: rgba(9, 34, 74, 0.58);
+  --wh-glass-control-hover: rgba(21, 61, 176, 0.74);
+  --wh-glass-control-solid: #0a1730;
+  --wh-glass-overlay: rgba(5, 13, 34, 0.80);
+  --wh-glass-overlay-solid: #070d31;
+
+  /* 折射高光（斜向叠层）与边缘光（顶部 1px 内阴影） */
+  --wh-glass-specular: linear-gradient(118deg, rgba(255, 255, 255, 0.075), transparent 27%, transparent 73%, rgba(37, 140, 255, 0.055));
+  --wh-glass-rim: inset 0 1px 0 rgba(255, 255, 255, 0.07);
+
+  /* 模糊强度：层级越高越模糊，保证上层文字不被下层内容干扰 */
+  --wh-glass-blur-panel: 26px;
+  --wh-glass-blur-card: 22px;
+  --wh-glass-blur-control: 14px;
+  --wh-glass-blur-overlay: 26px;
+  --wh-glass-saturate: 145%;
+
+  /* 阴影层级：1 静态控件/卡片 2 面板与卡片悬浮 3 浮层（均含一层边缘光） */
+  --wh-shadow-1: 0 4px 14px rgba(0, 0, 0, 0.32), inset 0 7px 17px rgba(58, 118, 255, 0.22), var(--wh-glass-rim);
+  --wh-shadow-2: 0 20px 52px rgba(0, 0, 0, 0.32), 0 2px 10px rgba(37, 140, 255, 0.05), var(--wh-glass-rim);
+  --wh-shadow-3: 0 26px 70px rgba(0, 0, 0, 0.42), var(--wh-glass-rim);
+
+  /* 卡片阴影总成（theme.ts 的 cardStyle.boxShadow 指向它）。
+   * 深色档 = 原 --wh-shadow-1，用户已确认深色不套 olbr 皮肤，保持改动前原值零回归；
+   * 浅色档在下方 :root[data-theme='light'] 里重定义为 olbr 内发光 + --wh-shadow-2。 */
+  --wh-card-shadow: var(--wh-shadow-1);
+  --wh-card-glow: none;
+  --wh-card-glow-hover: none;
+  --wh-card-drop-hover: 0 8px 18px rgba(38, 70, 86, 0.16);
+  --wh-card-accent: var(--wh-teal);
+  --wh-card-accent-soft: var(--wh-teal-20);
+  --wh-card-accent-line: var(--wh-glass-border);
+  --wh-card-elevate: -2px;
+
+  --wh-glass-border: #153db0;
+  --wh-glass-border-strong: #258cff;
+
+  /* 装饰性元素：顶栏网格纹理、方向箭头、标题辉光（统一由主题驱动） */
+  --wh-grid-line: rgba(0, 217, 255, 0.03);
+  --wh-decor: rgba(0, 217, 255, 0.25);
+  --wh-title-shadow: 0 0 20px rgba(0, 217, 255, 0.40), 0 0 40px rgba(0, 217, 255, 0.20);
+  /* 标题下方装饰线的外发光：浅色下无辉光，取 none */
+  --wh-title-rule-glow: 0 0 8px rgba(0, 217, 255, 0.53);
+  /* 抽屉/弹层蒙版：比浮层更暗，用于把背景内容压下去 */
+  --wh-scrim: rgba(2, 5, 12, 0.38);
+  --wh-scrim-solid: rgba(2, 5, 12, 0.55);
+
+  /* 旧变量名保留为别名，避免逐处改调用方后遗漏（新增代码请用新名） */
+  --wh-surface-glass: var(--wh-glass-panel);
+  --wh-surface-glass-strong: var(--wh-glass-overlay);
+  --wh-overlay: rgba(2, 5, 12, 0.58);
+  --wh-focus-ring: 0 0 0 2px rgba(8, 15, 67, 0.92), 0 0 0 4px rgba(0, 217, 255, 0.45);
+  --wh-shadow-soft: var(--wh-shadow-2);
+  --wh-border-glass: var(--wh-glass-border);
+  --wh-border-glass-strong: var(--wh-glass-border-strong);
+  --wh-control-bg: var(--wh-glass-control);
+
+  /* ---------- 响应式布局令牌（统一以 rem 为基准，16px = 1rem） ---------- */
+  /* 根字体基准由 html 的 font-size 控制，Windows 缩放/高 DPI 会随系统字体设置自然放大 */
+  --wh-header-height: 3.5rem;        /* 56px */
+  --wh-sider-width: 12.5rem;         /* 200px */
+  --wh-sider-collapsed-width: 0rem;
+  --wh-content-margin: 1rem;         /* 16px */
+  --wh-content-padding: 0.25rem;     /* 4px  */
+  --wh-page-min-height: calc(100vh - var(--wh-header-height) - var(--wh-content-margin) * 2 - var(--wh-content-padding) * 2);
+
+  /* 间距 scale：全站统一引用，避免散落固定 px */
+  --wh-space-xs: 0.25rem;  /* 4px  */
+  --wh-space-sm: 0.5rem;   /* 8px  */
+  --wh-space-md: 1rem;     /* 16px */
+  --wh-space-lg: 1.5rem;   /* 24px */
+  --wh-space-xl: 2rem;     /* 32px */
+  --wh-space-2xl: 3rem;    /* 48px */
+
+  /* 断点（供 CSS 与 JS 共享语义，媒体查询仍用 px 以兼容主流浏览器） */
+  --wh-break-xs: 0;
+  --wh-break-sm: 36rem;    /* 576px */
+  --wh-break-md: 48rem;    /* 768px */
+  --wh-break-lg: 62rem;    /* 992px */
+  --wh-break-xl: 75rem;    /* 1200px */
+  --wh-break-2xl: 87.5rem; /* 1400px */
+
+  /* 圆角/阴影保持原有设计 */
+  --wh-radius-sm: 0.375rem;
+  --wh-radius-md: 0.5rem;
+  --wh-radius-lg: 0.75rem;
+}
+
+:root[data-theme='light'] {
+  --wh-bg: linear-gradient(155deg, #e9eef3 0%, #f5f7f9 52%, #e7edf2 100%);
+  --wh-card-bg: linear-gradient(145deg, rgba(255, 255, 255, 0.82) 0%, rgba(241, 245, 248, 0.68) 100%);
+  --wh-card-border: 1px solid rgba(94, 125, 143, 0.22);
+  --wh-card-border-hover: 1px solid rgba(13, 148, 136, 0.65);
+  --wh-teal: #0d9488;
+  --wh-blue: #0e7490;
+  /* MTTR 双轴图固定语义色（浅色主题）：品牌蓝 #0072BC，渐变起点提亮以适配白底 */
+  --wh-zte-blue: #0072BC;
+  --wh-zte-blue-light: #2b8fd6;
+  --wh-zte-orange: #ea580c;
+  --wh-indigo: #6366f1;
+  /* Speedtest by Ookla 标识的墨色（浅色主题）。#172143 是从参考图上量出来的
+     笔画核心色，即 Ookla 那个深海军蓝。 */
+  --wh-ookla-ink: #172143;
+  --wh-text: #16233b;
+  --wh-text-muted: #3f5468;
+  --wh-text-dim: #5b7288;
+  /* 浅色档 --wh-teal 是深青（#0d9488），实心品牌块上配白字，见深色档同名变量注释 */
+  --wh-on-accent: #ffffff;
+  --wh-accent-grad: linear-gradient(135deg, #0d9488, #0e7490);
+  --wh-sev-critical: #d92d20;
+  --wh-sev-major: #ea580c;
+  --wh-sev-warning: #b45309;
+  --wh-sev-info: #0369a1;
+  --wh-teal-20: rgba(13, 148, 136, 0.20);
+  --wh-teal-27: rgba(13, 148, 136, 0.27);
+  --wh-teal-40: rgba(13, 148, 136, 0.40);
+  --wh-teal-53: rgba(13, 148, 136, 0.53);
+  --wh-page-bg: #e9eef3;
+  /* ---------- 液态玻璃体系（浅色：中性雾蓝灰 + 青色仅作交互信号） ---------- */
+  --wh-glass-panel: rgba(255, 255, 255, 0.70);
+  --wh-glass-panel-solid: #f7fbfe;
+  --wh-glass-card: linear-gradient(145deg, rgba(255, 255, 255, 0.82), rgba(241, 245, 248, 0.66));
+  --wh-glass-card-solid: linear-gradient(145deg, #ffffff, #f1f5f8);
+  --wh-glass-control: rgba(255, 255, 255, 0.62);
+  --wh-glass-control-hover: rgba(255, 255, 255, 0.84);
+  --wh-glass-control-solid: #f6fafc;
+  --wh-glass-overlay: rgba(255, 255, 255, 0.82);
+  --wh-glass-overlay-solid: #ffffff;
+
+  --wh-glass-specular: linear-gradient(118deg, rgba(255, 255, 255, 0.52), transparent 31%, transparent 76%, rgba(112, 143, 160, 0.045));
+  --wh-glass-rim: inset 0 1px 0 rgba(255, 255, 255, 0.94);
+
+  /* 浅色底对比弱，模糊略强于深色，靠饱和度与高光拉开层级 */
+  --wh-glass-blur-panel: 26px;
+  --wh-glass-blur-card: 20px;
+  --wh-glass-blur-control: 14px;
+  --wh-glass-blur-overlay: 24px;
+  --wh-glass-saturate: 135%;
+
+  --wh-shadow-1: 0 2px 8px rgba(38, 70, 86, 0.07), var(--wh-glass-rim);
+  --wh-shadow-2: 0 18px 42px rgba(38, 70, 86, 0.11), 0 3px 10px rgba(38, 70, 86, 0.08), var(--wh-glass-rim);
+  --wh-shadow-3: 0 24px 64px rgba(15, 56, 75, 0.18), var(--wh-glass-rim);
+
+  --wh-glass-border: rgba(94, 125, 143, 0.28);
+  --wh-glass-border-strong: rgba(13, 148, 136, 0.55);
+
+  --wh-grid-line: rgba(13, 148, 136, 0.05);
+  --wh-decor: rgba(13, 148, 136, 0.32);
+  /* 浅色下没有辉光可用，改用白色浮雕让标题从玻璃底上浮起 */
+  --wh-title-shadow: 0 1px 2px rgba(255, 255, 255, 0.85);
+  --wh-title-rule-glow: none;
+  --wh-scrim: rgba(38, 83, 104, 0.20);
+  --wh-scrim-solid: rgba(38, 83, 104, 0.38);
+
+  --wh-surface-glass: var(--wh-glass-panel);
+  --wh-surface-glass-strong: var(--wh-glass-overlay);
+  --wh-focus-ring: 0 0 0 2px rgba(255, 255, 255, 0.90), 0 0 0 4px rgba(13, 148, 136, 0.38);
+  --wh-shadow-soft: var(--wh-shadow-2);
+  --wh-border-glass: var(--wh-glass-border);
+  --wh-border-glass-strong: var(--wh-glass-border-strong);
+  --wh-control-bg: var(--wh-glass-control);
+
+  --wh-hover-row: rgba(71, 101, 119, 0.06);
+  --wh-table-sort-icon: #5b7288;
+  --wh-seg-bg: rgba(71, 101, 119, 0.08);
+  /* 中性雾蓝灰表面；青色只用于交互信号 */
+  --wh-subtle-bg: rgba(255, 255, 255, 0.46);
+  --wh-subtle-border: rgba(94, 125, 143, 0.20);
+  --wh-error-text: #c0392b;
+  --wh-success-text: #15803d;
+  --wh-warn-text: #b45309;
+  /* 状态色（浅色主题下用更深的色阶，保证在浅底上可读） */
+  --wh-ok: #0f9d58;
+  --wh-danger: #d93025;
+  --wh-warn: #d97706;
+  /* 时间线语义点色：浅色档保持换版前的原值不变 */
+  --wh-tl-done: #8c8c8c;
+  --wh-tl-fail: #ff4d4f;
+  --wh-tl-plan: #b7eb8f;
+  --wh-input-bg: rgba(255, 255, 255, 0.82);
+  --wh-input-border: rgba(94, 125, 143, 0.28);
+  --wh-overlay: rgba(31, 53, 68, 0.28);
+
+  /* ================= olbr 卡片皮肤令牌（浅色档） ================= *
+   * 来源：olbrportal/assets/olbr.css 的 .qc-card 一档（该文件 :root 与 html.dark 两块）。
+   * 只取「皮肤」——描边 / 内发光 / 悬停上浮与彩色投影——不搬它的信息结构
+   * （图标+徽章+大数字+趋势线的居中堆叠），各页 JSX 保持原样。
+   *
+   * 色值不新造，全部由本文件既有的语义色合成：
+   *   品牌青 --wh-teal(#0d9488) 对位 olbr 的 --b(#0e7490)，两者同为 teal 系品牌色，
+   *   差异仅在色相微调（0d9488 偏绿、0e7490 偏蓝）；这里刻意沿用 my_app 自己的
+   *   --wh-teal，避免同一个页面里出现两种品牌青。
+   * 等级档复用 --wh-ok/--wh-warn/--wh-danger，与 --wh-sev-* 同源。
+   *
+   * 深色档不覆盖：my_app 深色已有成熟的深空蓝+电光青体系，olbr 深色档是另一套
+   * 深色规范，两套并存会互相打架。内发光与悬停只在本浅色块内生效。 */
+  --wh-card-accent: var(--wh-teal);
+  --wh-card-accent-soft: var(--wh-teal-20);
+  /* color-mix 在 :root 上求值：本变量的声明元素就是 :root，浅色块内替换成立。
+     不支持 color-mix 的浏览器整条声明失效，由文件末尾 @supports 降级段兜底。 */
+  --wh-card-accent-line: color-mix(in srgb, var(--wh-teal) 32%, transparent);
+  /* olbr 的招牌内发光：inset 0 0 14px <accent 12%>。静态卡用 12%，悬停加深到 20%。 */
+  --wh-card-glow: inset 0 0 14px color-mix(in srgb, var(--wh-card-accent) 12%, transparent);
+  --wh-card-glow-hover: inset 0 0 18px color-mix(in srgb, var(--wh-card-accent) 20%, transparent);
+  --wh-card-drop-hover: 0 8px 18px color-mix(in srgb, var(--wh-card-accent) 16%, transparent);
+  --wh-card-elevate: -2px;
+  /* 卡片阴影总成：内发光 + 既有 --wh-shadow-2（olbr 的 .qc-card 静态态只有内发光，
+     这里额外保留 my_app 的外阴影，因为 my_app 卡片是浮在渐变页底上的实体块，
+     去掉外阴影会显得「贴」在背景上）。--wh-card-shadow 同时供 index.css 的 .ant-card
+     规则和 theme.ts 的 cardStyle.boxShadow 使用。 */
+  --wh-card-shadow: var(--wh-card-glow), var(--wh-shadow-2);
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  background: var(--wh-page-bg);
+  transition: background 0.25s ease, color 0.25s ease;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+/* ---------- 统一外壳玻璃层：层级由令牌驱动，深浅主题共用同一组规则 ---------- *
+ * .app-spatial-root 必须保持透明：body 的渐变与两张氛围光斑（::before/::after）
+ * 只有透出来，上面的玻璃面板才有东西可折射。此前 root 自带 0.72 不透明的玻璃底，
+ * 把光斑整片盖住，玻璃效果实际退化成一层灰膜。 */
+.app-spatial-root {
+  background: transparent !important;
+}
+
+/* ---------- 嵌入模式（?embed=1 / ?layout=bare，根节点挂 .wh-embed-mode） ----------
+ * 只渲染页面本体：无侧栏 / 无 Header / 无留白，模块铺满视口（门户 iframe / 大屏用）。
+ * 氛围光斑与 body 渐变保留，保证嵌入页与外壳的背景观感一致。 */
+.wh-embed-mode {
+  height: 100vh;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  /* 2026-10-12：嵌入模式下禁掉根容器自身的滚动条（用户反馈「门户嵌入的
+     my_app 页面右侧会出现一条 6-8px 宽的浅色竖条」）。
+     根因：app-spatial-root 没设 overflow，子组件（地图浮层 / 排名条）一旦
+     内部内容超 100vh，body 高度被撑大，浏览器在 viewport 右侧画竖向滚动条。
+     嵌入场景下 GISMap 工具栏 + 排名条 + 图例 + Leaflet 浮层累计已接近
+     100vh，再多一点（比如浮层宽度随视口变化）就溢出。
+     修复：嵌入模式下整个根 overflow: hidden，溢出部分直接被裁断（嵌入场景
+     本就是"装得下就看，装不下就裁"的取舍，比出现一条 6px 白条更合理）。
+     为什么用 hidden 而不是 clip：hidden 会把 overflow-y 也禁掉，避免
+     内容超长时也出滚动条（嵌入场景不允许出现滚动条，会与外层 iframe
+     滚动行为冲突）。直接打开（非 embed）模式不受这条影响。 */
+  overflow: hidden;
+}
+.wh-embed-mode > .ant-layout,
+.wh-embed-mode > .ant-layout > .ant-layout {
+  height: 100%;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+.wh-embed-mode #main-content {
+  height: 100%;
+  min-height: 0;
+  flex: 1 1 auto;
+  /* 2026-10-12：嵌入模式下禁掉主内容区的滚动条。
+     原因：App.tsx 给 #main-content 设了 style.overflow='auto'（行内 style），
+     嵌入模式（height: 100%）下内容若超过 height 就会出滚动条。嵌入场景
+     不期望出现内层滚动条（与外层 iframe 滚动行为冲突），所以覆盖为 hidden。 */
+  overflow: hidden;
+}
+.spatial-panel,
+.spatial-navbar {
+  background: var(--wh-glass-panel) !important;
+  border-color: var(--wh-glass-border) !important;
+  box-shadow: var(--wh-shadow-2) !important;
+  -webkit-backdrop-filter: blur(var(--wh-glass-blur-panel)) saturate(var(--wh-glass-saturate));
+  backdrop-filter: blur(var(--wh-glass-blur-panel)) saturate(var(--wh-glass-saturate));
+}
+/* 顶栏再叠一层折射高光，制造玻璃厚度感（不拦截指针事件） */
+.spatial-navbar {
+  position: relative;
+}
+.spatial-navbar::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: var(--wh-glass-specular);
+  opacity: 0.55;
+}
+
+/* 卡片层：背景 / 描边 / 阴影 / 模糊全部取令牌，不再按主题各写一份。
+ *
+ * 2026-09-24 卡片风格统一：阴影改用「总成」令牌 --wh-card-shadow，
+ * 该令牌在深色 :root 与浅色 :root[data-theme='light'] 里各定义一次：
+ *   深色 = var(--wh-shadow-1)                  ← 改动前原值，零回归（用户已确认深色不套 olbr）
+ *   浅色 = var(--wh-card-glow), var(--wh-shadow-2) ← olbr .qc-card 的招牌内发光 + 既有外阴影
+ * 于是「按主题切换卡片皮肤」只发生在令牌层，类规则本身不需要任何 data-theme 分支。
+ *
+ * 为什么不用 box-shadow: var(--wh-card-glow), var(--wh-shadow-2) 直接拼：
+ * 一旦某个 --wh-card-glow 未定义，guaranteed-invalid 会让**整条**简写声明失效，
+ * 卡片会掉成无阴影；收敛到单一总成令牌后，兜底只需保证该令牌始终有值。
+ *
+ * .wh-card 是「项目默认卡片」的官方入口（CardBase 组件挂在根节点上）：
+ * 卡片皮肤的所有规则都以它为一等公民，新代码走 CardBase 即可自动获得，
+ * 不需要在页面里写任何样式。 */
+.ant-card,
+.wh-card,
+.wh-stat-card,
+.spatial-stat-card,
+.dcm-modal {
+  background: var(--wh-glass-card) !important;
+  border-color: var(--wh-glass-border) !important;
+  box-shadow: var(--wh-card-shadow) !important;
+  -webkit-backdrop-filter: blur(var(--wh-glass-blur-card)) saturate(var(--wh-glass-saturate));
+  backdrop-filter: blur(var(--wh-glass-blur-card)) saturate(var(--wh-glass-saturate));
+}
+
+/* 描边也随皮肤走：浅色档用 accent 线（olbr 的 --qc-accent-line），深色档保持原玻璃描边 */
+:root[data-theme='light'] .ant-card,
+:root[data-theme='light'] .wh-card,
+:root[data-theme='light'] .wh-stat-card,
+:root[data-theme='light'] .spatial-stat-card,
+:root[data-theme='light'] .dcm-modal {
+  border-color: var(--wh-card-accent-line) !important;
+}
+
+/* 裸 div 形态的 .wh-card（CardBase 的 as="div"）没有 antd 的内边距，这里补上 */
+.wh-card:not(.ant-card) {
+  border: 1px solid var(--wh-glass-border);
+  border-radius: var(--wh-radius-lg);
+  padding: var(--wh-space-md);
+}
+/* CardBase as="div" 的卡头：与 antd Card 头部同排版，不再逐个页面写内联 */
+.wh-card-head {
+  display: flex;
+  align-items: center;
+  gap: var(--wh-space-sm);
+  margin-bottom: var(--wh-space-sm);
+}
+
+/* ---------- 控件层玻璃：Select / Input / Button / Picker / Segmented / 表头 ---------- *
+ * 三个与 antd v5 不同的坑（都已实测确认）：
+ *   1. v6 的 Select 把背景与描边挂在根节点 .ant-select 上，.ant-select-selector 已只是
+ *      内层内容容器（旧选择器不会命中，控件看起来还是白底）；
+ *   2. Button 的默认色也带 .ant-btn-color-default，因此排除条件必须放行 default，
+ *      只挡 danger 与预设色，否则所有普通按钮都会被排除、玻璃完全失效；
+ *   3. icon-only 按钮同样是 -variant-outlined，无需特殊处理。 */
+.ant-select,
+.ant-select-selector,
+.ant-input,
+.ant-input-affix-wrapper,
+.ant-input-number,
+.ant-picker,
+.ant-segmented,
+.ant-table-thead > tr > th,
+.ant-btn:where(.ant-btn-variant-outlined, .ant-btn-variant-dashed):not(.ant-btn-dangerous):not([class*="ant-btn-color-danger"]) {
+  background: var(--wh-glass-control) !important;
+  border-color: var(--wh-glass-border) !important;
+  -webkit-backdrop-filter: blur(var(--wh-glass-blur-control)) saturate(120%);
+  backdrop-filter: blur(var(--wh-glass-blur-control)) saturate(120%);
+}
+/* danger 按钮：只把底色换成玻璃，描边与文字保留红色语义 */
+.ant-btn:where(.ant-btn-variant-outlined, .ant-btn-variant-dashed):is(.ant-btn-dangerous, [class*="ant-btn-color-danger"]) {
+  background: var(--wh-glass-control) !important;
+  -webkit-backdrop-filter: blur(var(--wh-glass-blur-control)) saturate(120%);
+  backdrop-filter: blur(var(--wh-glass-blur-control)) saturate(120%);
+}
+.ant-select:not(.ant-select-disabled):hover,
+.ant-btn:where(.ant-btn-variant-outlined, .ant-btn-variant-dashed):not(:disabled):hover,
+.ant-picker:not(.ant-picker-disabled):hover,
+.ant-input-affix-wrapper:not(.ant-input-affix-wrapper-disabled):hover {
+  background: var(--wh-glass-control-hover) !important;
+  border-color: var(--wh-glass-border-strong) !important;
+}
+/* 文本/链接按钮常态保持透明，仅在 hover 时浮出玻璃底 */
+.ant-btn-variant-text:not(:disabled):hover,
+.ant-btn-variant-link:not(:disabled):hover {
+  background: var(--wh-glass-control) !important;
+}
+/* 禁用态退回哑光底：玻璃底会让「不可点」看起来仍然可点 */
+.ant-input-disabled,
+.ant-input-affix-wrapper-disabled,
+.ant-picker-disabled,
+.ant-select-disabled,
+.ant-select-disabled .ant-select-selector,
+.ant-input-number-disabled,
+.ant-btn:disabled {
+  background: var(--wh-subtle-bg) !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+
+/* ---------- 浮层玻璃：Dropdown / Modal / Drawer / Popover / 日期面板 ---------- *
+ * 刻意不含 Tooltip：antd 的 tooltip 文案恒为浅色，浅色主题下换成白色玻璃会变成白底白字。 */
+.ant-modal-content,
+.ant-drawer-content,
+.ant-popover-inner,
+.ant-dropdown-menu,
+.ant-select-dropdown,
+.ant-picker-panel-container,
+.ant-cascader-dropdown {
+  background: var(--wh-glass-overlay) !important;
+  border: 1px solid var(--wh-glass-border) !important;
+  box-shadow: var(--wh-shadow-3) !important;
+  -webkit-backdrop-filter: blur(var(--wh-glass-blur-overlay)) saturate(150%);
+  backdrop-filter: blur(var(--wh-glass-blur-overlay)) saturate(150%);
+}
+/* 菜单本体透明：侧栏的玻璃由 Sider 提供，菜单只负责选中/悬停的强调色 */
+.ant-menu,
+.ant-menu-sub,
+.ant-dropdown {
+  background: transparent !important;
+}
+
+/* 侧栏内容列布局：品牌条/搜索框固定，菜单区独占剩余高度并可独立滚动。
+   flex:1 1 auto + min-height:0 是关键：菜单内容再多也只能在「视口高度 − 固定区」
+   内滚动，而不会把 .ant-layout-sider 本身撑高（撑高后菜单区就永不出滚动条，
+   目录全展开时底部的页面会滚不到，见 App.tsx 里 Sider 的 100vh/sticky 说明）。
+   antd 运行时注入的样式晚于本文件，同特异性下会赢，这里用 !important 保底。 */
+.ant-layout-sider-children {
+  display: flex !important;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  height: 100%;
+}
+/* 自动刷新开启时给 Select 一条强化描边，作为「正在自动刷新」的状态提示 */
+.wh-select-active.ant-select,
+.wh-select-active .ant-select,
+.wh-select-active .ant-select-selector {
+  border-color: var(--wh-glass-border-strong) !important;
+}
+
+/* ---------- 键盘焦点：所有可交互元素共用同一条焦点环 ---------- */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible,
+.ant-btn:focus-visible,
+.ant-select-focused,
+.ant-select-focused .ant-select-selector,
+.ant-menu-item:focus-visible,
+.ant-menu-submenu-title:focus-visible {
+  outline: none;
+  box-shadow: var(--wh-focus-ring) !important;
+}
+
+/* ---------- 降级：不支持 backdrop-filter 时各层切不透明底 ---------- */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .spatial-panel,
+  .spatial-navbar {
+    background: var(--wh-glass-panel-solid) !important;
+  }
+  .ant-card,
+  .wh-stat-card,
+  .spatial-stat-card,
+  .dcm-modal {
+    background: var(--wh-glass-card-solid) !important;
+  }
+  .ant-select,
+  .ant-select-selector,
+  .ant-input,
+  .ant-input-affix-wrapper,
+  .ant-input-number,
+  .ant-picker,
+  .ant-segmented,
+  .ant-btn:where(.ant-btn-variant-outlined, .ant-btn-variant-dashed):not(.ant-btn-dangerous):not([class*="ant-btn-color-danger"]),
+  .ant-table-thead > tr > th {
+    background: var(--wh-glass-control-solid) !important;
+  }
+  .ant-modal-content,
+  .ant-drawer-content,
+  .ant-popover-inner,
+  .ant-dropdown-menu,
+  .ant-select-dropdown,
+  .ant-picker-panel-container {
+    background: var(--wh-glass-overlay-solid) !important;
+  }
+}
+
+/* ---------- 降级：不支持 color-mix() 时去掉 olbr 内发光与彩色投影 ---------- *
+ * 令牌 --wh-card-accent-line / --wh-card-glow / --wh-card-shadow（浅色档）全部由
+ * color-mix() 合成，这些浏览器上相关声明整条失效。这里把卡片退回纯 --wh-shadow-*
+ * 阴影、描边退回不依赖 color-mix 的 --wh-glass-border，保证卡片不至于掉成
+ * 「无描边无阴影」的裸块。注意 @supports 内的规则同样要带 !important —— 被覆盖的
+ * 原规则大多带 !important，不带就压不过去。 */
+@supports not (color: color-mix(in srgb, red 50%, transparent)) {
+  :root[data-theme='light'] {
+    --wh-card-accent-line: var(--wh-glass-border);
+    --wh-card-shadow: var(--wh-shadow-2);
+    --wh-card-glow: none;
+    --wh-card-glow-hover: none;
+    --wh-card-drop-hover: none;
+  }
+  .ant-card,
+  .wh-card,
+  .wh-stat-card,
+  .spatial-stat-card,
+  .dcm-modal,
+  .wh-card-glow,
+  .wh-card-lv-ok,
+  .wh-card-lv-warn,
+  .wh-card-lv-crit {
+    border-color: var(--wh-glass-border) !important;
+    box-shadow: var(--wh-shadow-2) !important;
+  }
+  :root[data-theme='light'] .wh-card-interactive:hover,
+  :root[data-theme='light'] .wh-card:hover,
+  :root[data-theme='light'] .wh-stat-card:hover,
+  :root[data-theme='light'] .ant-card:hover {
+    border-color: var(--wh-glass-border-strong) !important;
+    box-shadow: var(--wh-shadow-3) !important;
+  }
+}
+
+/* ---------- 减少动态效果：只收敛装饰性动效 ---------- */
+@media (prefers-reduced-motion: reduce) {
+  /* 这里刻意不做全局 animation-duration 覆盖：那会把 Spin 等「加载中」无限动画
+     一并停掉，用户失去加载反馈。只关闭位移/悬浮过渡与氛围光斑。 */
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+  }
+  .app-spatial-root::before,
+  .app-spatial-root::after,
+  .dashboard-layout-shell::before {
+    display: none !important;
+  }
+  .ant-card,
+  .wh-stat-card,
+  .spatial-stat-card,
+  .wh-card-interactive,
+  .ant-menu-inline .ant-menu-item {
+    transition: none !important;
+  }
+  .ant-card:hover,
+  .wh-stat-card:hover,
+  .spatial-stat-card:hover,
+  .wh-card-interactive:hover {
+    transform: none !important;
+  }
+}
+
+/* 跳转到主内容的键盘快捷入口（Tab 首站可见，否则视觉隐藏） */
+.wh-skip-link {
+  position: fixed;
+  top: var(--wh-space-sm);
+  left: var(--wh-space-sm);
+  z-index: 3000;
+  transform: translateY(-200%);
+  padding: var(--wh-space-xs) var(--wh-space-md);
+  border-radius: var(--wh-radius-md);
+  background: var(--wh-glass-overlay-solid);
+  border: 1px solid var(--wh-glass-border-strong);
+  box-shadow: var(--wh-shadow-3);
+  color: var(--wh-teal);
+  font-size: 0.8125rem;
+  text-decoration: none;
+  transition: transform 0.15s ease;
+}
+.wh-skip-link:focus-visible {
+  transform: translateY(0);
+  box-shadow: var(--wh-focus-ring) !important;
+}
+
+/* ---------- 响应式根字体：兼容 1080P/2K/4K 与 Windows 高 DPI 缩放 ---------- */
+/* 16px 为基准；在宽屏上轻微放大以提升 2K/4K 可读性，同时尊重系统缩放设置 */
+html {
+  font-size: clamp(14px, 0.55vw + 12.2px, 18px);
+}
+
+/* 针对 Windows 常见缩放：浏览器已按缩放系数重算 px/rem，无需额外放大；
+   若用户显式调大系统字体，rem 会自然跟随 */
+/* 注意：不要加全局 prefers-reduced-motion 覆盖（强制 0.01ms 动画/过渡时长）。
+   它会杀死 antd Spin 等无限旋转动画，且隐式 transition 会干扰 rc-trigger
+   弹层定位测量（getBoundingClientRect 返回过渡起始值），导致下拉框闪动、定位到屏幕外。 */
+
+/* Leaflet map fix */
+.leaflet-container {
+  z-index: 1;
+}
+
+/* Tag hover 效果：上移 + 阴影加深 */
+.ant-tag[style*="cursor: pointer"]:hover,
+.ant-tag[style*="cursor:pointer"]:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.12);
+}
+
+/* ---------- 表格主题（.dark-table 兼容深/浅两套） ---------- */
+/* 深色主题：覆盖 antd 默认白色背景 + 黑色表头文字 */
+:root[data-theme='dark'] .dark-table .ant-table {
+  background: transparent !important;
+}
+:root[data-theme='dark'] .dark-table .ant-table-thead > tr > th {
+  background: transparent !important;
+  color: #f5f7ff !important;
+}
+:root[data-theme='dark'] .dark-table .ant-table-tbody > tr > td {
+  background: transparent !important;
+}
+/* 鼠标悬停行默认浅色背景在深色主题下刺眼，改为半透明白 */
+:root[data-theme='dark'] .dark-table .ant-table-tbody > tr:hover > td {
+  background: rgba(255, 255, 255, 0.06) !important;
+}
+/* 表头排序/筛选图标在深背景下不可见，提亮 */
+:root[data-theme='dark'] .dark-table .ant-table-thead th .anticon {
+  color: #aebbd4 !important;
+}
+
+/* 浅色主题：表格使用 antd 默认浅色样式（透明背景 + 深色文字） */
+:root[data-theme='light'] .dark-table .ant-table {
+  background: #ffffff !important;
+}
+:root[data-theme='light'] .dark-table .ant-table-thead > tr > th {
+  background: #f0f5fa !important;
+  color: #334155 !important;
+}
+:root[data-theme='light'] .dark-table .ant-table-tbody > tr > td {
+  background: #ffffff !important;
+}
+:root[data-theme='light'] .dark-table .ant-table-tbody > tr:hover > td {
+  background: #e8f4f2 !important;
+}
+:root[data-theme='light'] .dark-table .ant-table-thead th .anticon {
+  color: #5b7288 !important;
+}
+
+/* Leaflet 弹窗在浅色主题下的适配（保持可读） */
+:root[data-theme='light'] .leaflet-popup-content-wrapper,
+:root[data-theme='light'] .leaflet-popup-tip {
+  background: #ffffff;
+  color: #16233b;
+}
+:root[data-theme='light'] .leaflet-popup-content a {
+  color: #0d9488;
+}
+
+/* Leaflet 底图深色适配：**已移除 invert 滤镜**（2026-10-02）。
+   底图已从 OSM 栅格瓦片换成自托管 PMTiles 矢量瓦片，深色主题由 protomaps 的
+   DARK_THEME 真配色实现（见 gismap/basemap.ts），不再需要滤镜硬凑。
+   移除本条同时解决了它的已知副作用：原先 invert 会把 OSM 的深色公路/注记
+   反成亮白块，正是图例「深色下白底白字」问题的根因（见 gismap/MapLegendOverlay.tsx）。
+   历史：曾试过改用 CARTO 原生暗色瓦片但失败（需 API Key），已回滚；
+   现方案为内网自托管，无 key、无额度限制。详见 gismap/basemap.ts 文件头。 */
+
+/* Leaflet 控件/弹窗在深色主题下的适配 */
+:root[data-theme='dark'] .leaflet-control-zoom a {
+  background: #12263f;
+  color: var(--wh-teal);
+  border-color: rgba(0, 217, 255, 0.25);
+}
+:root[data-theme='dark'] .leaflet-control-zoom a:hover {
+  background: #1b3357;
+}
+:root[data-theme='dark'] .leaflet-control-attribution {
+  background: rgba(8, 18, 44, 0.85);
+  color: #aebbd4;
+}
+:root[data-theme='dark'] .leaflet-control-attribution a {
+  color: #258cff;
+}
+:root[data-theme='dark'] .leaflet-popup-content-wrapper,
+:root[data-theme='dark'] .leaflet-popup-tip {
+  background: #0f2744;
+  color: #f5f7ff;
+  border: 1px solid rgba(0, 217, 255, 0.25);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+}
+:root[data-theme='dark'] .leaflet-popup-content a {
+  color: #00d9ff;
+}
+:root[data-theme='dark'] .leaflet-popup-close-button {
+  color: #aebbd4 !important;
+}
+
+/* ---------- GIS 县（County）边界名称标注（2026-09-25 新增） ----------
+
+   2026-10-14 第三版（用户：**「去掉标签背景，只显示 BOMI.01」**）：
+   底色、边框、圆角、色点全部去掉，只留「县名 + 数字」两段纯文字。
+   为什么这样反而更清楚：
+     · 底色原先是为了把小字从瓦片纹理上托起来。但改版后标签已经**让开了**
+       重叠（见 countyLabelLayout.ts），每个标签周围都是有留白的，
+       再套一层雾底就成了没有必要的装饰 —— 用户看的就是这份多余。
+     · 色点也去掉：它表达的是「严重度」，而**同一信息在县块填充色上已经有了**，
+       在同一张图上重复编码两遍是冗余；排名条里保留色点，那里没有填充色兜底。
+   可读性改由**文字描边**保证（见下方 text-shadow）—— 无底色时这是唯一
+   能把小字从花哨底图上托起来的手段。
+   ⚠️ 注意与 .gis-legend-overlay 的取舍**正好相反**：那里用户明确否决过描边
+   （0.75rem 小字套同色晕会脏污/重影）。此处字号更小、底图更花，
+   且已无底色可选，故改用**细描边 + 高对比纯白/纯黑字**，而不是模糊的晕。 */
+.gis-county-label.leaflet-tooltip {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  box-shadow: none;
+  color: #ffffff;
+  pointer-events: none;
+  /* 极细描边（2026-10-29 按用户要求把原来的 4 层重阴影改成 1px 硬描边）：
+     原先是「两层模糊(2px/1px) + 两层 1px 斜偏移」，小字号下发虚、压花底图显脏。
+     现在只留上下左右 4 个 1px 实心偏移 —— 等于一圈 hairline 轮廓，无模糊。
+     深色主题用暗描边（白字压浅瓦片会消失，故两主题必须分档）。 */
+  text-shadow:
+    1px 0 0 rgba(0, 0, 0, 0.85),
+   -1px 0 0 rgba(0, 0, 0, 0.85),
+    0 1px 0 rgba(0, 0, 0, 0.85),
+    0 -1px 0 rgba(0, 0, 0, 0.85);
+}
+.gis-county-label.leaflet-tooltip::before {
+  display: none; /* 去掉箭头 */
+}
+:root[data-theme='light'] .gis-county-label.leaflet-tooltip {
+  /* 浅色主题：翻成深字 + 白色 hairline 描边。 */
+  color: #0b2447;
+  text-shadow:
+    1px 0 0 rgba(255, 255, 255, 0.95),
+   -1px 0 0 rgba(255, 255, 255, 0.95),
+    0 1px 0 rgba(255, 255, 255, 0.95),
+    0 -1px 0 rgba(255, 255, 255, 0.95);
+}
+
+/* 人员位置地图（?page=person）的县标签：**深蓝文字、无描边无阴影**。
+   2026-10-29 用户第二次反馈「地图上的标签不要显示白色阴影，跟人的感觉更不清晰」——
+   上一版按「极细白色描边」做的 4×1px hairline + 2px 白晕，在 80% 实心县块上给小字
+   糊出一圈白边，比不加更难看。本页县块填充已是实心（`COUNTY_FILL_OPACITY` 0.8），
+   深蓝 `#0b2447` 压在饱和县色上本身就有对比，不需要描边托字。
+   ⚠ **必须写两条选择器**：浅色主题那条 `:root[data-theme='light'] .gis-county-label.leaflet-tooltip`
+     特异性是 (0,4,0)，单写 `.person-county-label.leaflet-tooltip` 只有 (0,2,0) —— 首版
+     只改低特异性的那条，浏览器实测计算值仍是白描边（改了个不生效的规则，静默失败）。
+     补一条带 `:root[data-theme='light']` 前缀的同源选择器 (0,5,0) 才压得住；
+     深色主题由第一条 (0,3,0) 压过基础规则 (0,2,0)。
+   GIS 页（?page=gis）**未跟着改**：那边填充仍是 0.13、字直接压在随主题反相的底图瓦片上，
+   描边是把小字从花哨瓦片里托起来的唯一手段（原始论证见上方 .gis-county-label 注释）。 */
+.gis-county-label.person-county-label.leaflet-tooltip,
+:root[data-theme='light'] .gis-county-label.person-county-label.leaflet-tooltip {
+  color: #0b2447;
+  text-shadow: none;
+}
+
+/* IPT 电源页（?page=ipt_power）的县名标签（2026-11-09 随「按县上色」一起加）。
+   与人员页同一取舍：县块是 80% 实心饱和色，深蓝文字压在上面本身有对比，
+   白描边/白晕反而把小字糊成一团。两条选择器都必须写：浅色主题那条
+   `:root[data-theme='light'] .gis-county-label.leaflet-tooltip` 特异性 (0,4,0)，
+   只写低特异性的单条会被它压掉（2026-10-29 人员页实测的静默失效）。
+   字号比人员页收一档：本页地图只有左 3/5 宽（实测约 570px），15px 的
+   "GRAND CAPE MOUNT" 会溢出小县，11px/10px 更贴县域；避让包围盒仍按
+   countyLabelLayout.ts 的 200×22 估（估大只是多让位，不会漏判重叠）。 */
+.gis-county-label.ipt-county-label.leaflet-tooltip,
+:root[data-theme='light'] .gis-county-label.ipt-county-label.leaflet-tooltip {
+  color: #0b2447;
+  text-shadow: none;
+}
+.ipt-county-tag { gap: 3px; }
+.ipt-county-tag .gis-county-tag__name { font-size: 11px; letter-spacing: 0.02em; }
+.ipt-county-tag .gis-county-tag__num { font-size: 10px; }
+
+/* 地图文字层统一 Inter（2026-10-29 用户指定，并明确不要 Orbitron 这类装饰性科技字体
+   —— 小字号下可读性差）。范围只圈地图容器与图例浮层，不动全站正文：
+   全站字体栈是另一套既有约定（见上面的 body 规则），改了会波及 60+ 个页面。
+   县名标签、站点 tooltip/popup、人员针徽标、图例都在这个容器内，一并生效。
+   ⚠ 选择器**必须带 `body` 前缀**：`node_modules/leaflet/dist/leaflet.css:275` 自己也写了
+     `.leaflet-container { font-family: "Helvetica Neue", Arial, ... }`，同为单类选择器，
+     而 leaflet.css 由 `components/LeafletMap.tsx` 引入、打包顺序在本文件之后 ——
+     同特异性下后来者胜，只写 `.leaflet-container` 会被它压掉（实测计算值仍是
+     Helvetica Neue、三个 @font-face 全部停在 unloaded）。加一层 body 变成 (0,1,1) 才稳。 */
+body .leaflet-container,
+.gis-legend-overlay {
+  font-family: 'Inter', "Segoe UI", Arial, sans-serif;
+}
+
+/* 县名标注的承载锚点（2026-10-14）：一个零尺寸、零视觉的 divIcon。
+   它存在的唯一目的是给 tooltip 一个**可任意指定**的坐标（见 LeafletMap.tsx
+   的 Marker 注释）。必须显式压掉 Leaflet 给 divIcon 的默认定位样式，
+   否则会留下一个可见的空方块，正好落在避让后的标签旁边。 */
+.leaflet-empty-anchor {
+  width: 0 !important;
+  height: 0 !important;
+  margin: 0 !important;
+  border: none !important;
+  background: transparent !important;
+  pointer-events: none !important;
+}
+
+/* 标签内部结构：**只剩**县名 + 数字两段（色点与底色已于 2026-10-14 第三版去掉，
+   理由见上方 .gis-county-label 的注释）。
+   字距的拉开是为了让「县名」与「数字」在字形上天然分层 ——
+   没有底色和色点之后，可读性全靠文字本身，这层区分就更有必要。 */
+/* 字号字重按 2026-10-29 用户给的参数表：
+     区域名称 Inter 15px/700 · 主要指标 Inter 12px/500 · 辅助指标 Inter 11px/400。
+   原先三档全挤在 11px（名字靠 700 撑），小字号下县名与数字分不出层级。 */
+.gis-county-tag {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  font-size: 0.6875rem;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.gis-county-tag__name {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+/* 数字用等宽数字：各标签的序号宽度一致，竖排下来右边缘自然对齐。
+   **不补零**（用户要的是 `BOMI 01` 这种「名 + 号」的写法，
+   补零成 `01` 与写成 `1` 在这里等价 —— 保留补零是因为它对单数字更整齐，
+   且与排名条的数字风格一致）。
+   字重 500 + 12px（2026-10-29 用户参数表「主要指标 Inter 12px/500」）：与 15px/700
+   的县名形成「标题重 / 数值中」的分层，原先两档都是 700 且同为 11px，数字和名字抢重心。 */
+.gis-county-tag__num {
+  font-size: 12px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum';
+}
+
+/* ---------- 人员位置地图的三行县标签（2026-10-23，?page=person 专属） ----------
+   第一行县名 + 站点总数；第二行传输类型分组（MW/SAT/ST/IPRAN）；
+   第三行维护分类分组（NORMAL/ERA/COOL）。用户要求「站点总数和类型的统计」，
+   且传输与维护两类都要。
+   外层 tooltip 仍挂 .gis-county-label（主题分档的描边字，pointer-events:none），
+   这里只改内部排布：纵向三行 + 类型行压到 9px —— 10px 会把最坏行撑到 ~190px，
+   Montserrado 这类小县整个装不下一行。避开 GIS 页的 .gis-county-tag 单行结构，
+   互不影响。 */
+.person-county-tag {
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  /* 悬停展开要求标签本身可命中：外层 .gis-county-label 是 pointer-events:none
+     （不能拦地图点击），CSS 允许**后代反向开启**。命中区只有文字那一小条，
+     且人员针在 personPane(680) 高于 countyLabelPane(670) —— 与针重叠处仍是针先
+     收到点击，不会重演 2026-10-21 县界多边形成片拦掉命中的问题。 */
+  pointer-events: auto;
+}
+/* 两行统计 = **悬停才展开**（2026-10-29 用户在实测重叠数据前选定单行常驻）。
+   常驻三行时包围盒 190×51，西海岸三县实测 8 对重叠（最严重 MONTSERRADO×MARGIBI
+   113×51 = 整块压住）；改单行常驻后 190×22，与 GIS 页同档（同字号实测 0 重叠）。
+   展开块用实心小卡承载而非纯文字：它要盖在别的县色块/邻县标签之上，
+   无底文字在那种背景上读不出来。 */
+.person-county-tag__detail {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  margin-top: 2px;
+  padding: 2px 5px;
+  border-radius: var(--wh-radius-sm, 4px);
+  background: var(--wh-card-bg, rgba(255, 255, 255, 0.92));
+  border: 1px solid rgba(128, 128, 128, 0.35);
+  color: #0b2447;
+  /* 展开后不再扩大命中区（避免鼠标在展开块上时反复触发 hover 抖动） */
+  pointer-events: none;
+}
+.person-county-tag:hover .person-county-tag__detail {
+  display: flex;
+}
+.person-county-tag__head {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+}
+.person-county-tag__row {
+  /* 辅助指标 Inter 11px/400（2026-10-29 用户参数表）。
+     ⚠ 原为 9px/500，当时的理由是「10px 会把最坏行撑到 ~190px，Montserrado 这类
+       小县整个装不下一行」—— 11px 会更宽，标签避让包围盒 `PERSON_LABEL_SIZE`
+       必须跟着实测重量，否则叠字判定失准（见 countyLabelLayout.ts）。 */
+  font-size: 11px;
+  line-height: 1.25;
+  white-space: nowrap;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum';
+  opacity: 0.92;
+}
+
+/* ---------- GIS 超时告警站点：外圈呼吸光环（2026-10-02 新增） ----------
+   用户要求「严重告警加脉冲/外圈」。只作用于 realtime 模式的 rt_alarm_overdue
+   （已超时）一档 —— 它是最高优先级且数量最少。见 GISMap.tsx 对应注释。
+
+   实现：GISMap 为这类站点额外渲染一个只描边、不填充的 CircleMarker
+   （radius = 站点半径 + 4），带 className="gis-halo"（Leaflet 会把 className
+   写到 SVG <path> 上，见 components/LeafletMap.tsx 的 CircleMarker.className）。
+   这里只做动画，**颜色/粗细由 JS 传入**，避免两处各写一份色值。
+
+   为什么用「缩放 + 透明度」而不是改 r：
+     SVG 的 r 是几何属性，CSS 动画改不动；transform: scale() 能跑在合成层上，
+     且缩放以元素中心为原点（Leaflet 给每个 path 已设好 transform-origin），
+     圆点不会位移。fill: none 保证缩放时内部不出现实心块（只缩放描边圈）。
+
+   性能：只对超时档开，通常个位数到几十个；用 will-change 提升为合成层。
+   若将来要扩到更多档，需先评估同时动画的 SVG 数量。 */
+.gis-halo {
+  fill: none;
+  transform-box: fill-box;
+  transform-origin: center;
+  will-change: transform, opacity;
+  animation: gis-halo-pulse 1.8s ease-out infinite;
+  pointer-events: none; /* 光环不吞站点点击（站点圆点在它之上，但仍稳妥起见） */
+}
+@keyframes gis-halo-pulse {
+  0%   { transform: scale(1);   opacity: 0.85; }
+  70%  { transform: scale(1.6); opacity: 0; }
+  100% { transform: scale(1.6); opacity: 0; }
+}
+/* 尊重「减少动态效果」偏好：关掉呼吸，仅保留一圈静态描边，语义不丢 */
+@media (prefers-reduced-motion: reduce) {
+  .gis-halo {
+    animation: none;
+    opacity: 0.6;
+    transform: scale(1.25);
+  }
+}
+
+/* ---------- GIS 人员图层（2026-10-16）：小人标记 + 状态提示条 ----------
+ * 小人图标本体是 Leaflet divIcon 内的内联 SVG（由 PersonnelLayer.tsx 生成），
+ * 这里只补两件事：
+ *   1. .gis-person-marker 去掉 divIcon 默认的白底边框（否则小人外面套一个白方块），
+ *      并保证可点（pointer-events）。
+ *   2. .gis-personnel-status 是浮在地图左下的状态条（覆盖人数 / 非实时提示 /
+ *      路线距离）。配色一律走 --wh-* 令牌，不写死十六进制（AGENTS.md 三.3）。 */
+.gis-person-marker {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  /* divIcon 默认 overflow 可见，标签才能超出针身边界显示 */
+  overflow: visible !important;
+}
+/* 图标容器：针身在左，标签在右，垂直居中于针身圆心附近 */
+.gis-person-anchor {
+  position: relative;
+  overflow: visible;
+  line-height: 0;
+}
+/* 悬停放大（2026-10-21，**只作用于 ?page=person**）：**必须用纯 CSS，不能走 React 状态**。
+   此前悬停态被拼进 marker 的 iconKey / html / 尺寸，鼠标一进针 Leaflet 就重建
+   图层、把针的 DOM 元素换掉 —— mousedown 命中旧元素、mouseup 命中新元素，
+   浏览器不产生 click，人员针就点不动了（实测时间线见 PersonMapView 的注释）。
+   这里只做视觉放大，不触碰 DOM 结构；缩放原点取**针尖**（bottom center，
+   与 Marker 的 iconAnchor = [size/2, size*1.5] 对齐），放大时针尖位置不动。
+   前缀 `.person-map-canvas` 是人员页给地图容器加的类：GIS 页的人员图层
+   （gismap/PersonnelLayer）沿用着旧的 React 悬停态，别把两套叠在一起。 */
+.person-map-canvas .gis-person-marker:hover .gis-person-anchor {
+  transform: scale(1.22);
+  transform-origin: 50% 100%;
+  filter: brightness(1.12) saturate(1.25);
+}
+/* 悬停姓名/电话气泡（2026-10-16 用户要求「悬浮时显示人员的名字和电话」）。
+   显示在针尖上方（针高 = size*1.5，故 bottom 用 100% 抬到图标顶），水平居中。 */
+.gis-person-tip {
+  position: absolute;
+  left: 50%;
+  bottom: 100%;
+  transform: translateX(-50%);
+  margin-bottom: 2px;
+  white-space: nowrap;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  line-height: 1.35;
+  padding: var(--wh-space-xs, 4px) var(--wh-space-sm, 8px);
+  border-radius: var(--wh-radius-sm, 4px);
+  background: var(--wh-card-bg, rgba(255, 255, 255, 0.95));
+  border: 1px solid var(--wh-border, rgba(0, 0, 0, 0.12));
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  pointer-events: none; /* 气泡不拦点击/悬停事件 */
+}
+.gis-person-tip b {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--wh-text, #333);
+}
+.gis-person-tip i {
+  font-style: normal;
+  font-size: 0.6875rem;
+  color: var(--wh-text-secondary, #888);
+}
+
+/* 常驻 WO 计数标签（WO:未关闭/总数）。放在针身右侧，不遮住地图点击点 */
+.gis-person-badge {
+  position: absolute;
+  left: 100%;
+  top: 6px;
+  margin-left: 2px;
+  white-space: nowrap;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  line-height: 1.5;
+  padding: 0 var(--wh-space-xs, 4px);
+  border-radius: var(--wh-radius-sm, 4px);
+  background: var(--wh-card-bg, rgba(255, 255, 255, 0.9));
+  border: 1px solid currentColor;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  pointer-events: none; /* 标签不拦点击，点击落到针身 */
+}
+/* 人员位置地图（?page=person）的两行徽标样式（2026-10-19）。
+   ⚠️ 只作用于 .gis-person-badge 内部的**新增子元素**，不改 .gis-person-badge 本身 ——
+   那个类 GIS 页的人员图层也在用（单行「未清除:0/17」），改父级会连带改掉 GIS 页。 */
+.gis-person-badge-name {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.25;
+  /* 人员姓名 Inter 14px/700（2026-10-29 用户参数表）。原先不设字号、继承父级
+     .gis-person-badge 的 11px/600 —— 父级 GIS 页人员图层也在用，不能动父级，
+     所以在本页专属的子元素上显式覆盖。 */
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--wh-text, #333);
+}
+/* 电话 = 人员详细信息档：Inter 12px/400 */
+.gis-person-badge-name i {
+  font-style: normal;
+  font-weight: 400;
+  font-size: 12px;
+  color: var(--wh-text-secondary, #888);
+}
+/* 站点数 | 未关闭 WO | 未关闭 PMT 同样归「人员详细信息」：12px/400。
+   数字仍由 <b> 加粗到 700（下方规则），保持「值比标签名抢眼」的既有读法。 */
+.gis-person-badge-stats {
+  display: block;
+  margin-top: 1px;
+  font-size: 12px;
+  font-weight: 400;
+  white-space: nowrap;
+}
+.gis-person-badge-stats b {
+  font-weight: 700;
+  margin-right: 1px;
+}
+.gis-person-badge-stats em {
+  font-style: normal;
+  margin: 0 3px;
+  opacity: 0.5;
+}
+
+.gis-personnel-status {
+  position: absolute;
+  left: var(--wh-space-md, 12px);
+  bottom: var(--wh-space-md, 12px);
+  z-index: 1000; /* 与 Leaflet 控件同层，DOM 在后故压在其上 */
+  display: flex;
+  align-items: center;
+  gap: var(--wh-space-xs, 4px);
+  padding: var(--wh-space-xs, 4px) var(--wh-space-sm, 8px);
+  border-radius: var(--wh-radius-md, 6px);
+  background: var(--wh-card-bg, rgba(255, 255, 255, 0.94));
+  border: 1px solid var(--wh-border, rgba(0, 0, 0, 0.1));
+  font-size: 0.75rem;
+  color: var(--wh-text, #333);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+.gis-personnel-note {
+  color: var(--wh-text-secondary, #888);
+}
+
+/* ---------- GIS 地图图例浮层：地图瓦片底不透明，所以改用深模糊玻璃透出瓦片 ----------
+ * 用户 2026-10-14 要求「图例背景改为透明，且深浅两个主题都要适配」。
+ *
+ * 为什么不能直接把背景写成 transparent：
+ *   浮层压在 OSM 瓦片上，底图纹理杂、明暗跨度大，纯透明会让 0.75rem 的小字
+ *   在深色林地里消失、在雪地上糊成一片。这里走的是与全站其它浮层同一条路线
+ *   （.ant-card / .dcm-modal，index.css:354-364）——**高速模糊 + 低不透明度**：
+ *   瓦片被糊成色块，文字背后始终有一层「底色」保证对比度，同时地图仍然透出来，
+ *   观感上就是「透明玻璃」。
+ *
+ * 深色档不写新色值，直接复用全站的暗色 card 玻璃（:root[data-theme='dark'] 的
+ * --wh-card-bg，index.css:1387）；浅色档是白雾玻璃。两者都刻意避开卡片玻璃的
+ * 高光渐变（--wh-glass-card 的 145deg / --wh-glass-specular），因为面板只有
+ * 13rem 宽、压在小字上，高光会读成「一条白线」。
+ *
+ * 对比度估算：深色档 0.18 × #08122c 叠在底图上。
+ * ⚠️ 2026-10-02 起底图已是**自托管 PMTiles 矢量瓦片**，深色主题用真配色
+ * （gismap/basemap.ts 的 DARK_THEME），**不再有 invert 反相** —— 下方
+ * 第三轮/第五轮记录里「瓦片被反相成亮白」这个前提已不复存在。保留原文是为了
+ * 说明当初为何走到 alpha 0；现状下白字压的是**真正的暗色底图**，可读性反而更好。
+ * 合成后亮度远低于 --wh-text(#f5f7ff)，白字可读；
+ * 浅色档 0.30 白雾同理，深字 #16233b 可读。
+ *
+ * 2026-10-14 第二轮：用户要求「继续增加透明度」，0.38 / 0.55 → 0.18 / 0.30，
+ * 模糊 28px → 34px。降不透明度会让「底」变淡，同步加模糊把瓦片糊得更平，
+ * 否则底色一淡，高频细节重新透出来，比上一版更花。
+ *
+ * ============ 2026-10-14 第三轮（用户反馈：「深色主题下出现白色背景白色字体」）============
+ *
+ * 先纠正一个误判：用户看到的**不是「不够透明」，而是「底透成了白色」**。
+ * 深色主题下瓦片被 invert 滤镜反相（见上方 :root[data-theme='dark']
+ * .gis-dark-map .leaflet-tile-pane，:690），OSM 的**深色公路/深色注记会变成亮白**。
+ * 0.18 的暗色面板叠在这片白上几乎压不住它 —— 于是「白底 + 白字
+ * (--wh-text #f5f7ff)」。**继续降不透明度只会让白底更白、更难读**，
+ * 这正是上一轮「继续增加透明度」把问题做反了的地方：透明度与可读性在
+ * 「底不可控」的场景下是**互相冲突**的，不能靠单向下调解决。
+ *
+ * 第三轮先试过「给文字加一圈描边（text-shadow halo）」，**已被用户否决并移除**：
+ * 0.75rem 的小字套一圈同色晕，观感是一层脏污/重影，非常不美观。
+ * 记在这里是为了别让后来的维护者再想出同一个办法 —— 下面这条弃用记录就是它的墓碑。
+ *
+ * 第四轮（用户：「图例的背景透明度设置为 80% 试试」）：
+ * 面板 alpha 定为 **0.2**（即 80% 透明）。这是用户明确指定的数值，直接采纳。
+ *
+ * 第五轮（用户：「100% 透明」）：面板 alpha 归 **0**，即背景完全不可见 ——
+ * 图例变成纯文字直接浮在瓦片上，没有任何底色。
+ *
+ * ⚠️ 已知代价，务必先读再改：alpha 0 意味着**完全没有底色可依靠**，
+ * 这是本页图例有史以来可读性最低的一档。
+ * 下文原文写的是「深色主题下瓦片被 invert 反相（:690），OSM 的深色公路/注记
+ * 会变成亮白，白字压在这些亮块上看不见」—— **该前提已于 2026-10-02 失效**：
+ * 底图改为自托管 PMTiles 矢量瓦片后用真暗色配色，不再有 invert，也就不再有亮块。
+ * 故这条「已知代价」现在只对**浅色主题**（浅底 + 白字）成立。
+ * 但 alpha 0 是用户连续三轮要求提高透明度后的**明确选择**，不是回归，
+ * **不要**当成 bug 自动加回背景色。
+ *
+ * 之所以保留 backdrop-filter：alpha 0 时模糊仍然作用于**面板后面的瓦片**，
+ * 让文字底下的地图被糊平（高频细节消失），比完全不模糊好读一些。
+ * 若哪天连模糊也想去掉，删 .gis-legend-overlay 里的 backdrop-filter 即可。
+ *
+ * ⚠️ 彻底解决「既要全透明、又不能白底白字」的唯一出路在底图：
+ * 深色主题不再对 OSM 瓦片做 invert（:690），改用真正的暗色瓦片源。
+ * 只要底图始终偏暗，纯文字图例就能安全地保持全透明。 */
+.gis-legend-overlay {
+  /* 模糊强度高于卡片档（20~22px）：瓦片缝隙、道路注记都是高频细节，
+     14px 会留下可辨认的碎屑，反而比纯色底更花。 */
+  -webkit-backdrop-filter: blur(34px) saturate(160%);
+  backdrop-filter: blur(34px) saturate(160%);
+}
+:root[data-theme='dark'] .gis-legend-overlay {
+  /* 用户 2026-10-14 指定「100% 透明」= alpha 0（见上方第五轮的已知代价）。
+     写成 transparent 而不是 rgba(...,0)，是为了让「零背景」这个意图一眼可见。
+     ⚠️ 2026-10-13：曾为修「图例被遮挡」把这里改成 rgba(10,20,40,0.62)，
+     **实测与遮挡无关已回退**（加底前后对比度 2.20 → 2.22，+1%）。那一轮
+     的真实根因是**门户画布外层的 .canvas-note 说明条压在 iframe 底缘**，
+     修法是浮层 bottom 上移 26px —— 见 MapLegendOverlay.tsx panelStyle 注释。
+     留此记录防两个坑：① 别再用加背景色治"看不清"（先确认是不是被盖）；
+     ② iframe 内探针查不出外层页面压上来的遮挡物，跨文档比较先对齐坐标。 */
+  background: transparent;
+}
+:root[data-theme='light'] .gis-legend-overlay {
+  background: transparent;
+}
+
+/* 降级段（@supports not backdrop-filter）已于 2026-10-14 第五轮**删除**。
+ *
+ * 它原本的作用是：不支持 backdrop-filter 的浏览器上，把面板切成近乎实心的
+ * 0.92/0.94，避免「半透明底 = 没底」。但用户第五轮明确要求「100% 透明」，
+ * 而这段降级会在**恰好不支持模糊的浏览器**上把面板变回厚底 —— 同一个页面
+ * 在两种浏览器上呈现完全相反的样子，且用户无法预期。
+ *
+ * 按「删除优于兼容」（AGENTS.md 原则 10）：既然目标是零背景，就不该留一段
+ * 会在某些环境偷偷加回背景的规则。删掉后所有浏览器行为一致 —— 都是透明。
+ * 代价是不支持 backdrop-filter 的浏览器上，文字底下没有模糊、地图细节更碎。
+ * 这是可接受的：那类浏览器已属少数，且比「同页两种观感」更容易排查。 */
+
+/* ---------- GIS 区域排名条浮层（2026-10-14 新增） ----------
+   用户要求「增加一个区域排名条，放在地图右上角或左上角」，让
+   「地图负责 Where，排名条负责 How many」。组件见
+   pages/gismap/RegionRankingOverlay.tsx（结构 + 排序口径 + 交互取舍都在那里）。
+
+   定位说明（2026-10-14 第二轮改版）：
+     用户要求「MAINTENANCE ALERTS 要放到 LAYERS 的下面，靠最右边缘」。
+     故本面板由原先的「LAYERS 左侧」改为**正下方、右边缘对齐**：
+       · `right` 与 LayerToggleControl 的 Box 相同（56px）——
+         这个 56 是「避开右上角 zoom 控件」的值，两侧共用同一条右边缘线
+         才会显得是一组（用户要的正是这种「上下相接」的关系）。
+       · `top` **不由本文件决定** —— 它由 RegionRankingOverlay 的 useAnchorTop
+         实测 LAYERS 面板实际高度后经 inline style 注入，这里只留兜底值。
+         不写死的原因：LAYERS 的高度随字号/行高/内边距变化，写死会在
+         字体或主题变动后悄悄错位，而「紧贴其下」是用户明确要的语义。
+       ⚠️ 改 LayerToggleControl 的 right 时这里要一起改（两处没有共享常量：
+       一个是 inline style、一个是 CSS 类，做成变量反而更难追踪）。
+
+   背景：与图例浮层**刻意不同** —— 图例是 alpha 0 全透明（用户连续三轮的要求
+   只针对图例），排名条是本次新增的独立浮层，走的是 LayerToggleControl 那条
+   「必须有底」的路线：它是一列密集小字，压在高频纹理上读不清。
+   用极低不透明度的暗玻璃底，兼顾「不挡地图」与「读得清」。 */
+.gis-rank-overlay {
+  /* top 的兜底值：正常由组件实测后覆盖（见上方定位说明）。
+     取 124 = LAYERS 典型高度（顶 10 + 面板 ~51 + 间距 8）向上取整留余量。 */
+  top: 124px;
+  right: 56px;
+  background: rgba(10, 20, 40, 0.55);
+  -webkit-backdrop-filter: blur(10px) saturate(150%);
+  backdrop-filter: blur(10px) saturate(150%);
+}
+:root[data-theme='light'] .gis-rank-overlay {
+  background: rgba(255, 255, 255, 0.78);
+}
+
+/* 一行：色点 + 县名（左，自动省略） + 两位数字（右，等宽对齐）
+   2026-10-14 用户要求「再大一点」：整组字号上调约 15%、行高与间距同步放宽。
+   只放大面板宽度而不放大字，多出来的宽度会变成县名后的空白，等于没变大。 */
+.gis-rank-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1.5px 0;
+}
+.gis-rank-row__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+.gis-rank-row__name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.8125rem;
+}
+.gis-rank-row__num {
+  flex: 0 0 auto;
+  font-weight: 700;
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum';
+}
+/* .gis-rank-row__unit 已于 2026-10-14 删除：用户要求「数字后面的告警不要显示了」，
+   该规则随之成为死样式（AGENTS.md 原则 10：删除优于兼容）。 */
+/* 折叠行（还有 N 个县没显示）。**显式暴露截断**，不做静默砍数据 */
+.gis-rank-more {
+  margin-top: 1px;
+  padding-left: 13px; /* 与上面的县名左缘对齐（色点 7px + gap 6px） */
+  font-size: 0.6875rem;
+  opacity: 0.75;
+}
+/* 覆盖率脚注：说明「有几个县有告警」，避免把排名条误读成全部 15 个县 */
+.gis-rank-footnote {
+  margin-top: var(--wh-space-xs);
+  padding-top: 3px;
+  border-top: 1px solid rgba(255, 255, 255, 0.14);
+  font-size: 0.625rem;
+  opacity: 0.75;
+}
+:root[data-theme='light'] .gis-rank-footnote {
+  border-top-color: rgba(15, 39, 68, 0.14);
+}
+.gis-rank-hint {
+  cursor: help;
+  opacity: 0.8;
+}
+
+/* ---------- 响应式工具类（与 antd 共存，不覆盖其组件核心样式） ---------- */
+
+/* 表格横向滚动：在小屏/列多时自动出现横向滚动条，避免挤压错位 */
+.wh-table-responsive {
+  width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.wh-table-responsive .ant-table {
+  min-width: max-content;
+}
+/* 让 antd Table 在弹性容器内也能正确收缩 */
+.wh-table-responsive .ant-table-container {
+  min-width: max-content;
+}
+
+/* 页面包装器：替代各页内联的 pageWrap，自动占满 Content 区域 */
+.wh-page-wrap {
+  background: var(--wh-bg);
+  border-radius: var(--wh-radius-lg);
+  padding: var(--wh-space-xs);
+  min-height: var(--wh-page-min-height);
+}
+
+/* 弹性容器工具类 */
+.wh-flex {
+  display: flex;
+}
+.wh-flex-col {
+  display: flex;
+  flex-direction: column;
+}
+.wh-flex-1 {
+  flex: 1 1 0%;
+  min-width: 0;
+  min-height: 0;
+}
+.wh-items-center {
+  align-items: center;
+}
+.wh-justify-between {
+  justify-content: space-between;
+}
+.wh-gap-sm {
+  gap: var(--wh-space-sm);
+}
+.wh-gap-md {
+  gap: var(--wh-space-md);
+}
+.wh-wrap {
+  flex-wrap: wrap;
+}
+
+/* 移动端隐藏 / 桌面端显示（配合 JS 断点使用） */
+.wh-hide-mobile {
+  display: none !important;
+}
+@media (min-width: 768px) {
+  .wh-hide-mobile {
+    display: initial !important;
+  }
+  .wh-show-mobile-only {
+    display: none !important;
+  }
+}
+
+/* 侧边栏展开/收起按钮：小屏下加大并加背景，确保可见 */
+.wh-sider-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+@media (max-width: 767px) {
+  .wh-sider-toggle {
+    width: 2.75rem !important;
+    height: 2.75rem !important;
+    background: rgba(13, 148, 136, 0.12) !important;
+    border: 1px solid rgba(13, 148, 136, 0.35) !important;
+    border-radius: var(--wh-radius-md) !important;
+  }
+  .wh-sider-toggle .anticon {
+    font-size: 1.25rem !important;
+  }
+  :root[data-theme='dark'] .wh-sider-toggle {
+    background: rgba(0, 217, 255, 0.12) !important;
+    border-color: rgba(0, 217, 255, 0.35) !important;
+  }
+}
+
+/* ---------- 侧边栏宽度拖拽手柄 ---------- *
+ * 贴在侧栏右边缘内侧（不依赖 sider 的 overflow 可见性）；hover / 聚焦 /
+ * 拖拽中显示一条竖条作为可拖动提示。移动端抽屉是浮层、宽度由视口决定，
+ * 不渲染该手柄。 */
+.wh-sider-resizer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 0.375rem;            /* 6px 热区，比视觉竖条宽得多，便于点中 */
+  z-index: 20;
+  cursor: col-resize;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.wh-sider-resizer::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  right: 1px;
+  width: 2px;
+  height: 2.75rem;
+  transform: translateY(-50%);
+  border-radius: 2px;
+  background: var(--wh-glass-border-strong);
+  opacity: 0;
+  transition: opacity .16s ease;
+}
+.wh-sider-resizer:hover::after,
+.wh-sider-resizer:focus-visible::after,
+.wh-sider-resizer.is-active::after {
+  opacity: 1;
+}
+.wh-sider-resizer:focus-visible { outline: none; }
+.wh-sider-resizer:focus-visible::after { box-shadow: var(--wh-focus-ring); }
+
+/* 拖拽期间：统一 col-resize 光标 + 禁选中，并关掉内容区/iframe 的指针事件 ——
+ * 指针滑到 iframe 上时事件会困在 iframe 文档里，window 上的 pointermove/pointerup
+ * 就收不到了。这里用「关掉内容区交互」而不是盖一层遮罩：遮罩会吞掉落在其上的
+ * mouseup/click，让手柄收不到 dblclick，「双击复位」会失效。 */
+.wh-sider-resizing,
+.wh-sider-resizing * { cursor: col-resize !important; user-select: none !important; }
+.wh-sider-resizing #main-content,
+.wh-sider-resizing iframe { pointer-events: none !important; }
+/* antd Sider 自带宽度过渡（~0.2s），拖拽时会把跟手的动作变成"追着跑"，
+   拖拽期间关掉过渡，松手后自动恢复 */
+.wh-sider-resizing .ant-layout-sider,
+.wh-sider-resizing .ant-layout-sider-children { transition: none !important; }
+
+/* ---------- 侧栏目录分组头部：折叠 / 展开 / 隐藏 ---------- *
+ * 分组标题不再是一行死文字：整行可点（收起·展开），右侧眼睛可隐藏整个目录。
+ * 折叠箭头用伪元素画，group 标题的 textContent 仍只有目录名 —— 断言与读屏都干净。 */
+#app-sider-menu .ant-menu-item-group-title {
+  padding: 0 !important;   /* antd 默认的内边距由 .wh-menu-group-head 自己接管 */
+  margin: 0;
+  height: auto;
+  line-height: 1.4;
+}
+.wh-menu-group-head {
+  display: flex;
+  align-items: center;
+  gap: 0.125rem;
+  padding: var(--wh-space-xs) var(--wh-space-sm) var(--wh-space-xs) var(--wh-space-md);
+}
+.wh-menu-group-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-radius: var(--wh-radius-sm);
+}
+.wh-menu-group-toggle::before {
+  content: '▾';
+  flex-shrink: 0;
+  font-size: 0.625rem;
+  line-height: 1;
+  opacity: 0.75;
+}
+.wh-menu-group-toggle[aria-expanded='false']::before { content: '▸'; }
+.wh-menu-group-toggle:hover .wh-menu-group-name { color: var(--wh-teal); }
+.wh-menu-group-toggle:focus-visible { outline: none; }
+.wh-menu-group-toggle:focus-visible .wh-menu-group-name { box-shadow: var(--wh-focus-ring); border-radius: 2px; }
+.wh-menu-group-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wh-menu-group-count {
+  flex-shrink: 0;
+  min-width: 1.125rem;
+  padding: 0 0.25rem;
+  text-align: center;
+  font-size: 0.6875rem;
+  line-height: 1.5;
+  color: var(--wh-text-muted);
+  background: var(--wh-glass-control);
+  border: 1px solid var(--wh-glass-border);
+  border-radius: 999px;
+}
+.wh-menu-group-eye {
+  flex-shrink: 0;
+  padding: 0.125rem 0.25rem;
+  border: 0;
+  background: transparent;
+  color: var(--wh-text-muted);
+  line-height: 1;
+  cursor: pointer;
+  border-radius: var(--wh-radius-sm);
+  opacity: 0.45;
+  transition: opacity 0.16s ease, color 0.16s ease;
+}
+.wh-menu-group-head:hover .wh-menu-group-eye { opacity: 1; }
+.wh-menu-group-eye:hover { color: var(--wh-teal); }
+.wh-menu-group-eye:focus-visible { outline: none; opacity: 1; box-shadow: var(--wh-focus-ring); }
+
+/* ---------- 侧栏底部：已隐藏目录的恢复区 ---------- *
+ * 吸底常驻（sticky bottom）：菜单很长时它也一直在视口底部可见 ——
+ * 否则「隐藏了目录 → 想恢复 → 要先把侧栏滚到底」才能看到入口。
+ * 背景用较实的 panel 令牌，避免菜单项从它下面透出来。 */
+.wh-menu-hidden-box {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  margin: 0 var(--wh-space-sm) 0;
+  padding: var(--wh-space-xs) var(--wh-space-sm);
+  border: 1px dashed var(--wh-glass-border-strong);
+  border-radius: var(--wh-radius-md) var(--wh-radius-md) 0 0;
+  background: var(--wh-glass-panel);
+  /* ⚠️ -webkit- 前缀必须写在标准属性**前面**：写反会被压缩器去重，模糊静默失效 */
+  -webkit-backdrop-filter: blur(14px) saturate(1.2);
+  backdrop-filter: blur(14px) saturate(1.2);
+}
+.wh-menu-hidden-title {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  font-size: 0.75rem;
+  color: var(--wh-text-muted);
+}
+.wh-menu-hidden-all {
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--wh-teal);
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+.wh-menu-hidden-all:hover { text-decoration: underline; }
+.wh-menu-hidden-row {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.25rem 0;
+}
+.wh-menu-hidden-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.8125rem;
+  color: var(--wh-text-muted);
+}
+.wh-menu-hidden-show {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex-shrink: 0;
+  padding: 0 0.375rem;
+  border: 1px solid var(--wh-glass-border);
+  border-radius: var(--wh-radius-sm);
+  background: transparent;
+  color: var(--wh-teal);
+  font-size: 0.75rem;
+  line-height: 1.6;
+  cursor: pointer;
+}
+.wh-menu-hidden-show:hover { background: var(--wh-glass-control-hover); }
+
+/* ---------- 侧栏页面搜索 ---------- */
+.wh-sider-search {
+  flex-shrink: 0;
+}
+.wh-sider-search .ant-input-affix-wrapper { border-radius: var(--wh-radius-md); }
+.wh-sider-search-hint {
+  margin-top: var(--wh-space-xs);
+  padding-left: 0.25rem;
+  font-size: 0.75rem;
+  color: var(--wh-text-muted);
+}
+
+/* ---------- 侧栏菜单编辑器（Modal） ---------- */
+.wh-menu-edit-tip {
+  margin: 0 0 var(--wh-space-md);
+  color: var(--wh-text-muted);
+  font-size: 0.8125rem;
+  line-height: 1.6;
+}
+/* 非本机（只读）时的提示条：明确告知为什么改不了 */
+.wh-menu-edit-readonly {
+  margin: 0 0 var(--wh-space-md);
+  padding: var(--wh-space-xs) var(--wh-space-sm);
+  border: 1px solid var(--wh-glass-border);
+  border-left: 3px solid var(--wh-warn, #d97706);
+  border-radius: var(--wh-radius-sm, 6px);
+  background: var(--wh-glass-control);
+  color: var(--wh-text-muted);
+  font-size: 0.8125rem;
+  line-height: 1.6;
+}
+/* 保存状态：右上角一行小字，saving/saved/error 三态 */
+.wh-menu-edit-status { font-size: 0.75rem; }
+.wh-menu-edit-status.is-saving { color: var(--wh-text-muted); }
+.wh-menu-edit-status.is-saved { color: var(--wh-ok, #0f9d58); }
+.wh-menu-edit-status.is-error { color: var(--wh-danger, #d93025); }
+.wh-menu-edit-group {
+  border: 1px solid var(--wh-glass-border);
+  border-radius: var(--wh-radius-md);
+  background: var(--wh-glass-control);
+  padding: var(--wh-space-sm);
+  margin-bottom: var(--wh-space-sm);
+}
+/* 隐藏的目录降低存在感，一眼可辨「这个目录当前不在侧栏里」 */
+.wh-menu-edit-group.is-hidden { opacity: 0.62; }
+.wh-menu-edit-group.is-hidden .wh-menu-edit-head { border-left: 3px solid var(--wh-warn, #d97706); padding-left: var(--wh-space-xs); }
+.wh-menu-edit-head {
+  display: flex;
+  align-items: center;
+  gap: var(--wh-space-xs);
+  margin-bottom: var(--wh-space-xs);
+}
+.wh-menu-edit-items {
+  display: flex;
+  flex-direction: column;
+  gap: var(--wh-space-xs);
+  padding-left: var(--wh-space-sm);
+}
+.wh-menu-edit-item {
+  display: flex;
+  align-items: center;
+  gap: var(--wh-space-xs);
+}
+.wh-menu-edit-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--wh-text-muted);
+}
+.wh-menu-edit-move {
+  width: 8.5rem;
+  flex-shrink: 0;
+}
+.wh-menu-edit-empty {
+  color: var(--wh-text-muted);
+  font-size: 0.8125rem;
+  padding: var(--wh-space-xs) 0;
+}
+.wh-menu-edit-actions {
+  display: flex;
+  gap: var(--wh-space-sm);
+  margin-top: var(--wh-space-md);
+}
+@media (max-width: 767px) {
+  .wh-menu-edit-items { padding-left: 0; }
+  .wh-menu-edit-move { width: 6.5rem; }
+}
+
+/* 小屏下表单控件不应撑破容器 */
+.wh-input-fluid {
+  width: 100%;
+  max-width: 100%;
+}
+
+/* 限制最大宽度，防止 4K 下阅读行过长 */
+.wh-readable {
+  max-width: 80ch;
+}
+
+/* ---------- antd 组件响应式补丁 ---------- */
+
+/* Modal / Drawer 在小屏下贴近屏幕边缘 */
+@media (max-width: 767px) {
+  .ant-modal-root .ant-modal {
+    max-width: calc(100vw - 1rem);
+    margin: 0.5rem auto;
+  }
+  .ant-modal-content {
+    border-radius: var(--wh-radius-md);
+  }
+  .ant-drawer-content-wrapper {
+    max-width: 100vw !important;
+  }
+  /* 菜单项在小屏更紧凑 */
+  .ant-menu-inline .ant-menu-item {
+    padding-inline: var(--wh-space-md) !important;
+  }
+}
+
+/* 表单标签换行避免撑破 */
+.ant-form-item-label {
+  overflow-wrap: anywhere;
+}
+
+/* 表格单元格超长文本处理 */
+.ant-table-cell {
+  overflow-wrap: anywhere;
+}
+
+/* 分页器在小屏下允许横向滚动 */
+@media (max-width: 575px) {
+  .ant-pagination {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: var(--wh-space-xs);
+  }
+}
+
+/* 按钮文字在小屏允许收缩 */
+@media (max-width: 767px) {
+  .ant-btn > span:not(.anticon) {
+    white-space: nowrap;
+  }
+}
+
+/* ---------- 视觉增强：精修滚动条 ---------- */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+:root[data-theme='dark'] ::-webkit-scrollbar-thumb {
+  background: rgba(0, 217, 255, 0.2);
+  border-radius: 3px;
+}
+:root[data-theme='dark'] ::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 217, 255, 0.4);
+}
+:root[data-theme='light'] ::-webkit-scrollbar-thumb {
+  background: rgba(13, 148, 136, 0.25);
+  border-radius: 3px;
+}
+:root[data-theme='light'] ::-webkit-scrollbar-thumb:hover {
+  background: rgba(13, 148, 136, 0.5);
+}
+
+/* ---------- antd Typography code 的深色档 ----------
+ * antd v6 的 `code` 用的是组件内部固定灰：底 rgba(150,150,150,.1) + 边
+ * rgba(100,100,100,.2)。这两个值不吃 map token（设 colorFillTertiary /
+ * colorBorder 都不生效），深色下是一块中性灰，与 vmax 的深蓝体系无关。
+ * 实测 ?page=sync 深色下有 72 个 code 元素、288 条灰边框。
+ * 注意：部分调用方（DataSync / ScheduleEditor）已自行覆盖 background，
+ * 这里补齐边框色并给未覆盖的兜底底色。 */
+:root[data-theme='dark'] .ant-typography code {
+  background: var(--wh-input-bg);
+  border-color: var(--wh-subtle-border);
+  color: var(--wh-text);
+}
+
+/* ---------- 侧边栏 Menu 质感增强 ---------- *
+ * 菜单本体不再自带实底（antd dark 默认 #001529）：侧栏的玻璃由 Sider 提供，
+ * 菜单若再铺一层实色，玻璃层就被遮住、选中态与悬浮态的高光也失去层次。 */
+:root[data-theme='dark'] .ant-menu.ant-menu-dark .ant-menu-submenu-title:hover,
+:root[data-theme='dark'] .ant-menu.ant-menu-dark .ant-menu-item:hover {
+  background: var(--wh-glass-control) !important;
+  color: var(--wh-teal) !important;
+}
+:root[data-theme='dark'] .ant-menu.ant-menu-dark .ant-menu-item-selected {
+  background: linear-gradient(90deg, rgba(0, 217, 255, 0.16) 0%, rgba(37, 140, 255, 0.08) 100%) !important;
+  border-right: 3px solid #00d9ff !important;
+  color: #00d9ff !important;
+  font-weight: 600;
+}
+:root[data-theme='light'] .ant-menu-light .ant-menu-item-selected {
+  background: linear-gradient(90deg, rgba(13, 148, 136, 0.12) 0%, rgba(14, 116, 144, 0.06) 100%) !important;
+  border-right: 3px solid #0d9488 !important;
+  color: #0d9488 !important;
+  font-weight: 600;
+}
+.ant-menu-inline .ant-menu-item {
+  border-radius: 0 var(--wh-radius-sm) var(--wh-radius-sm) 0 !important;
+  margin-inline: 0 4px !important;
+  width: calc(100% - 4px) !important;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
+}
+
+/* ---------- 浅色主题：页面底与容器浮雕（数值全部来自令牌） ---------- *
+ * 卡片的背景/描边/阴影/模糊由上方「统一外壳玻璃层」统一给出，此处只保留
+ * 浅色特有的页面底与容器浮雕，避免同一属性在两处各写一份、互相覆盖。 */
+:root[data-theme='light'] body {
+  background: var(--wh-bg);
+  background-attachment: fixed;
+}
+:root[data-theme='light'] #root { position: relative; isolation: isolate; }
+:root[data-theme='light'] .ant-layout,
+:root[data-theme='light'] .ant-layout-content { background: transparent !important; }
+:root[data-theme='light'] .wh-page-wrap {
+  position: relative;
+  background: var(--wh-bg);
+  border: 1px solid rgba(255, 255, 255, 0.78);
+  box-shadow: var(--wh-shadow-2);
+}
+/* 卡片折射高光：深浅主题同一套实现，只换 --wh-glass-specular 的强度 */
+.ant-card,
+.wh-stat-card {
+  position: relative;
+  overflow: hidden;
+}
+.ant-card::before,
+.wh-stat-card::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: var(--wh-glass-specular);
+  border-radius: inherit;
+}
+.ant-card-body,
+.ant-card-head,
+.wh-stat-card > * { position: relative; z-index: 1; }
+
+/* ---------- 卡片悬浮与发光动画 ---------- *
+ * 浅色档对齐 olbr .qc-card:hover：上浮 2px + 描边转为 accent 线 + 内发光加深
+ * 并多一层彩色投影（olbr.css:432-436）。深色档保持 my_app 原有的「上浮 + 阴影加深」，
+ * 不引入彩色投影 —— 深色档用户已确认不对齐 olbr。 */
+.wh-card-interactive {
+  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.25s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.25s ease;
+}
+.wh-card-interactive:hover {
+  transform: translateY(var(--wh-card-elevate, -2px));
+  border-color: var(--wh-glass-border-strong) !important;
+  box-shadow: var(--wh-shadow-3) !important;
+}
+:root[data-theme='light'] .wh-card-interactive:hover,
+:root[data-theme='light'] .wh-card:hover {
+  border-color: var(--wh-card-accent-line) !important;
+  box-shadow: var(--wh-card-glow-hover), var(--wh-card-drop-hover) !important;
+}
+
+/* ---------- olbr 卡片皮肤工具类 ---------- *
+ * 与 olbr .qc-card / .qc-lv-* 一一对位（olbr.css:419-443）。用途：
+ *   1. 给任意既有元素单独叠内发光而不改底色 → .wh-card-glow
+ *   2. 给卡片按阈值分档（正常/警告/严重）→ .wh-card-lv-ok|warn|crit
+ *
+ * ⚠️ 必须在这里**重算** --wh-card-glow / --wh-card-shadow，不能只覆盖 --wh-card-accent：
+ * 自定义属性在**声明它的那个元素**上完成替换。--wh-card-glow:
+ * `inset 0 0 14px color-mix(... var(--wh-card-accent) 12% ...)` 是在 :root 上求值的，
+ * 那时 --wh-card-accent 还是浅色档的 --wh-teal；等到卡片元素上把 --wh-card-accent
+ * 改成 --wh-ok，:root 上那条 --wh-card-glow 早已定死成青色。
+ * （同一个坑 olbr.css:1001-1017 有记录：深色档必须把 --qc-* 整块再映射一遍。）
+ * 因此每个等级档都要把依赖 accent 的三个合成值一并重算。 */
+.wh-card-glow {
+  border-color: var(--wh-card-accent-line) !important;
+  box-shadow: var(--wh-card-shadow) !important;
+}
+
+.wh-card-lv-ok,
+.wh-card-lv-warn,
+.wh-card-lv-crit {
+  border-color: var(--wh-card-accent-line) !important;
+  /* 内发光 / 悬停阴影随 accent 重算（静态阴影总成由下面各档自己的 --wh-card-shadow 给出） */
+  --wh-card-glow: inset 0 0 14px color-mix(in srgb, var(--wh-card-accent) 12%, transparent);
+  --wh-card-glow-hover: inset 0 0 18px color-mix(in srgb, var(--wh-card-accent) 20%, transparent);
+  --wh-card-drop-hover: 0 8px 18px color-mix(in srgb, var(--wh-card-accent) 16%, transparent);
+  --wh-card-shadow: var(--wh-card-glow), var(--wh-shadow-2);
+  box-shadow: var(--wh-card-shadow) !important;
+}
+
+.wh-card-lv-ok {
+  --wh-card-accent: var(--wh-ok);
+  --wh-card-accent-soft: color-mix(in srgb, var(--wh-ok) 12%, transparent);
+  --wh-card-accent-line: color-mix(in srgb, var(--wh-ok) 32%, transparent);
+}
+.wh-card-lv-warn {
+  --wh-card-accent: var(--wh-warn);
+  --wh-card-accent-soft: color-mix(in srgb, var(--wh-warn) 12%, transparent);
+  --wh-card-accent-line: color-mix(in srgb, var(--wh-warn) 32%, transparent);
+}
+.wh-card-lv-crit {
+  --wh-card-accent: var(--wh-danger);
+  --wh-card-accent-soft: color-mix(in srgb, var(--wh-danger) 12%, transparent);
+  --wh-card-accent-line: color-mix(in srgb, var(--wh-danger) 38%, transparent);
+}
+
+/* ---------- StatCard 统计卡片通用样式 ---------- *
+ * 阴影取总成令牌 --wh-card-shadow（与上方卡片层同一来源），不要再写死 --wh-shadow-1：
+ * 本规则在文件里位于卡片层之后，写死会把卡片层的 olbr 皮肤盖掉。 */
+.wh-stat-card {
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1.125rem 1.25rem;
+  border-radius: var(--wh-radius-lg);
+  background: var(--wh-card-bg);
+  border: var(--wh-card-border);
+  box-shadow: var(--wh-card-shadow);
+  transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease;
+}
+.wh-stat-card:hover {
+  transform: translateY(var(--wh-card-elevate, -2px));
+  border-color: var(--wh-glass-border-strong) !important;
+  box-shadow: var(--wh-shadow-2) !important;
+}
+:root[data-theme='light'] .wh-stat-card:hover {
+  border-color: var(--wh-card-accent-line) !important;
+  box-shadow: var(--wh-card-glow-hover), var(--wh-card-drop-hover) !important;
+}
+.wh-stat-card::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--wh-stat-accent, var(--wh-accent-grad));
+  opacity: 0.85;
+}
+.wh-stat-icon-wrapper {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.375rem;
+  flex-shrink: 0;
+  background: var(--wh-stat-icon-bg, rgba(0, 217, 255, 0.1));
+  color: var(--wh-stat-icon-color, var(--wh-teal));
+  box-shadow: inset 0 0 12px rgba(255, 255, 255, 0.05);
+}
+
+
+/* ---------- 深色主题液态玻璃空间体系（实际 Ant Design DOM 覆盖） ---------- */
+:root[data-theme='dark'] {
+  --wh-bg: radial-gradient(circle at 9% 10%, rgba(0, 217, 255,.11), transparent 30rem), radial-gradient(circle at 92% 13%, rgba(37, 140, 255,.12), transparent 32rem), linear-gradient(155deg,#02050c 0%,#02050c 48%,#050d22 100%);
+  --wh-card-bg: linear-gradient(145deg,rgba(8, 18, 44,.72),rgba(5, 13, 34,.56));
+  --wh-card-border: 1px solid #153db0;
+}
+:root[data-theme='dark'] body {
+  background: radial-gradient(circle at 8% 10%,rgba(0, 217, 255,.12),transparent 30rem),radial-gradient(circle at 91% 15%,rgba(37, 140, 255,.13),transparent 32rem),radial-gradient(circle at 70% 84%,rgba(124, 108, 255,.08),transparent 36rem),#02050c;
+  background-attachment: fixed;
+}
+:root[data-theme='dark'] #root{position:relative;isolation:isolate}
+:root[data-theme='dark'] .ant-layout,
+:root[data-theme='dark'] .ant-layout-content{background:transparent!important}
+:root[data-theme='dark'] .wh-page-wrap{
+  position:relative;
+  background:var(--wh-bg);
+  border:1px solid rgba(0, 217, 255,.09);
+  box-shadow:var(--wh-shadow-2);
+}
+
+/* ---------- 空间玻璃：氛围光斑 + 悬浮层级（对齐统一门户的分层实现） ---------- *
+ * 背景/描边/阴影一律取令牌，本节只负责「光斑位置」与「悬浮位移」这类几何信息。 */
+.app-spatial-root{position:relative;isolation:isolate;overflow:clip}
+.app-spatial-root::before,.app-spatial-root::after{content:"";position:fixed;z-index:-1;border-radius:999px;filter:blur(72px);pointer-events:none}
+.app-spatial-root::before,.app-spatial-root::after{display:none}
+:root[data-theme='dark'] .app-spatial-root::before{display:block;width:30rem;height:30rem;left:-10rem;top:20%;background:rgba(45,212,191,.12)}
+:root[data-theme='dark'] .app-spatial-root::after{display:block;width:34rem;height:34rem;right:-13rem;top:42%;background:rgba(56,189,248,.11)}
+.spatial-stat-card{position:relative;overflow:hidden;transform:translateZ(0)}
+.spatial-stat-card::before{
+  content:"";
+  position:absolute;
+  inset:0;
+  pointer-events:none;
+  background:var(--wh-glass-specular);
+}
+.spatial-stat-card:hover{
+  transform:translateY(-3px);
+  border-color:var(--wh-glass-border-strong)!important;
+  box-shadow:var(--wh-shadow-3)!important;
+}
+.dashboard-layout-shell{position:relative;isolation:isolate}
+.dashboard-layout-shell::before{display:none;content:"";position:absolute;inset:3.25rem 5% auto;height:18rem;z-index:-1;background:radial-gradient(ellipse,rgba(45,212,191,.16),transparent 68%);filter:blur(34px);pointer-events:none}
+:root[data-theme='dark'] .dashboard-layout-shell::before{display:block}
+@media(prefers-reduced-motion:reduce){.spatial-stat-card{transition:none}.spatial-stat-card:hover{transform:none}}
+
+/* ---------- Task Manager visual hierarchy ---------- */
+:root[data-theme='light'] .sync-page-title{font-size:1.25rem!important;font-weight:750!important;letter-spacing:-.012em}
+:root[data-theme='light'] .sync-section-title{font-size:.875rem!important;font-weight:700!important;color:#26394a!important;letter-spacing:.01em}
+:root[data-theme='light'] .sync-task-card{border-radius:var(--wh-radius-lg)!important}
+:root[data-theme='light'] .sync-task-card .ant-card-body{border-radius:inherit}
+:root[data-theme='light'] .sync-card-schedule,
+:root[data-theme='light'] .sync-timeline-surface{border-color:rgba(94,125,143,.13)!important;background:rgba(255,255,255,.34)!important}
+:root[data-theme='light'] .sync-card-schedule{border-radius:var(--wh-radius-md)!important}
+:root[data-theme='light'] .sync-timeline-surface{border-radius:var(--wh-radius-lg)!important}
+:root[data-theme='light'] .sync-task-card .ant-btn,
+:root[data-theme='light'] .sync-task-card .ant-tag,
+:root[data-theme='light'] .sync-task-card .ant-typography code{border-radius:var(--wh-radius-sm)!important}
+/* antd v6 用 -variant-* 取代了 v5 的 -default/-primary 语义类，两条都保留以兼容旧构建产物 */
+:root[data-theme='light'] .sync-task-card .ant-btn-default,
+:root[data-theme='light'] .sync-task-card .ant-btn-variant-outlined{border-color:rgba(94,125,143,.20)!important;background:rgba(255,255,255,.48)!important}
+/* 浅色主题下主操作按钮保持实色底，确保白字在未悬浮时同样清晰。 */
+:root[data-theme='light'] .sync-task-card .ant-btn-primary,
+:root[data-theme='light'] .sync-task-card .ant-btn-variant-solid{background:#0d9488!important;border-color:#0d9488!important;color:#fff!important}
+:root[data-theme='light'] .sync-task-card .ant-btn-primary:not(:disabled):hover,
+:root[data-theme='light'] .sync-task-card .ant-btn-variant-solid:not(:disabled):hover{background:#0f766e!important;border-color:#0f766e!important;color:#fff!important}
+:root[data-theme='light'] .sync-task-card:hover{border-color:rgba(13,148,136,.42)!important;box-shadow:0 20px 42px rgba(38,70,86,.14),0 0 0 1px rgba(13,148,136,.07),inset 0 1px 0 rgba(255,255,255,.96)!important}
+:root[data-theme='dark'] .sync-page-title{font-size:1.25rem!important;font-weight:750!important}
+:root[data-theme='dark'] .sync-section-title{font-size:.875rem!important;font-weight:700!important}
+:root[data-theme='dark'] .sync-task-card{border-radius:var(--wh-radius-lg)!important}
+:root[data-theme='dark'] .sync-card-schedule,
+:root[data-theme='dark'] .sync-timeline-surface{border-color:rgba(0, 217, 255,.10)!important;border-radius:var(--wh-radius-md)!important}
+
+/* ---------- 仓库汇总报表：页签加粗（.wh-sum-tabs 只作用于本页） ---------- *
+ * 页签名是报表业务原值（Spars Parts / Consumables），对齐 Excel sheet 标签的视觉权重。
+ * 用页面级类名限定，避免影响其它页面（如 SP 报表、任务管理）的 Segmented 观感。
+ * 居中由组件外层的 textAlign:center 负责，这里只管字重。 */
+.wh-sum-tabs .ant-segmented-item-label {
+  font-weight: 700;
+}
+
+/* ---------- 全局分段控件观感（.wh-seg） ---------- *
+ * 2026-10-18 用户反馈 ms_sla_only 页的 Day/Week/Month 选项「不明显」，确认后要求
+ * 全站同类分段开关统一处理。根因是 antd Segmented 默认未选中项继承次要色
+ * （深色档接近背景亮度），在玻璃底上几乎与背景同色；选中态也只是浅色淡块。
+ *
+ * 使用方式：需要「选项一眼可见」的分段开关都在 <Segmented> 上加 className="wh-seg"。
+ * 为什么按需加类而不是全局改 .ant-segmented：全局改会把表单里的二选一、
+ * 侧栏等场景一并改掉，那是本项目刻意未做的（见 .wh-sum-tabs 处的既有说明）。
+ * 本类只做视觉增强，不改交互：
+ *   - 未选中：正文色 + 600 字重，收紧内边距，多项看起来是一个整体开关；
+ *   - 悬浮：品牌青字色 + 低透明度青底，给出「可点」反馈；
+ *   - 选中：品牌青实心底 + --wh-on-accent 字色，深浅两档都有足够对比度。
+ * 颜色只引用 --wh-* 令牌，随 data-theme 自动切换，不写死十六进制。 */
+.wh-seg.ant-segmented {
+  border: 1px solid var(--wh-glass-border-strong) !important;
+  border-radius: var(--wh-radius-md) !important;
+  padding: 3px;
+}
+.wh-seg .ant-segmented-item {
+  color: var(--wh-text) !important;
+  font-weight: 600;
+  border-radius: 6px;
+}
+.wh-seg .ant-segmented-item-label {
+  padding: 0 12px;
+  line-height: 22px;
+  font-size: 0.8125rem;
+}
+/* 未选中项的悬浮反馈：::after 是 antd v6 的悬浮底色层，直接用品牌青淡化版 */
+.wh-seg .ant-segmented-item:not(.ant-segmented-item-selected):not(.ant-segmented-item-disabled) {
+  color: var(--wh-text) !important;
+}
+.wh-seg .ant-segmented-item:not(.ant-segmented-item-selected):not(.ant-segmented-item-disabled):hover,
+.wh-seg .ant-segmented-item:not(.ant-segmented-item-selected):not(.ant-segmented-item-disabled):active {
+  color: var(--wh-teal) !important;
+}
+.wh-seg .ant-segmented-item:not(.ant-segmented-item-selected):not(.ant-segmented-item-disabled):hover::after,
+.wh-seg .ant-segmented-item:not(.ant-segmented-item-selected):not(.ant-segmented-item-disabled):active::after {
+  opacity: 1;
+  background: var(--wh-teal-27) !important;
+}
+/* 选中项：实心品牌青 + onAccent 字色。必须同时覆盖项本身与滑动 thumb，
+   否则 thumb 动画期间会出现「青底 + 旧字色」一帧不清晰的情况。 */
+.wh-seg .ant-segmented-item-selected,
+.wh-seg .ant-segmented-thumb {
+  background: var(--wh-teal) !important;
+  color: var(--wh-on-accent) !important;
+  font-weight: 700;
+  box-shadow: 0 0 0 1px var(--wh-teal-40), 0 2px 8px var(--wh-teal-20);
+}
+.wh-seg .ant-segmented-item-selected .ant-segmented-item-label,
+.wh-seg .ant-segmented-thumb .ant-segmented-item-label {
+  font-weight: 700;
+}
+/* 选中项内若还有 <span>/图标（如 PortalLogin 的 icon + 文案），一并跟随 onAccent，
+   否则文字仍是 --wh-text，在青色实心底上会看不清。 */
+.wh-seg .ant-segmented-item-selected > *,
+.wh-seg .ant-segmented-thumb > * {
+  color: inherit !important;
+}
+/* 小号（size="small"）：筛选条里常与 small 按钮并排，内边距再收一档以对齐高度 */
+.wh-seg.ant-segmented-sm .ant-segmented-item-label {
+  padding: 0 10px;
+  line-height: 18px;
+}
+/* 窄屏：选项多于 4 个时（如快捷时间窗 30/90/180/365/全部）允许横向换行，
+   避免把整条筛选栏挤出屏幕。普通 2~4 项不受影响。 */
+@media (max-width: 575px) {
+  .wh-seg.ant-segmented .ant-segmented-group {
+    flex-wrap: wrap;
+    row-gap: 3px;
+  }
+  .wh-seg .ant-segmented-item-label {
+    padding: 0 8px;
+  }
+}
+
+/* ---------- MS SLA 看板：天/周/月粒度开关 ---------- *
+ * 在 .wh-seg 通用观感之上再放一点：三档语义固定且是页面主控，字距与宽度给足。 */
+.wh-gran-switch .ant-segmented-item-label {
+  padding: 0 14px;
+}
+
+/* ---------- 移动端侧栏抽屉遮罩：点击任意处收起 ---------- *
+ * 遮罩压在 Header 之下（inset 从 --wh-header-height 起），顶栏汉堡按钮仍可点，
+ * 因此关闭抽屉有「点遮罩 / 点 X / 按 Esc」三条路径。 */
+.wh-sider-backdrop{
+  position:fixed;
+  inset:var(--wh-header-height) 0 0 0;
+  z-index:999;
+  border:0;
+  padding:0;
+  cursor:pointer;
+  background:var(--wh-scrim);
+  -webkit-backdrop-filter:blur(3px);
+  backdrop-filter:blur(3px);
+  animation:wh-scrim-in .18s ease-out;
+}
+@keyframes wh-scrim-in{from{opacity:0}to{opacity:1}}
+@media (prefers-reduced-motion:reduce){
+  .wh-sider-backdrop{animation:none;-webkit-backdrop-filter:none;backdrop-filter:none}
+}
+@supports not ((-webkit-backdrop-filter:blur(1px)) or (backdrop-filter:blur(1px))){
+  .wh-sider-backdrop{background:var(--wh-scrim-solid)}
+}
+
+/* ===== WO/TT Workflow: 简洁科技风步骤条（独立命名空间 .wo-workflow / .wf-*）=====
+ * 2026-10-19 二改（需求：卡片宽高比 2:1 + 内容重排 + 醒目蓝色粗箭头 + 简化渐变阴影）：
+ *  - 卡片高度带 min-height 220 / max-height 250；宽屏（单卡 ≥440px，如值班大屏）
+ *    天然呈 2:1，普通屏宽高比随列宽自适应（aspect-ratio 会把 min-height 传导成
+ *    min-width 440 打爆六列栅格，故不使用 —— 详见 .wf-stage 内注释）；
+ *  - 内容四段：顶部(序号 + 图标) / 中部(英文阶段名 + 中文名 + 工单数量 + 占比) /
+ *    底部(进度条) / 进度条下方(等待明细，超出行数内部滚动，不丢业务数据)；
+ *    没有等待明细的卡片不留空白（.wf-mid 撑满、内容顶部对齐）。
+ *  - 节点间箭头改为 SVG 蓝色粗箭头（.wf-arrow）：垂直居中、宽度压在栅格间隙内
+ *    （calc(var(--wf-gap) - 6px)）、pointer-events:none —— 不覆盖卡片、不影响点击。
+ *  - 去掉径向渐变与发光阴影，只留 1px 阶段色描边 + 极浅阶段色底。
+ *  - 阶段配色 / 数据映射 / 下钻 / 中英文切换全部沿用原实现：未新增接口、未新增文案键。
+ *  - 列数（2026-10-19 WO 适配 / 三改单行）：**由组件按实测宽度写入 --wf-cols**，
+ *    不再用媒体查询硬编码。page=tt 6 阶段 → 单行 6 列；page=wo 9 阶段 → **单行 9 列**
+ *    （7 列及以上进密集模式 data-wf-dense，见下方「单行密集模式」：间隙 / 字号 / 内边距
+ *    整体收紧，卡片宽度压到 ~162px 仍可读）；窄桌面放不下时退回均衡折行 5+4。
+ *    ≤620 两列 / ≤1000 三列由组件同一处判定，行末箭头按 cols 取模隐藏，与真实列数同源。
+ */
+.wo-workflow {
+  /* ---------- 深色（默认）令牌 ---------- */
+  --wf-bg: #071b30;
+  --wf-panel: #09213b;
+  --wf-line: #0874b9;
+  --wf-cyan: #20d5ef;
+  --wf-blue: #249cff;
+  --wf-teal: #00c9c5;
+  --wf-orange: #ffad32;
+  --wf-green: #35df7d;
+  --wf-text: #eaf5ff;
+  --wf-muted: #91b3d4;
+  --wf-border-soft: #123e65;
+  --wf-border-strong: #0874b9;
+  /* 卡片：纯色底 + 极浅阶段色混底，不再做渐变与发光 */
+  --wf-card-bg: #0a2036;
+  --wf-card-tint: 7%;              /* 阶段色混入卡底的比例 */
+  --wf-card-border-mix: 65%;       /* 阶段色描边浓度 */
+  --wf-card-shadow: rgba(0, 0, 0, .28);
+  --wf-track-bg: #153954;
+  --wf-arrow: #249cff;             /* 节点间箭头色：醒目蓝 */
+  --wf-live-border: #087d94;
+  --wf-live-bg: rgba(0, 217, 255, .08);
+  --wf-subrow-divider: rgba(145, 179, 212, .28);
+  --wf-number-fg: #ffffff;         /* 序号徽章文字色（浅色档改为阶段深色） */
+  --wf-icon-tint: 14%;             /* 图标底混入阶段色的比例 */
+  /* 序号徽章底色（深色档 = 阶段色的暗版，保证白字对比度） */
+  --wf-num-reassign: #4f3f9a;
+  --wf-num-waitAccept: #1a4a82;
+  --wf-num-arriveSite: #0e6b8a;
+  --wf-num-waitProcess: #a85c0a;
+  --wf-num-waitConfirmFO: #a85c0a;
+  --wf-num-waitConfirm: #0a7878;
+  --wf-num-closed: #16834a;
+  --wf-num-other: #3d5064;
+
+  position: relative;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 18px 18px 16px;
+  overflow: hidden;
+  color: var(--wf-text);
+  background: var(--wf-bg);
+  border: 1px solid var(--wf-border-soft);
+  border-radius: 14px;
+  font-family: Inter, "Segoe UI", Arial, sans-serif;
+}
+
+.wo-workflow *,
+.wo-workflow *::before,
+.wo-workflow *::after { box-sizing: border-box; }
+
+/* 头部：副标题 + LIVE 徽标（卡片内标题已去重，见 2026-10-19 说明） */
+.wf-header {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; margin-bottom: 16px; flex-wrap: wrap;
+}
+.wf-subtitle {
+  margin: 0; color: var(--wf-muted); font-size: 11px; letter-spacing: 1.2px;
+}
+.wf-live {
+  padding: 5px 11px; border: 1px solid var(--wf-live-border); border-radius: 20px;
+  color: var(--wf-cyan); font-size: 11px; white-space: nowrap;
+  background: var(--wf-live-bg);
+}
+
+/* 节点网格：列数由组件 inline style 注入（宽屏 = 实际阶段数，TT 页即 6 列） */
+.wf-stages {
+  --wf-gap: 38px;                  /* 间隙宽度：2026-10-19 五改 30→38——
+                                     卡片高度压缩后多出来的水平空间全给箭头，
+                                     箭头从 24×18 → 32×24（见 .wf-arrow），
+                                     9 卡密集模式仍能看清。 */
+  display: grid;
+  grid-template-columns: repeat(var(--wf-cols, 6), minmax(0, 1fr));
+  gap: var(--wf-gap);
+  align-items: stretch;
+}
+
+/* 单个节点：--stage-color 决定描边 / 图标 / 大数字 / 进度条 */
+.wf-stage {
+  --stage-color: var(--wf-blue);
+  position: relative;
+  min-width: 0;
+  /* 高度带：168~195（2026-10-19 五改：卡片高由 220~250 压到 168~195，
+     同步让 .wf-stages 的 --wf-gap 由 30 拉到 38，多出来的 8px 全部让给箭头宽度。
+     收益：① 卡片下方约 50~70px 空白变成进度条自身的下边距（MTTR 趋势面板的呼吸感恢复）；
+     ② 节点间箭头加粗一档，9 张窄卡场景下箭头不再像细线。
+     ⚠ 不能在这里写 aspect-ratio —— aspect-ratio 会把 min-height 168
+     「传导」成 min-width 336（transferred minimum），六列下每格只有 ~170px，
+     卡片会横向溢出栅格（2026-10-19 实测踩坑）。 */
+  min-height: 168px;
+  max-height: 195px;
+  display: flex; flex-direction: column;
+  padding: 10px 10px 9px;
+  /* ⚠ 不能设 overflow:hidden —— 节点间箭头是卡片的子元素，定位在卡片右缘之外，
+     一裁就看不见了（旧版 .wf-arrow 之所以可见正是因为它没被卡片裁切）。
+     圆角与明细滚动由子元素各自承担（.wf-subrows 自带 overflow-y:auto）。 */
+  overflow: visible;
+  border: 1px solid color-mix(in srgb, var(--stage-color) var(--wf-card-border-mix), transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--stage-color) var(--wf-card-tint), var(--wf-card-bg));
+  transition: box-shadow .18s ease, border-color .18s ease;
+}
+.wf-stage:hover {
+  border-color: var(--stage-color);
+  box-shadow: 0 2px 10px var(--wf-card-shadow);
+}
+.wf-stage:focus-visible { outline: 2px solid var(--stage-color); outline-offset: 2px; }
+/* 颜色变体：阶段调色板（Dispatch 紫 / Accept 蓝 / Processing 橙 /
+   Field Confirm 橙红 / Wait Confirm 青 / Closed 绿，另含到场与「其他」） */
+.wf-stage--reassign        { --stage-color: #a99cff; }
+.wf-stage--waitAccept      { --stage-color: #249cff; }
+.wf-stage--arriveSite      { --stage-color: #20d5ef; }
+.wf-stage--waitDeparture   { --stage-color: #20d5ef; }
+.wf-stage--waitArriveSite  { --stage-color: #20d5ef; }
+.wf-stage--waitProcess     { --stage-color: #ffad32; }
+.wf-stage--leaveSite       { --stage-color: #ffad32; }
+.wf-stage--waitConfirmFO   { --stage-color: #ff922b; }
+.wf-stage--waitConfirm     { --stage-color: #00c9c5; }
+.wf-stage--closed          { --stage-color: #35df7d; }
+.wf-stage--other           { --stage-color: #7c93ad; }
+
+/* ① 顶部：步骤序号 + 阶段图标 */
+.wf-top {
+  display: flex; align-items: center; gap: 8px;
+  flex: none;
+}
+.wf-number {
+  display: flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; flex: none;
+  border-radius: 50%;
+  border: 1.5px solid var(--stage-color);
+  background: var(--wf-number-bg, transparent);
+  color: var(--wf-number-fg);
+  font-size: 12px; font-weight: 800; line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+/* 序号徽章底色：深色档取「阶段色的深色版本」，浅色档由末尾浅色块覆写为浅 tint */
+.wf-stage--reassign .wf-number        { background: var(--wf-num-reassign); }
+.wf-stage--waitAccept .wf-number      { background: var(--wf-num-waitAccept); }
+.wf-stage--arriveSite .wf-number,
+.wf-stage--waitDeparture .wf-number,
+.wf-stage--waitArriveSite .wf-number  { background: var(--wf-num-arriveSite); }
+.wf-stage--waitProcess .wf-number,
+.wf-stage--leaveSite .wf-number       { background: var(--wf-num-waitProcess); }
+.wf-stage--waitConfirmFO .wf-number   { background: var(--wf-num-waitConfirmFO); }
+.wf-stage--waitConfirm .wf-number     { background: var(--wf-num-waitConfirm); }
+.wf-stage--closed .wf-number          { background: var(--wf-num-closed); }
+.wf-stage--other .wf-number           { background: var(--wf-num-other); }
+.wf-icon {
+  display: flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; flex: none;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--stage-color) var(--wf-icon-tint), var(--wf-card-bg));
+  color: var(--stage-color);
+  font-size: 15px; line-height: 1;
+}
+
+/* ② 中部：阶段名（英 / 中）+ 数量区域（工单数量 / 占比 / Waiting Details）。
+   flex:1 吃掉剩余高度，内容顶部对齐；明细与数量、百分比处于同一横向区域，
+   不再沉到卡片底部。 */
+.wf-mid {
+  flex: 1 1 auto; min-height: 0;
+  display: flex; flex-direction: column; justify-content: flex-start;
+  margin-top: 8px;
+}
+/* 阶段名独占上方；数量和明细在同一行，长状态名只在明细自己的区域内换行。 */
+.wf-names,
+.wf-metrics,
+.wf-figures { min-width: 0; }
+.wf-metrics {
+  display: flex; align-items: flex-start; gap: 8px;
+  min-height: 0; margin-top: 2px;
+}
+.wf-figures { flex: 0 0 auto; }
+
+.wf-name {
+  margin: 0;
+  color: var(--wf-text);
+  font-size: 12px; font-weight: 750; line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+.wf-count {
+  margin-top: 4px;
+  color: var(--stage-color);
+  font-size: 22px; font-weight: 850; line-height: 1.05;
+  font-variant-numeric: tabular-nums;
+}
+.wf-percent {
+  margin-top: 1px;
+  color: var(--stage-color);
+  font-size: 11px; font-weight: 700; line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ③ 底部：进度条（宽度 = --progress，由组件注入该阶段占比） */
+.wf-progress {
+  flex: none;
+  height: 5px; margin-top: 6px;
+  overflow: hidden; border-radius: 6px;
+  background: var(--wf-track-bg);
+}
+.wf-progress > span {
+  display: block;
+  width: var(--progress, 0%);
+  height: 100%;
+  border-radius: inherit;
+  background: var(--stage-color);
+}
+
+/* Waiting Details：与工单数量 / 百分比同一横向区域，位于数量块右侧。
+   行高 / 字号收紧，超出 max-height 时**内部滚动**而不是截断 —— 数据不丢；
+   没有明细（单状态阶段）时整块不渲染，不留空白。 */
+.wf-subrows {
+  flex: 1 1 auto; min-width: 0; min-height: 0;
+  max-height: 72px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  margin: 0 0 0 8px;
+  padding: 0 0 0 6px;
+  list-style: none;
+  border-left: 1px dashed var(--wf-subrow-divider);
+  display: flex; flex-direction: column; gap: 0;
+  text-align: left;
+}
+.wf-subrows::-webkit-scrollbar { width: 4px; }
+.wf-subrows::-webkit-scrollbar-thumb {
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--stage-color) 45%, transparent);
+}
+.wf-subrow {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 6px; width: 100%;
+  padding: 1px 3px;
+  background: none; border: 0; border-radius: 4px;
+  color: var(--wf-muted);
+  font: inherit; font-size: 11px; font-weight: 600; line-height: 1.3;
+  text-align: left; cursor: pointer;
+  transition: background .15s ease, color .15s ease;
+}
+.wf-subrow:hover,
+.wf-subrow:focus-visible {
+  background: color-mix(in srgb, var(--stage-color) 14%, transparent);
+  color: var(--wf-text);
+}
+.wf-subrow:focus-visible { outline: 2px solid var(--stage-color); outline-offset: -2px; }
+.wf-subrow-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+.wf-subrow-count {
+  flex: none;
+  color: var(--stage-color);
+  font-variant-numeric: tabular-nums;
+  font-weight: 800;
+}
+
+/* 节点间箭头：SVG 蓝色粗箭头（组件内 .wf-arrow 渲染 <svg>）。
+   宽度按栅格间隙算（间隙 - 6px），两侧各留 3px → 绝不覆盖相邻卡片；
+   垂直居中；pointer-events:none → 不拦点击、不影响节点下钻。 */
+.wf-arrow {
+  position: absolute;
+  top: 50%;
+  left: 100%;
+  margin-left: 3px;
+  width: calc(var(--wf-gap, 30px) - 6px);
+  height: 24px;
+  transform: translateY(-50%);
+  color: var(--wf-arrow);
+  pointer-events: none;
+  overflow: visible;
+  flex: none;
+}
+
+/* ---------- 单行密集模式（8 列及以上，2026-10-19 三改）----------
+ * 需求：page=wo 的 9 个阶段（出现「其他」时 10 个）必须**排在一行**，
+ * 靠压缩卡片宽度容纳。
+ * 同时把 `overflow-wrap:anywhere`（会在单词中间硬断，曾出现 "Suspende d"）
+ * 改成 `break-word`：优先在空格处换行，只有单个单词超宽才允许断开。
+ * 列数仍由组件测量后写入 --wf-cols，与「行末不画箭头」同源。
+ *
+ * 2026-10-19 五改同步：常规卡片收紧后，密集模式的卡片高由 165~215 同步压到
+ *   138~170（治理 0 单卡的中段空白），其它规则不再重复，靠默认级联生效。 */
+.wo-workflow[data-wf-dense='1'] .wf-stages { --wf-gap: 40px; }
+.wo-workflow[data-wf-dense='1'] .wf-stage {
+  padding: 9px 8px 8px;
+  border-radius: 10px;
+  min-height: 138px;
+  max-height: 170px;
+}
+.wo-workflow[data-wf-dense='1'] .wf-top { gap: 6px; }
+.wo-workflow[data-wf-dense='1'] .wf-number,
+.wo-workflow[data-wf-dense='1'] .wf-icon {
+  width: 24px; height: 24px;
+  border-radius: 7px;
+}
+.wo-workflow[data-wf-dense='1'] .wf-number {
+  font-size: 12px; border-width: 1.2px;
+}
+.wo-workflow[data-wf-dense='1'] .wf-icon { font-size: 14px; }
+.wo-workflow[data-wf-dense='1'] .wf-mid { margin-top: 8px; }
+.wo-workflow[data-wf-dense='1'] .wf-name {
+  /* 12px 是 146px 卡宽下「大多数阶段名单行」的上限：13px 时
+     Waiting for Departure / Arrive Site 会折行，整行被拉到 199px（+21）。 */
+  font-size: 12px; line-height: 1.2;
+  overflow-wrap: break-word; word-break: normal;
+}
+.wo-workflow[data-wf-dense='1'] .wf-metrics { gap: 6px; }
+.wo-workflow[data-wf-dense='1'] .wf-count { margin-top: 6px; font-size: 26px; }
+.wo-workflow[data-wf-dense='1'] .wf-percent { font-size: 13px; }
+.wo-workflow[data-wf-dense='1'] .wf-progress { height: 5px; margin-top: 6px; }
+.wo-workflow[data-wf-dense='1'] .wf-subrows {
+  /* 窄卡中明细保持在数量右侧，压到约 3 行；更多条在内部滚动。 */
+  max-height: 52px;
+  margin: 0 0 0 6px; padding: 0 0 0 5px;
+  border-left: 1px dashed var(--wf-subrow-divider);
+  /* 窄卡里状态名经常换成两行，行间留 2px 才分得清是哪一条 */
+  gap: 2px;
+}
+.wo-workflow[data-wf-dense='1'] .wf-subrow {
+  display: block;                 /* 窄卡里改成「名称 · 数字」的行内流 */
+  padding: 1px 2px;
+  font-size: 11px; line-height: 1.25;
+}
+/* 窄卡只有 ~140px，长状态名必然换行。若数字仍右对齐（flex + baseline），
+   两行名称会把数字顶在第一行，读起来像"属于上一行"（实测三种排布对比）。
+   行内流让数字跟在名称末尾：名称换几行，数字都紧贴自己那一条，不会错行。 */
+.wo-workflow[data-wf-dense='1'] .wf-subrow-name {
+  display: inline;
+  overflow-wrap: break-word; word-break: normal;
+}
+.wo-workflow[data-wf-dense='1'] .wf-subrow-count {
+  display: inline;
+  margin-left: 5px;
+  white-space: nowrap;
+}
+.wo-workflow[data-wf-dense='1'] .wf-subrow-count::before {
+  content: '· ';
+  font-weight: 600;
+  opacity: .55;
+}
+.wo-workflow[data-wf-dense='1'] .wf-arrow {
+  /* 间隙 32→40 后多出来的宽度全部让给箭头，viewBox 比例锁定 32:24 → 不变形 */
+  width: calc(var(--wf-gap, 40px) - 4px);
+  margin-left: 2px;
+  aspect-ratio: 32 / 24;
+  height: auto;
+}
+
+/* ---------- 浅色主题 ----------
+ * 沿用项目既有做法（index.css:369 注释）：主题切换只发生在令牌层，
+ * 上面的类规则一条都不需要 data-theme 分支。
+ * 浅色档的差异：白底卡片 / 深色阶阶段色（亮色在白底对比度不足）/ 柔和投影。
+ */
+:root[data-theme='light'] .wo-workflow {
+  --wf-bg: #ffffff;
+  --wf-panel: #f5f8fb;
+  --wf-line: #b6cfe0;
+  --wf-cyan: #0e7490;
+  --wf-blue: #1d6fb8;
+  --wf-teal: #0d9488;
+  --wf-orange: #c2410c;
+  --wf-green: #15803d;
+  --wf-text: var(--wh-text);
+  --wf-muted: var(--wh-text-dim);
+  --wf-border-soft: rgba(94, 125, 143, 0.24);
+  --wf-border-strong: rgba(13, 148, 136, 0.55);
+
+  --wf-card-bg: #ffffff;
+  --wf-card-tint: 5%;
+  --wf-card-border-mix: 55%;
+  --wf-card-shadow: rgba(38, 70, 86, 0.12);
+  --wf-track-bg: rgba(94, 125, 143, 0.16);
+  --wf-arrow: #1d6fb8;             /* 浅底上同样醒目的蓝 */
+  --wf-live-border: rgba(13, 148, 136, 0.35);
+  --wf-live-bg: rgba(13, 148, 136, 0.08);
+  --wf-subrow-divider: rgba(94, 125, 143, .26);
+  --wf-number-fg: var(--stage-color);
+  --wf-icon-tint: 10%;
+
+  /* 序号徽章：浅色档 = 浅 tint 底 + 阶段深色字 */
+  --wf-num-reassign: #ede9fe;
+  --wf-num-waitAccept: #dbeafe;
+  --wf-num-arriveSite: #cffafe;
+  --wf-num-waitProcess: #ffedd5;
+  --wf-num-waitConfirmFO: #ffedd5;
+  --wf-num-waitConfirm: #ccfbf1;
+  --wf-num-closed: #dcfce7;
+  --wf-num-other: #e8eef4;
+}
+:root[data-theme='light'] .wf-number { box-shadow: none; }
+
+/* 浅色档的阶段色换深色阶（深色档的亮色在白底对比度不足） */
+:root[data-theme='light'] .wf-stage--reassign       { --stage-color: #7c3aed; }
+:root[data-theme='light'] .wf-stage--waitAccept     { --stage-color: #1d6fb8; }
+:root[data-theme='light'] .wf-stage--arriveSite,
+:root[data-theme='light'] .wf-stage--waitDeparture,
+:root[data-theme='light'] .wf-stage--waitArriveSite { --stage-color: #0e7490; }
+:root[data-theme='light'] .wf-stage--waitProcess,
+:root[data-theme='light'] .wf-stage--leaveSite      { --stage-color: #b45309; }
+:root[data-theme='light'] .wf-stage--waitConfirmFO  { --stage-color: #c2410c; }
+:root[data-theme='light'] .wf-stage--waitConfirm    { --stage-color: #0f766e; }
+:root[data-theme='light'] .wf-stage--closed         { --stage-color: #15803d; }
+:root[data-theme='light'] .wf-stage--other          { --stage-color: #5b7288; }
+
+/* 响应式：**列数不在这里定**（2026-10-19 WO 适配）。
+   原因：page=wo 有 9 个阶段，一行铺满会挤成 148px 竖条，必须折行；
+   而列数一旦折行，「行末不画箭头」的判断就必须知道真实列数。
+   若 CSS 用 repeat(3) / repeat(2) 硬编码、JS 又按 --wf-cols 算行末，
+   两边会各说一套（同一张卡 CSS 认为在行中、JS 认为在行末），箭头必然指错。
+   因此列数统一由组件里的 ResizeObserver 测量后写入 --wf-cols，
+   这里只保留与列数无关的间距 / 内边距 / 高度微调。 */
+@media (max-width: 1280px) {
+  .wo-workflow { padding: 16px 14px 14px; }
+  .wf-stages { --wf-gap: 24px; }
+}
+@media (max-width: 900px) {
+  .wo-workflow { padding: 14px 12px; }
+  .wf-stages { --wf-gap: 22px; }
+}
+@media (max-width: 600px) {
+  .wo-workflow { padding: 12px 10px; }
+  .wf-stages { --wf-gap: 20px; }
+  .wf-stage { min-height: 200px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .wf-stage { transition: none; }
+}
+
+/* ============================================================================
+ * VMAX 诊断页 · 打印版（导出 PDF）
+ * ============================================================================
+ * 方案 §4.6：不引第三方 PDF 库（前端体积 + 中文字体问题），
+ * 走浏览器打印样式，用户在打印对话框里选「另存为 PDF」。
+ *
+ * 触发方式：VmaxUserQuery 的「导出 PDF」给 <body> 加 .vmax-print-mode，
+ * window.print() 后移除（print 事件同步触发，页面来不及重排）。
+ *
+ * 打印版只留：结论 + 四维评分 + 语音/OTT/游戏证据 + 时间线 + 数据源命中。
+ * 隐藏：页签、查询条、所有按钮/下钻箭头/分页器、侧边栏、顶栏。
+ * 理由：贴进投诉工单的是「结论与证据」，不是可操作界面 ——
+ * 按钮印在纸上只会占地方，还会让人误以为纸质件能点。
+ * ========================================================================== */
+@media print {
+  /* 打印统一白底黑字：深色主题直接打印会烧掉半卷墨且看不清 */
+  html, body { background: #fff !important; }
+  body.vmax-print-mode .wh-sidebar,
+  body.vmax-print-mode .wh-header,
+  body.vmax-print-mode .app-sidebar,
+  body.vmax-print-mode .app-header,
+  body.vmax-print-mode nav { display: none !important; }
+
+  /* 隐藏操作控件：查询条、页签条、卡片右上角按钮、分页器 */
+  body.vmax-print-mode .ant-btn,
+  body.vmax-print-mode .ant-segmented,
+  body.vmax-print-mode .ant-pagination,
+  body.vmax-print-mode .ant-empty,
+  body.vmax-print-mode .ant-alert-close-icon { display: none !important; }
+
+  /* 卡片：去渐变底、去阴影，改细边框（渐变打印出来是一条条色带） */
+  body.vmax-print-mode .wh-card {
+    background: #fff !important;
+    box-shadow: none !important;
+    border: 1px solid #d9d9d9 !important;
+    break-inside: avoid;
+    page-break-inside: avoid;
+    margin-bottom: 8px;
+  }
+  body.vmax-print-mode .wh-card-head { border-bottom: 1px solid #eee !important; }
+
+  /* 表格：不要横向滚动条，字号收小，避免长表格被切到两页中间 */
+  body.vmax-print-mode .ant-table-wrapper,
+  body.vmax-print-mode .ant-table { font-size: 10px !important; }
+  body.vmax-print-mode .ant-table-scroll,
+  body.vmax-print-mode .ant-table-body { overflow: visible !important; }
+  body.vmax-print-mode .ant-table-thead > tr > th { background: #fafafa !important; }
+  body.vmax-print-mode tr { break-inside: avoid; page-break-inside: avoid; }
+
+  /* 证据时间线：行多时允许跨页，但表头每页重复（antd 的 sticky 在打印无效） */
+  body.vmax-print-mode .vmax-print-timeline { break-inside: auto; page-break-inside: auto; }
+
+  /* 打印页边距：够贴进 A4 工单 */
+  @page { margin: 12mm 10mm; }
+}

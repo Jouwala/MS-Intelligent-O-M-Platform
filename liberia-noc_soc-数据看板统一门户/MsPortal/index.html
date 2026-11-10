@@ -1,0 +1,720 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ZTE OLR MS 管理平台 - Liberia 门户看板 (ZTE OLR MS Management Platform)</title>
+<!-- 显式声明图标：否则浏览器会回退去请求站点根的 /favicon.ico，产生 404。
+     2026-09-21 同步新 Logo：直接用官方品牌资产降采样（assets/favicon-{16,32,180}.png），
+     这样标签页图标与 favicon-32.png 完全一致。
+       源图 logo-zte-z-174.png，降采样用面积平均（预乘 alpha，避免透明边发黑）；
+       16/32 额外做了一层反锐化掩模 —— 直接降采样在 16px 下 Z 字形会糊成一团蓝，
+       加锐化后轮廓可辨（A/B 实测过）。
+     注：曾用过一版按新配色重绘的 SVG favicon（16px 更锐利，但与官方资产不同源），
+     已归档为 favicon.svg_bak_20260921_改用PNG前，需要可换回。 -->
+<link rel="icon" type="image/png" sizes="16x16" href="assets/favicon-16.png">
+<link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32.png">
+<link rel="apple-touch-icon" sizes="180x180" href="assets/favicon-180.png">
+<meta name="description" content="ZTE OLR MS Management Platform — Liberia NOC/SOC 自动化工具平台入口，统一聚合 CXO / MS / FO / FLM / BO / System Admin 各视图看板。">
+<!-- 本地资源，零 CDN 依赖，内网断网可用 -->
+<link rel="stylesheet" href="assets/icons/phosphor.css">
+<link rel="stylesheet" href="assets/tailwind.css">
+<link rel="stylesheet" href="assets/portal.css">
+<!-- 顶栏改版（2026-09-18 加）：必须排在 portal.css **之后** ——
+     新顶栏与 portal.css 里旧的顶栏规则同特异性，靠加载顺序取胜。
+     新增文件，portal.css / portal.js 一行未改。 -->
+<link rel="stylesheet" href="assets/masthead.css">
+<!-- QC 下钻弹窗的统一外壳（2026-09-23 加）。与 /olbrportal/assets/olbr.css 引的是
+     **同一个文件**：同名同类名，两边结构 / 间距 / 字号 / 交互逐条一致；文件内部只用
+     --qc-* 变量，主题色由下面这段 :root 映射，所以两边各随各的深浅色不打架。
+     排在 portal.css 之后：旧的内联 .qc-* 规则若还留着，以本文件为准。 -->
+<link rel="stylesheet" href="assets/qcDrill.css">
+<link rel="stylesheet" href="assets/qcDrill.theme.css">
+<script>
+/* 主题与语言首屏防闪烁（主题默认浅色，与 ref.html 一致；用户选择存 localStorage）。
+   语言没选过时按浏览器语言定默认 —— 之前硬默认中文，利比里亚用户第一次打开满屏中文。
+   口径必须和 portal.js 的 detectLang() 一致，两边不一致首帧和挂载后语言不同会闪一下。 */
+(function () {
+  function guessLang() {
+    /* 口径与 assets/portal.js 的 detectLang() 逐条一致：
+       ?lang= > msportal.lang.v1 > olbr.lang（上游门户的键） > 浏览器语言 */
+    var q = null;
+    try { q = new URLSearchParams(location.search).get('lang'); } catch (e) { /* ignore */ }
+    if (q === 'en' || q === 'zh') return q;
+    var v = null;
+    try { v = localStorage.getItem('msportal.lang.v1'); } catch (e) { /* ignore */ }
+    if (v === 'en' || v === 'zh') return v;
+    try {
+      v = localStorage.getItem('olbr.lang');
+      if (v === 'en' || v === 'zh') return v;
+    } catch (e) { /* ignore */ }
+    var nav = (navigator.language || navigator.userLanguage || 'zh') + '';
+    return nav.toLowerCase().indexOf('zh') === 0 ? 'zh' : 'en';
+  }
+  try {
+    if (localStorage.getItem('msportal.theme.v1') === 'dark') document.documentElement.classList.add('dark');
+  } catch (e) { /* ignore */ }
+  document.documentElement.setAttribute('lang', guessLang() === 'en' ? 'en' : 'zh-CN');
+})();
+</script>
+</head>
+<body class="text-slate-800 antialiased min-h-screen flex flex-col">
+
+<!-- ===================== BEGIN: TopHeader ===================== -->
+<!-- 2026-09-18 按用户给的 OLR MS 截图重做（原顶栏备份原名 index.html_bak_20260918_顶栏改版前，
+     2026-09-25 随同批快照归档到 D:\01_RPA\_quarantine_20260925\portal_snapshots\MsPortal\ 下，
+     同一母本只就地保留最近 3 份，见该目录 _MANIFEST.tsv）：
+       第一行 = 深空蓝 masthead（ZTE 标 + ZTE 字标 + 「OLR MS Management Platform」
+                + 副标题 + 地球背景 + 环境徽标/时钟/语言/主题/站点/退出）
+       第二行 = 浅色工具条（见下面 ControlBar）
+     样式在 assets/masthead.css、交互在 assets/masthead.js —— 两个都是**新增文件**，
+     portal.css / portal.js 一行未改（当天有另一个会话在同时改它们）。
+     顶栏在深色与浅色主题下都是「深色门面」：截图本来就是浅色主题下的样子
+     （页面 #eaf7fb + 深色门面 + 浅蓝工具条），深色主题只是把门面再压深一档。
+
+     ⚠️ 保留的 id 是门户脚本的接口，别改：#clock（portal.js 每秒写时间）、
+        #themeBtn、[data-lang]、#authUserBadge、#logoutBtn。 -->
+<header class="mp-mast">
+  <!-- 背景层：纯装饰，pointer-events:none -->
+  <div class="mp-mast-bg" aria-hidden="true">
+    <!-- 地球：比例是把参考图的球缘像素逐行取最亮点后做最小二乘圆拟合量出来的：
+         球心在水平 ≈52.5%、半径 ≈ 2.1×顶栏高、球顶在顶栏上沿往下约 3%
+         （参考图里球被顶栏上沿切掉一点），底边可见弦宽 ≈3.5×顶栏高。
+         球面压得很暗，靠「球缘青光 + 点阵大陆」出效果 —— 别改成亮球顶。 -->
+    <div class="mp-globe">
+      <svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg" focusable="false">
+        <defs>
+          <radialGradient id="mpGlobeBody" cx="74%" cy="8%" r="96%">
+            <stop offset="0%" stop-color="#2b7fdd"></stop>
+            <stop offset="10%" stop-color="#17579f"></stop>
+            <stop offset="26%" stop-color="#0d3672"></stop>
+            <stop offset="48%" stop-color="#082450"></stop>
+            <stop offset="76%" stop-color="#05152f"></stop>
+            <stop offset="100%" stop-color="#03101f"></stop>
+          </radialGradient>
+          <radialGradient id="mpGlobeBody2" cx="62%" cy="4%" r="92%">
+            <stop offset="0%" stop-color="#0d2f63"></stop>
+            <stop offset="46%" stop-color="#061c3d"></stop>
+            <stop offset="100%" stop-color="#03101f"></stop>
+          </radialGradient>
+          <!-- 球缘亮边：最亮处在球顶偏右约 29°（参考图逐行采样：y=115 时 #D5FFFF），
+               往左上渐隐、往右下退成中蓝 -->
+          <linearGradient id="mpGlobeRim" x1="0" y1="0.72" x2="1" y2="0.04">
+            <stop offset="0%" stop-color="#3f9dff" stop-opacity="0"></stop>
+            <stop offset="16%" stop-color="#63c8ff" stop-opacity=".22"></stop>
+            <stop offset="42%" stop-color="#a8f0ff" stop-opacity=".58"></stop>
+            <stop offset="68%" stop-color="#f2ffff" stop-opacity="1"></stop>
+            <stop offset="82%" stop-color="#9fe6ff" stop-opacity=".8"></stop>
+            <stop offset="100%" stop-color="#3f92f0" stop-opacity=".25"></stop>
+          </linearGradient>
+          <!-- 点阵：海洋稀疏，陆地密而亮 -->
+          <pattern id="mpGlobeDots" width="1.35" height="1.35" patternUnits="userSpaceOnUse">
+            <circle cx=".67" cy=".67" r=".28" fill="#8fd8ff" fill-opacity=".20"></circle>
+          </pattern>
+          <pattern id="mpGlobeLand" width="1.35" height="1.35" patternUnits="userSpaceOnUse">
+            <circle cx=".67" cy=".67" r=".36" fill="#cdf4ff" fill-opacity=".72"></circle>
+          </pattern>
+          <clipPath id="mpGlobeClip"><circle cx="100" cy="100" r="98"></circle></clipPath>
+          <filter id="mpGlobeBloom" x="-12%" y="-12%" width="124%" height="124%">
+            <feGaussianBlur stdDeviation="2.4"></feGaussianBlur>
+          </filter>
+        </defs>
+        <!-- 后面那颗暗球：只留一道很淡的弧（截图左下角那道），填实心会变成一块死暗斑 -->
+        <circle cx="8" cy="120" r="106" fill="none" stroke="#2f6fbf" stroke-opacity=".3" stroke-width="1.2"></circle>
+        <!-- 大气层外圈（比球缘再外一点的那道淡弧） -->
+        <circle cx="100" cy="100" r="101.5" fill="none" stroke="#5aa8f0" stroke-opacity=".16" stroke-width="1"></circle>
+        <!-- 主球 -->
+        <circle cx="100" cy="100" r="98" fill="url(#mpGlobeBody)"></circle>
+        <g clip-path="url(#mpGlobeClip)">
+          <circle cx="100" cy="100" r="98" fill="url(#mpGlobeDots)"></circle>
+          <!-- 陆地：可见球顶那一片，用点阵更密更亮的几块示意（棱角多一点才像大陆，
+               圆滚滚的椭圆会看成一团云）。纵向位置按「可见带 y 0..46」放。 -->
+          <g fill="url(#mpGlobeLand)">
+            <path d="M56 32 L64 20 L80 14 L98 18 L107 26 L100 35 L86 40 L68 41 Z"></path>
+            <path d="M118 26 L127 15 L146 12 L163 18 L168 28 L156 36 L136 39 L123 34 Z"></path>
+            <path d="M28 38 L38 29 L50 32 L54 41 L42 45 L32 44 Z"></path>
+            <path d="M84 8 L98 6 L103 12 L88 15 Z"></path>
+            <path d="M109 40 L116 34 L122 39 L114 44 Z"></path>
+          </g>
+          <!-- 经纬线（很淡，避免球面成一块死色） -->
+          <g fill="none" stroke="#8fd8ff" stroke-opacity=".09" stroke-width=".55">
+            <ellipse cx="100" cy="100" rx="30" ry="98"></ellipse>
+            <ellipse cx="100" cy="100" rx="60" ry="98"></ellipse>
+            <ellipse cx="100" cy="100" rx="88" ry="98"></ellipse>
+            <ellipse cx="100" cy="100" rx="98" ry="26"></ellipse>
+            <ellipse cx="100" cy="100" rx="98" ry="60"></ellipse>
+          </g>
+        </g>
+        <!-- 球缘：先一层「贴边内辉光」（参考图里球缘内侧有一条很宽的蓝光带，
+             光靠球体径向渐变做不出来，得再描一圈模糊的亮边），再压一条细亮线 -->
+        <circle cx="100" cy="100" r="92" fill="none" stroke="url(#mpGlobeRim)" stroke-width="12" opacity=".38" filter="url(#mpGlobeBloom)"></circle>
+        <circle cx="100" cy="100" r="97.4" fill="none" stroke="url(#mpGlobeRim)" stroke-width="6" opacity=".7" filter="url(#mpGlobeBloom)"></circle>
+        <circle cx="100" cy="100" r="97.6" fill="none" stroke="url(#mpGlobeRim)" stroke-width="2.6"></circle>
+      </svg>
+    </div>
+  </div>
+
+  <div class="mp-mast-inner">
+    <!-- 品牌区 -->
+    <div class="mp-brand">
+      <span class="mp-zte-mark">
+        <!-- 「Z」标（2026-09-21 部署：换成官方品牌资产）
+             源图是 1254×1254 的透明 PNG（Format32bppArgb，四角 A=0），
+             已做三步处理后才放进 assets/：
+               1. 裁到内容框 —— 原图四周各有 130+px 全透明留白，不裁的话在 50px 的
+                  槽位里标会缩小约 21% 且偏左上，跟 ZTE、竖线全部对不齐
+               2. 按内容中心补成正方形 —— 内容框是 987×967，直接拉伸会变形
+               3. 无损重编码 + 降到 2x/3x —— 987KB → 23KB/44KB，逐像素比对 0 差异
+             尺寸完全由 .mp-zte-mark 的 width/height 控制（100%/100%），
+             所以门户的字号放大缩小照样带着它一起缩放。
+             要回退到原来的内联 SVG：见 index.html_bak_20260921_新Logo部署前。 -->
+        <img src="assets/logo-zte-z-116.png"
+             srcset="assets/logo-zte-z-116.png 2x, assets/logo-zte-z-174.png 3x"
+             alt="ZTE" decoding="async">
+      </span>
+      <span class="mp-zte-word">ZTE</span>
+      <span class="mp-brand-sep" aria-hidden="true"></span>
+      <div class="mp-brand-text">
+        <h1 class="mp-title"><span class="mp-title-olr">OLR</span> MS<span class="mp-title-tail"> Management Platform</span></h1>
+        <p class="mp-tagline" data-mp-i18n="tagline">Smarter Operations · Higher Efficiency · Better Network</p>
+      </div>
+    </div>
+
+    <!-- 右侧工具区 -->
+    <div class="mp-mast-tools">
+      <!-- 环境徽标：环境名由 hostname 真实判定，绿点由 /api/portal-qc/summary 探活决定。
+           2026-09-18 曾按需求删掉写死的「生产运行」绿点，这里不把它加回来：
+           点必须反映真实状态（探活失败会变红且停跳）。 -->
+      <span class="mp-env" id="envBadge">
+        <span class="mp-env-dot" aria-hidden="true"></span>
+        <span id="envLabel">Production</span>
+      </span>
+      <span class="mp-tools-sep" aria-hidden="true"></span>
+      <span class="mp-clock" id="clock">--:--:--</span>
+
+      <div class="seg" role="group" aria-label="Language">
+        <button type="button" class="seg-btn" data-lang="zh">中文</button>
+        <button type="button" class="seg-btn" data-lang="en">EN</button>
+      </div>
+      <button type="button" class="icon-btn" id="themeBtn" title="深色 / 浅色" aria-label="Toggle theme"
+              data-mp-i18n-attr="title:theme.tip">
+        <svg class="ic-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+        <svg class="ic-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path></svg>
+      </button>
+
+      <!-- 站点入口（截图里那个「图钉 + Local」）：指向同一台主机上的 uniplam 门户。
+           标签按真实 hostname 显示（本机 = 本机站点 / 其余 = 利比里亚）。
+           窄屏收成纯图标，但链接一直在 —— 这是 /uniplam/ 的主入口。 -->
+      <a class="btn-ghost mp-pin" id="portalLink" href="/uniplam/"
+         data-mp-i18n-attr="title:site.tip" title="返回 uniplam 数据看板门户（同一台主机）">
+        <svg class="mp-pin-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0z"></path><circle cx="12" cy="10" r="3"></circle></svg>
+        <span id="siteLabel" data-mp-i18n="site.local">Local</span>
+      </a>
+
+      <span class="auth-user-badge" id="authUserBadge" hidden></span>
+      <!-- 用户管理入口（2026-09-20 加）：只对管理员显示（portal.js 的 syncAuthUi 控制）。
+           打开的面板读写的是统一门户同一份用户数据库（auth-data/portal-auth.db），
+           接口走 /uniplam/api/auth/*，所以在 /MsPortal/ 改完，/uniplam/ 刷新即可见。 -->
+      <button type="button" class="btn-ghost" id="userMgmtBtn" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M22 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
+        <span data-i18n="um.entry">用户管理</span>
+      </button>
+      <button type="button" class="btn-ghost" id="logoutBtn" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>
+        <span data-i18n="auth.logout">退出登录</span>
+      </button>
+    </div>
+  </div>
+</header>
+<!-- ===================== END: TopHeader ===================== -->
+
+<!-- ===================== BEGIN: ControlBar ===================== -->
+<!-- 搜索 / 筛选那一整行默认收起，点击才展开（用户要求）。
+     折叠态下 #barSummary 会回显当前生效的搜索词与筛选条件 ——
+     否则用户看到「怎么只剩 3 个看板」却找不到原因（chip 和搜索框都被收起来了）。 -->
+<div class="control-bar is-collapsed" id="controlBar">
+  <div class="control-toggle-row">
+    <button type="button" class="control-toggle" id="controlToggle" aria-expanded="false" aria-controls="controlInner">
+      <svg class="ct-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+      <span data-i18n="bar.toggle">搜索与筛选</span>
+      <span class="ct-summary" id="barSummary" hidden></span>
+      <svg class="ct-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+    </button>
+
+    <!-- 工具条右侧两项（2026-09-18 加，按截图）。两个都接现有真实功能：
+           · Filter dashboards in this view → 展开搜索筛选行并聚焦搜索框
+           · Full catalog → 清空搜索词 + 筛选切回「全部」
+         交互在 assets/masthead.js，不依赖 portal.js 内部状态。
+
+         2026-09-19 按用户要求删掉原第三项「Strategy pass rate: 87.8%」：
+         它取 /api/portal-qc/summary 的 sla 指标，而该值与 Quality Control 面板
+         标题栏的「达标率」**同源同字段**，属于同一屏上的重复展示；且它是全站 SLA
+         口径，和本行「筛选当前视图」的语义无关，标签还是错译（portal.js 里达标率的
+         英文是 Compliance，不是 Strategy pass rate）。该指标在 QC 面板里仍有权威
+         展示（取不到会变 —、带 30 天口径 tooltip），能力没有丢失。 -->
+    <div class="mp-bar-tools">
+      <button type="button" class="mp-bar-btn" id="barFilterBtn"
+              data-mp-i18n-attr="title:filterView.tip" title="展开搜索与筛选行，并聚焦搜索框">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <span data-mp-i18n="filterView">Filter dashboards in this view</span>
+      </button>
+      <button type="button" class="mp-bar-btn mp-bar-btn--plain" id="barFullCatalog"
+              data-mp-i18n-attr="title:fullCatalog.tip" title="清除搜索词与筛选条件，回到完整看板目录">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="8" y1="13" x2="16" y2="13"></line><line x1="8" y1="17" x2="13" y2="17"></line></svg>
+        <span data-mp-i18n="fullCatalog">Full catalog</span>
+      </button>
+    </div>
+  </div>
+  <div class="control-inner" id="controlInner">
+    <label class="search">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+      <input type="search" id="searchInput" data-i18n-attr="placeholder:search.placeholder" placeholder="搜索看板名称、描述、责任人、标签…">
+    </label>
+
+    <div class="chips" id="filterChips"></div>
+
+    <div class="control-actions">
+      <!-- 拖拽排序（2026-09-20 加）：点开后在区块内拖动卡片即可调顺序。
+           对所有人可用；能写服务端目录的人还能选「所有人可见」写全局顺序。
+           按钮文案/提示条内容由 portal.js 的 syncOrderUI() 动态写（要带层选择）。 -->
+      <button type="button" class="btn-soft" id="orderBtn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="7" x2="20" y2="7"></line><line x1="4" y1="12" x2="14" y2="12"></line><line x1="4" y1="17" x2="17" y2="17"></line><path d="M18 15l2 2-2 2"></path></svg>
+        <span data-i18n="btn.order">调整顺序</span>
+      </button>
+      <button type="button" class="btn-soft" id="editBtn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"></path></svg>
+        <span data-i18n="btn.editGroups">编辑分组归属</span>
+      </button>
+      <button type="button" class="btn-soft" id="addBoardBtn" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+        <span data-i18n="btn.addBoard">新增看板</span>
+      </button>
+      <button type="button" class="btn-soft" id="manageBtn" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"></path></svg>
+        <span data-i18n="btn.manageGroups">分组管理</span>
+      </button>
+      <button type="button" class="btn-soft" id="exportBtn" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+        <span data-i18n="btn.export">导出 JSON</span>
+      </button>
+      <button type="button" class="btn-soft" id="importBtn" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+        <span data-i18n="btn.import">导入 JSON</span>
+      </button>
+      <button type="button" class="btn-soft danger" id="resetBtn" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"></path><polyline points="3 3 3 8 8 8"></polyline></svg>
+        <span data-i18n="btn.reset">恢复默认</span>
+      </button>
+      <!-- 看板目录回滚：删除服务端全局目录，所有人回到 data.js 内置的 51 个看板。
+           与上面的「恢复默认」不同 —— 那个只清本机分组改动，这个影响所有电脑，
+           所以单独一个按钮 + 二次确认。 -->
+      <button type="button" class="btn-soft danger" id="boardResetBtn" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"></path><polyline points="3 3 3 8 8 8"></polyline></svg>
+        <span data-i18n="btn.boardReset">恢复出厂目录</span>
+      </button>
+      <input type="file" id="importFile" accept="application/json,.json" hidden>
+    </div>
+  </div>
+  <p class="edit-hint" id="editHint" hidden data-i18n="edit.hint">
+    编辑模式：卡片右上角可「编辑 / 删除」看板，分组标签 × 可移出该分组；拓扑地图的页签可直接点击改名；改动保存到服务器，所有人可见。
+  </p>
+  <!-- 拖拽排序提示条（2026-09-20 加）：内容整条由 portal.js 的 syncOrderUI() 生成 ——
+       里面含「仅我可见 / 所有人可见」的层选择与「恢复默认顺序」，都依赖运行时权限，
+       写在静态 HTML 里没法按 catalogEditable 显隐。 -->
+  <div class="edit-hint" id="orderHint" hidden></div>
+</div>
+<!-- ===================== END: ControlBar ===================== -->
+
+<!-- ===================== BEGIN: MainDashboardContent ===================== -->
+<main class="flex-1 w-full p-4 lg:p-5 space-y-4">
+
+  <!-- 未登录门禁：显隐由 assets/portal.js 的 REQUIRE_LOGIN_FOR_CATALOG 控制 -->
+  <section id="secGate" aria-label="Sign-in required" hidden></section>
+
+  <!-- CXO View -->
+  <section id="secCxo" aria-label="CXO View" class="bg-white rounded-xl p-4 lg:p-5 shadow-card border border-slate-200/80"></section>
+
+  <!-- Quality Control -->
+  <section id="secQc" aria-label="Quality Control" class="bg-white rounded-xl p-4 lg:p-5 shadow-card border border-slate-200/80"></section>
+
+  <!-- Core Layout Grid (3 Columns, equal width: Left MS & FLM / Center Topology Map & System Admin / Right BO & FO)
+       知识问答与友情链接已移出三列，改放最下面一整行（见下面的 BOTTOM ROW）——
+       它们是「辅助入口」，与三列的业务视图不是一类，塞在列尾只会制造高度差与尾部空白。 -->
+  <div class="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+
+    <!-- LEFT COLUMN: MS VIEW & FLM VIEW & SP VIEW -->
+    <div class="lg:col-span-4 xl:col-span-4 space-y-4">
+      <section id="secMs" aria-label="MS View" class="bg-white rounded-xl p-4 lg:p-5 shadow-card border border-slate-200/80"></section>
+      <section id="secFlm" aria-label="FLM View" class="bg-white rounded-xl p-4 lg:p-5 shadow-card border border-slate-200/80"></section>
+      <!-- SP View（备品备件管理）：按需求放在 FLM View 正下方，
+           看板为 #33 Warehouse / #34 Material Summary / #35 Spare Management Audit，
+           原先挂在 MS View 下，2026-09-18 整体迁到本区块（不在 MS View 重复出现）。 -->
+      <section id="secSp" aria-label="SP View" class="bg-white rounded-xl p-4 lg:p-5 shadow-card border border-slate-200/80"></section>
+    </div>
+
+    <!-- CENTER COLUMN: GIS TOPOLOGY（地图作为整页的视觉焦点）
+         + ESCALATION MATRIX（按需求放在地图组件正下方） -->
+    <div class="lg:col-span-8 xl:col-span-4 space-y-4">
+      <section id="secTopo" aria-label="Central Liberia Regional Topology" class="bg-white rounded-xl p-4 lg:p-5 shadow-card border border-slate-200/80 flex flex-col"></section>
+      <!-- 升级机制表格：内容来自 升级机制.xlsx，由 portal.js 的 escSection() 渲染。
+           本区块是**静态参考信息**，不参与顶栏搜索/筛选，也不受编辑模式影响 ——
+           与地图一样只在 render() 里建一次，不放进 renderSections()。 -->
+      <section id="secEsc" aria-label="Escalation Matrix" class="bg-white rounded-xl p-4 lg:p-5 shadow-card border border-slate-200/80"></section>
+    </div>
+
+    <!-- RIGHT COLUMN: BO VIEW & FO VIEW & TASK REPORT FILES
+         System Admin 原在本列第三格（历史沿革：它从中列地图下方挪来，让三列极差 448px → 225px，
+         见 TMP/probe_column_balance.cjs）。2026-09-18 按需求整块移到最下面一行，
+         这一格改为**直接内嵌** /myapp/?page=email_reports 的页面内容：
+           · 骨架与地图卡同构（标题栏 + 画布），由 portal.js 的 emailSection()/ensureEmail() 填；
+           · 高度不写死 —— 画布 flex 撑满本列剩余高度，让三列底部重新对齐
+             （见 portal.css 的 #secEmail 那组规则；画布越高，内嵌的文件列表看得越多）。
+         列宽没变（xl 下仍是 4/12），所以 BO / FO 的排版完全不受影响。 -->
+    <div class="lg:col-span-12 xl:col-span-4 space-y-4">
+      <section id="secBo" aria-label="BO View" class="bg-white rounded-xl p-4 lg:p-5 shadow-card border border-slate-200/80"></section>
+      <section id="secFo" aria-label="FO View" class="bg-white rounded-xl p-4 lg:p-5 shadow-card border border-slate-200/80"></section>
+      <section id="secEmail" aria-label="Task Report Files" class="bg-white rounded-xl p-4 lg:p-5 shadow-card border border-slate-200/80"></section>
+    </div>
+  </div>
+  <!-- END: Core Layout Grid -->
+
+  <!-- BOTTOM ROW: Knowledge Q&A + Friends Links + System Admin（三卡各占 1/3，lg 以下堆叠成三行）
+       2026-09-18 按需求把 System Admin 从右列第三格移到本行**最右边**：
+       它与 Q&A / 友情链接同属「辅助入口」一类，与三列的业务视图不是一类，
+       原来挂在列尾只会替那一列承担全部高度差。xl 下本行每格 1/3 = 右列同宽，
+       所以 System Admin 的卡片网格（2 列 × 3 行）换行位置与原来完全一致。 -->
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 items-start">
+    <section id="secQa" aria-label="Knowledge Q&A" class="bg-white rounded-xl p-4 lg:p-5 shadow-card border border-slate-200/80"></section>
+    <section id="secFriends" aria-label="Friends Links" class="bg-white rounded-xl p-4 lg:p-5 shadow-card border border-slate-200/80"></section>
+    <section id="secAdmin" aria-label="System Admin" class="bg-white rounded-xl p-4 lg:p-5 shadow-card border border-slate-200/80"></section>
+  </div>
+  <!-- END: Bottom Row -->
+
+  <!-- User-created groups -->
+  <div id="secExtra" class="space-y-4"></div>
+</main>
+<!-- ===================== END: MainDashboardContent ===================== -->
+
+<!-- ===================== BEGIN: PageFooter ===================== -->
+<footer class="bg-white border-t border-slate-200 mt-6 py-3.5 px-6 text-slate-500 text-sm text-center flex flex-col sm:flex-row items-center justify-between gap-2">
+  <div>
+    © 2026 ZTE Corporation. <span data-i18n="footer.copy">中兴通讯股份有限公司 版权所有</span> | <span data-i18n="footer.branch">利比里亚办事处网络运营中心 (OLR MS)</span>
+  </div>
+  <div class="flex items-center gap-4 text-[13px]">
+    <span class="inline-flex items-center gap-1 text-emerald-600"><i class="ph ph-shield-check"></i> <span data-i18n="footer.compliance">安全合规模式运行</span></span>
+    <span data-i18n="footer.source">分组依据：看板清单 (分组优化）</span>
+    <span class="font-mono">Ver 5.1.0-LR</span>
+  </div>
+</footer>
+<!-- ===================== END: PageFooter ===================== -->
+
+<!-- ===================== BEGIN: GroupManagerModal ===================== -->
+<div class="modal-mask" id="modalMask" hidden>
+  <div class="modal group-modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="modal-head">
+      <h3 id="modalTitle" data-i18n="modal.title">分组管理</h3>
+      <button type="button" class="icon-btn small" id="modalClose" aria-label="Close">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <table class="group-table">
+        <thead>
+          <tr>
+            <!-- 树形列：有子分组的分组（当前仅 BO View）在这里放展开箭头 -->
+            <th class="tree"></th>
+            <th data-i18n="modal.colZh">分组名称（中文）</th>
+            <th data-i18n="modal.colEn">分组名称（English）</th>
+            <th data-i18n="modal.colCount">看板数</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="groupTableBody"></tbody>
+      </table>
+      <!-- 子分组（二级分组）说明：文案按当前是否可写切换，见 renderGroupTable() -->
+      <p class="modal-note sub-note" id="groupSubNote"></p>
+      <div class="modal-add">
+        <input type="text" id="newGroupZh" placeholder="新分组中文名 / Chinese name"
+               data-i18n-attr="placeholder:modal.newGroupZh">
+        <input type="text" id="newGroupEn" placeholder="English name">
+        <button type="button" class="btn-soft primary" id="addGroupBtn" data-i18n="modal.add">新增分组</button>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <span class="modal-note" data-i18n="modal.note">分组改名 / 新增会立即生效，并保存在本机浏览器；删除分组不会删除看板本身。</span>
+      <!-- 子分组的显式保存：二级分组的增删改与看板归属都先进草稿，点这里才整体提交。
+           没改动时禁用（并隐藏左侧提示），避免用户以为「改了但没存」。 -->
+      <span class="sub-dirty" id="subDirtyHint" hidden data-i18n="subm.dirty">子分组有未保存的改动</span>
+      <button type="button" class="btn-soft primary" id="subSaveBtn" disabled data-i18n="subm.save">保存子分组</button>
+    </div>
+  </div>
+</div>
+<!-- ===================== END: GroupManagerModal -->
+
+<!-- ===================== BEGIN: QcDrillModal =====================
+     Quality Control 指标卡的下钻明细弹窗。表头 / 行 / 分页文本由 portal.js 填充，
+     这里只放骨架与中英静态文案（data-i18n、data-i18n-attr 由 render() 统一套用）。
+
+     2026-09-23：外壳类名从 .modal-mask/.modal.wide/.modal-head… 换成 .qc-*，
+     样式移入 assets/qcDrill.css —— 与 /olbrportal/ 的同一个弹窗**逐类一致**。
+     此前两个门户各写一套（这里居中 modal、olbrportal 右侧抽屉），同一个数字
+     点开是两种长相两种能力。.qc-* 是自成一体的命名空间，只映射主题变量，
+     与页面其它弹窗（.modal / .group-modal / .esc-modal）互不影响。
+     ================================================================ -->
+<div class="qc-mask" id="qcMask" hidden>
+  <div class="qc-modal" role="dialog" aria-modal="true" aria-labelledby="qcTitle">
+    <div class="qc-head">
+      <!-- 拖动抓手：标题栏整体可拖（cursor:move），这条纹理让「能拖」一眼可见。
+           仅装饰，不参与任何事件逻辑，故 aria-hidden。 -->
+      <span class="qc-grip" aria-hidden="true"></span>
+      <h3 id="qcTitle">Quality Control</h3>
+      <button type="button" class="qc-x" id="qcClose" aria-label="Close">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+      </button>
+    </div>
+    <div class="qc-body">
+      <div class="qc-tools">
+        <input type="search" id="qcSearch" autocomplete="off" data-i18n-attr="placeholder:qc.search">
+        <button type="button" class="qc-btn" id="qcReload" data-i18n="qc.reload">刷新</button>
+        <!-- 2026-09-20：CSV -> xlsx（my_app 统一格式 UNIFIED_EXCEL_V1，见 assets/excelReport.js）。
+             这里的静态文案只是 i18n 生效前的兜底，运行时仍由 portal.js 的 qc.export 覆盖。 -->
+        <button type="button" class="qc-btn" id="qcExport" data-i18n="qc.export">导出 Excel</button>
+        <!-- 2026-09-22 加：跳到 my_app 里对应的完整看板继续处理。
+             只给「目录里确实存在对应看板」的维度显示（alarm/tt/wo/spms），
+             cr/pmt 在 my_app 侧没有对应页面 —— 配一个错的链接比不给链接更糟。
+             href 与显隐都由 portal.js 的 applyQcDrillTitle() 设置。 -->
+        <a class="qc-btn qc-open-board" id="qcOpenBoard" hidden target="_blank" rel="noopener"
+           data-i18n="qc.openBoard">打开完整看板</a>
+      </div>
+      <div class="qc-scroll" id="qcScroll">
+        <table class="qc-table">
+          <thead id="qcThead"></thead>
+          <tbody id="qcTbody"></tbody>
+        </table>
+      </div>
+      <div class="qc-hint" data-i18n="qc.filterHint"></div>
+    </div>
+    <div class="qc-foot">
+      <div class="qc-foot-in">
+        <span class="qc-note" id="qcCount"></span>
+        <span class="qc-pager">
+          <button type="button" class="qc-btn" id="qcPrev">‹</button>
+          <span class="qc-page" id="qcPage"></span>
+          <button type="button" class="qc-btn" id="qcNext">›</button>
+        </span>
+      </div>
+    </div>
+  </div>
+</div>
+<!-- ===================== END: QcDrillModal ===================== -->
+
+<!-- ===================== BEGIN: EscalationModal =====================
+     升级机制「放大查看」弹窗。中列（地图下方）只有 394~582px，6 列表格在里面
+     必须横向滚动才看得全邮箱，所以给一个全宽弹窗：表格按全宽放大、6 列全部单行。
+     表体由 portal.js 的 openEscModal() 用 escTableHtml(true) 填充，这里只放骨架。
+     ================================================================ -->
+<div class="modal-mask" id="escMask" hidden>
+  <div class="modal wide esc-modal" role="dialog" aria-modal="true" aria-labelledby="escTitle">
+    <div class="modal-head">
+      <h3 id="escTitle" data-i18n="esc.modalTitle">升级机制 (Escalation Matrix)</h3>
+      <button type="button" class="icon-btn small" id="escClose" aria-label="Close">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+      </button>
+    </div>
+    <div class="modal-body" id="escModalBody"></div>
+    <div class="modal-foot">
+      <span class="modal-note" data-i18n="esc.modalNote"></span>
+    </div>
+  </div>
+</div>
+<!-- ===================== END: EscalationModal ===================== -->
+
+<!-- ===================== BEGIN: BoardEditModal =====================
+     看板新增 / 编辑弹窗（字段与 data.js 的看板对象一一对应，参考 uniplam 的
+     DashboardModal 设计）。select 的 option 文本与分组多选框由 portal.js 在
+     openBoardForm() 时按当前语言重建，这里只放空骨架。
+     ================================================================ -->
+<div class="modal-mask" id="boardMask" hidden>
+  <div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="boardTitle">
+    <div class="modal-head">
+      <h3 id="boardTitle" data-i18n="board.addTitle">新增看板</h3>
+      <button type="button" class="icon-btn small" id="boardClose" aria-label="Close">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <div class="board-form">
+        <label class="bf-field">
+          <span data-i18n="board.fTitleZh">标题（中文）*</span>
+          <input type="text" id="bfTitleZh" autocomplete="off">
+        </label>
+        <label class="bf-field">
+          <span data-i18n="board.fTitleEn">标题（English）</span>
+          <input type="text" id="bfTitleEn" autocomplete="off">
+        </label>
+        <label class="bf-field bf-full">
+          <span data-i18n="board.fUrl">链接 URL *</span>
+          <input type="text" id="bfUrl" autocomplete="off" placeholder="http://192.168.100.20/myapp/?page=...">
+        </label>
+        <label class="bf-field bf-full">
+          <span data-i18n="board.fDescZh">描述（中文）</span>
+          <textarea id="bfDescZh" rows="2"></textarea>
+        </label>
+        <label class="bf-field bf-full">
+          <span data-i18n="board.fDescEn">描述（English）</span>
+          <textarea id="bfDescEn" rows="2"></textarea>
+        </label>
+        <label class="bf-field">
+          <span data-i18n="board.fPlatform">平台</span>
+          <select id="bfPlatform"></select>
+        </label>
+        <label class="bf-field">
+          <span data-i18n="board.fStatus">状态</span>
+          <select id="bfStatus"></select>
+        </label>
+        <label class="bf-field">
+          <span data-i18n="board.fOwner">责任人（中文）</span>
+          <input type="text" id="bfOwner" autocomplete="off">
+        </label>
+        <label class="bf-field">
+          <span data-i18n="board.fOwnerEn">责任人（English）</span>
+          <input type="text" id="bfOwnerEn" autocomplete="off">
+        </label>
+        <label class="bf-field">
+          <span data-i18n="board.fDept">部门（中文）</span>
+          <input type="text" id="bfDept" autocomplete="off">
+        </label>
+        <label class="bf-field">
+          <span data-i18n="board.fDeptEn">部门（English）</span>
+          <input type="text" id="bfDeptEn" autocomplete="off">
+        </label>
+        <label class="bf-field">
+          <span data-i18n="board.fFreq">更新频率</span>
+          <input type="text" id="bfFreq" autocomplete="off" placeholder="每日0点"
+                 data-i18n-attr="placeholder:board.freqPh">
+        </label>
+        <label class="bf-field">
+          <span data-i18n="board.fIcon">图标</span>
+          <select id="bfIcon"></select>
+        </label>
+        <label class="bf-field" title="没被拖拽排序过的看板按这个数字从大到小排；拖过的以拖拽结果为准。"
+               data-i18n-attr="title:board.clicksTip">
+          <span data-i18n="board.fClicks">初始排序权重</span>
+          <input type="number" id="bfClicks" min="0" step="1">
+        </label>
+        <label class="bf-field">
+          <span data-i18n="board.fTags">标签（逗号分隔）</span>
+          <input type="text" id="bfTags" autocomplete="off">
+        </label>
+        <div class="bf-field bf-full">
+          <span data-i18n="board.fGroups">归属分组 *（可多选）</span>
+          <div class="bf-groups" id="bfGroups"></div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <span class="modal-note" id="boardNote" data-i18n="board.serverNote">保存后立即写入服务器，所有人打开门户都会看到。</span>
+      <span class="bf-actions">
+        <button type="button" class="btn-soft" id="boardCancel" data-i18n="board.cancel">取消</button>
+        <button type="button" class="btn-soft primary" id="boardSave" data-i18n="board.save">保存</button>
+      </span>
+    </div>
+  </div>
+</div>
+<!-- ===================== END: BoardEditModal ===================== -->
+
+<!-- ===================== BEGIN: DirectLoginModal ===================== -->
+<div class="modal-mask" id="loginMask" hidden>
+  <div class="modal auth-modal" role="dialog" aria-modal="true" aria-labelledby="loginTitle">
+    <div class="modal-head">
+      <h3 id="loginTitle" data-i18n="auth.directTitle">登录统一门户</h3>
+      <button type="button" class="icon-btn small" id="loginClose" aria-label="Close">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+      </button>
+    </div>
+    <form id="loginForm" class="auth-form">
+      <div class="auth-field">
+        <label for="loginUsername" data-i18n="auth.username">用户名</label>
+        <input id="loginUsername" type="text" autocomplete="username" required>
+      </div>
+      <div class="auth-field">
+        <label for="loginPassword" data-i18n="auth.password">密码</label>
+        <input id="loginPassword" type="password" autocomplete="current-password" required>
+      </div>
+      <div class="auth-error" id="loginError" hidden></div>
+      <div class="auth-foot">
+        <span class="modal-note" data-i18n="auth.sameAccount">使用统一门户同一套账号、密码和权限。</span>
+        <span class="bf-actions">
+          <button type="button" class="btn-soft" id="loginCancel" data-i18n="auth.cancel">取消</button>
+          <button type="submit" class="btn-soft primary" id="loginSubmit" data-i18n="auth.submit">登录</button>
+        </span>
+      </div>
+    </form>
+  </div>
+</div>
+<!-- ===================== END: DirectLoginModal ===================== -->
+
+<!-- ===================== BEGIN: UserManagementModal =====================
+     用户管理（2026-09-20 加）。与 /uniplam/ 的 UserManagementModal 功能对齐，
+     且**同一份用户数据库**：本页是静态页面、自己没有后端，所有读写都打到
+     /uniplam/api/auth/*（server/auth.ts 挂在门户 vite 服务上），落盘在
+     <项目根>/auth-data/portal-auth.db。因此不存在"两边各一份"的问题 ——
+     在任一侧新建/删除/改权限，另一侧刷新即可见。
+
+     骨架只放静态壳子与固定按钮，表体/表单/页面配置面板全部由 portal.js 的
+     renderUserMgmt() 按 state.um 重画（输入到一半的值都先落在 state 里再画，
+     否则重绘会清掉用户正在敲的内容）。 -->
+<div class="modal-mask" id="umMask" hidden>
+  <div class="modal um-modal" role="dialog" aria-modal="true" aria-labelledby="umTitle">
+    <div class="modal-head">
+      <div class="um-head-txt">
+        <h3 id="umTitle" data-i18n="um.title">用户管理</h3>
+        <p class="um-sub" data-i18n="um.subtitle">统一门户账号的增删与权限设置（仅管理员可见，与 /uniplam/ 同库同步）</p>
+      </div>
+      <span class="um-head-actions">
+        <button type="button" class="btn-soft" id="umReload" data-i18n="um.reload">刷新</button>
+        <a class="btn-soft" id="umOpenPortal" href="/uniplam/" target="_blank" rel="noopener noreferrer"
+           data-i18n="um.openPortal">在统一门户打开</a>
+        <button type="button" class="icon-btn small" id="umClose" aria-label="Close">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+        </button>
+      </span>
+    </div>
+    <div class="modal-body um-body" id="umBody"></div>
+    <!-- 底部固定操作栏：放在滚动区之外，页面配置面板展开时「保存」常驻可见 -->
+    <div class="modal-foot um-foot" id="umFoot" hidden>
+      <span class="um-foot-who" id="umFootWho"></span>
+      <span class="bf-actions">
+        <button type="button" class="btn-soft" id="umCancelBtn" data-i18n="um.pagesCancel">收起</button>
+        <button type="button" class="btn-soft primary" id="umSaveBtn" data-i18n="um.pagesSave">保存页面配置</button>
+      </span>
+    </div>
+  </div>
+</div>
+<!-- ===================== END: UserManagementModal ===================== -->
+
+<div class="toast" id="toast" hidden></div>
+
+<script src="assets/data.js"></script>
+<!-- 数据层英文术语表（freq / dept / owner 这些 xlsx 里只有中文的字段）；
+     与 data.js 分开是因为 data.js 由 TMP/gen_msportal.py 重新生成，写进去会被冲掉 -->
+<script src="assets/terms.js"></script>
+<!-- 访问控制（看板 id 映射 + allowedGroups/allowedCards 判定）：必须在 portal.js
+     之前加载，它给 window.MSPortalAccess 挂实现；看板查看器 viewer.html 用的是
+     同一份，两边不会漂移。 -->
+<script src="assets/access.js"></script>
+<!-- 顶栏交互：排在 portal.js **之前** —— 即使门户脚本因为接口不可用而报错，
+     顶栏自己的文案 / 环境徽标 / 达标率 / 工具条按钮仍然可用。 -->
+<script src="assets/masthead.js"></script>
+<!-- 统一 Excel 导出格式（my_app 的 UNIFIED_EXCEL_V1 移植版）：只定义
+     window.MsExcelReport，真正的 ExcelJS（约 0.9MB）等点「导出 Excel」时
+     才由 loadExcelJS() 按需注入 assets/vendor/exceljs.min.js。 -->
+<script src="assets/excelReport.js"></script>
+<!-- QC 下钻弹窗的拖动 / 点击位置定位（2026-09-23 加）。与 /olbrportal/ 共用同一个
+     文件 —— 行为逐条对齐 /myapp/ 的 DraggableClickModal：以点击位置为中心弹出、
+     按住标题栏可拖、点遮罩不关闭。排在 portal.js 之前：它自身只挂 document 级
+     委托并在 DOMContentLoaded 绑定，先加载可保证首次打开前就绪。 -->
+<script src="assets/qcDrill.drag.js"></script>
+<script src="assets/portal.js"></script>
+</body>
+</html>

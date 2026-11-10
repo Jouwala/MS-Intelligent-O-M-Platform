@@ -1,0 +1,1451 @@
+# 04 任务与调度系统
+
+my_app 的"心脏"。84 个定时任务负责全部数据采集与报表投递，页面上看到的数据新鲜度、失败告警、补跑行为都在这里定义。
+
+> 另有两个**模块级说明文件**更贴近代码：`backend/WORKER.md`（worker 进程架构、容错、启停、环境变量）与 `backend/task_registry.md`（注册表字段与对外接口）。本章是归口叙述，改动这两处代码时请同步更新三份文档。
+
+## 一条任务的一生
+
+```
+APScheduler 到点 (backend 进程内)
+   └─► enqueue_task()  写 task_queue 一行（task_runner.py:153）
+         └─► worker 进程 UPDATE ... RETURNING 原子认领（worker.py:196-217）
+               └─► run_task() 执行真正的 service 函数（task_runner.py:379）
+                     └─► _finish() 回写终态 + task_execution_log（worker.py:219）
+```
+
+关键点：
+
+- **注册是代码注册表，不是配置文件**。84 条声明集中在 `backend/task_registry.py:179` 起的 `TASK_SPECS`，启动时 `register_all_tasks()`（:1232）逐条登记，采用懒加载包装——每条二选一给 `func`（需要特殊包装）或 `loader`（`("module.path","func_name")` 元组）。
+- **cron 可以被库里覆盖**：默认值写在 `default_cron`，实际排程读 `task_schedule_config` 表（`task_runner.py:232-440`），所以在"任务管理"页改排程会立即生效且重启不丢。
+  - ⚠️ **库里有值时它永远优先**（`task_runner.py:521` `current_cron = saved_cron if saved_cron else default_cron`）。因此**只改 `task_registry.py` 的 `default_cron` 对已存在的任务完全无效，且不留痕迹** —— 2026-10-04 改 `sp_online_sync`、2026-10-11 改三个 WhatsApp 发送任务时都踩过（以为改了、实际仍按库里的旧值跑）。要改生效值：用任务管理页、或 `POST /api/tasks/{id}/schedule`、或删掉该任务的 `task_schedule_config` 行让它回落到代码默认。
+  - 下表列的是 **`default_cron`（代码默认值）**，**不是**当前生效值。二者可能不同（2026-10-11 巡检：22 个任务存在 code≠库 的覆盖）。核对三方一致性用 `TMP/_check_task_cron_drift.py`。
+- 另有一套**任务配置文件框架** `services/task_configs_registry.py:1-30`，优先级 `环境变量 > 配置文件 > 默认值`，用于任务的业务参数（不是排程）。
+- **状态回传是纯 HTTP 轮询，没有 WebSocket**：`/api/tasks`、`/api/tasks/{id}/status|history|stats`。
+- **降级模式**：未设 `MY_APP_TASK_QUEUE=1` 时，任务退回调度器进程内线程执行（`task_runner.py:527-553`），不经过队列、也不由 worker 认领。生产启停脚本会注入该开关（`backend_watchdog.py:137`）。
+
+## worker 分组：组内串行、组间并行
+
+分组动机写在 `worker_watchdog.py:41-44`：按"上游会话是否互斥/是否写同一库"分组，**同组串行等价于旧的单 worker 行为，组间并行**。
+
+| 组 | 任务数 | 约束原因 | 成员 task_id |
+| --- | --- | --- | --- |
+| `u` | 13 | RAN UME 单账号会话，必须串行（并发会被踢会话）。`bp_report_sync` 也读 RAN UME，且必须排在 `main_kpi_sync` 之后（否则读到昨天的 KPI）；2026-11-07 新增 `ran_element_management_sync`（23:00 拉 RNM 网元管理表格落 PG），同走 `zte_ume` 凭据与 `auth_cache` 会话，故必须归本组串行，与 02:00 的 `ran_ume_daily` 错峰 | `ran_ume_daily`, `main_kpi_sync`, `cell_availability_sync`, `network_kpi_sync`, `packet_loss_sync`, `packet_loss_email`, `battery_kpi_sync`, `ipran_kpi_sync`, `cm_data_sync`, `cells_kpi_sync`, `avail_recon_sync`, `bp_report_sync`, `ran_element_management_sync` |
+| `n` | 18 | eFlow API / config-center 同源会话（2026-09-27 由 17 项收窄，VMAX→`v`、SFTP→`s`、MW UME→`w`；2026-10-15 实时告警→`x`；2026-10-17 新增 `cnn_kpi_sync_5mins`，与 `cnn_kpi_sync` 共用 CNN UME 会话；2026-10-23 新增 3 个 `whatsapp_kb_sync_*`，跟在对应规则采集之后触发知识库同步；2026-10-29 新增 `eflow_push_rules_check`，与规则采集同会话故同组） | `eflow_sync`, `eflow_sync_full`, `eflow_history_alarm`, `eflow_tt_rules_check`, `ms_sla_full`, `cnn_kpi_sync`, `cnn_kpi_sync_5mins`, `fw_kpi_sync`, `sp_online_sync`, `sp_material_sync`, `eflow_alarm_rules_collect`, `eflow_push_rules_collect`, `eflow_push_rules_check`, `whatsapp_kb_sync_alarm_rules`, `whatsapp_kb_sync_push_rules`, `whatsapp_kb_sync_tt_rules`, `ume_in_kpi_sync`, `ume_in_osg_report` |
+| `s` | 1 | SP 备件 SFTP（独立 SFTP 服务器 + UNC 镜像库）。2026-09-27 从 `n` 拆出：它是 `n` 组最大单体负载（实测 347min/天）且是已知挂死源（SFTP channel 读挂死 5.5h 曾拖停整组） | `sp_data_sync` |
+| `w` | 2 | MW UME 微波网管（凭证分组 `mw_ume`），独立会话。2026-09-27 从 `n` 拆出：`mw_ume_kpi_sync_rt` 为 `*/15` 高频任务，此前每次排在 `sp_data_sync` 后，实测队列等待 964s（全场最久） | `mw_ume_kpi_sync`, `mw_ume_kpi_sync_rt` |
+| `v` | 4 | VMAX 门户（本机 8790 单会话代理）：四个任务共用同一个 VMAX 会话，必须彼此串行；2026-09-18 从 `n` 组拆出（原先排在 `sp_data_sync` 这类 1.5~2h 长任务后面，小时级采集滞后一个多小时）；2026-10-31 新增 `soc_trend_sync`（直连 VMAX 数仓 GBase，与门户会话无交集但同属 VMAX 数据域，故同组串行） | `cxo_dashboard_cache_sync`, `vmax_cxo_daily_sync`, `vmax_multi_data_sync`, `soc_trend_sync` |
+| `m` | 41 | 内务轻任务：EWS 邮件会话 + 截图/WhatsApp 文件依赖 + VMAX 数仓 GBase 直连取数 | `site_outage_screenshot`, `whatsapp_send`, `whatsapp_send_ext`, `liberia_email_1h`, `liberia_email_8h`, `kpi_ms_contract`, `kpi_ms_wo_sla`, `kpi_sp_spareparts`, `kpi_sp_consumables`, `kpi_ran_availability`, `email_recovery`, `ipran_m6k_chart_email`, `ccn_free_rating_chart_email`, `battery_email`, `mailbox_cleanup`, `incident_overview_sync`, `auto_retry_failed`, `db_freshness_check`, `sp_report_generate`, `sp_email_details`, `sp_online_report_generate`, `sp_online_report_send`, `sp_weekly_report`, `mttr_tt_sync`, `progress_sync`, `sp_whatsapp_report`, `sp_material_report`, `finebi_report_sync`, `log_cleanup`, `tmp_cleanup`, `olib_soc_kpi_daily_sync`, `olib_soc_vmax_report`, `tt_alarm_whatsapp_alert`, `ume_alarm_whatsapp_alert`, `sp_details_files_email`, `tt_mttr_report_generate`, `whatsapp_send_baileys`, `eflow_fiber_assign`, `eflow_5g_assign`, `ipt_power_collect`, `eflow_site_update` |
+| `c` | 2 | CN EMS 独立会话，两个任务共享 `_pmcache`/`daily_raw.json`，同组保证互斥 | `ems_kpi_cache_sync`, `ems_kpi_daily` |
+| `x` | 1 | 实时告警专属组（2026-10-15 从 `n` 拆出）。要求告警滞后 ≤1 分钟，而 `n` 组是一条串行道，cron 改 `*/1` 也会被 `eflow_sync`（实测平均 192.5s）/`ms_sla_full`（最久 600.1s）挡住 —— 实测 856 次采样中 5.3% 等待 >60s、最差 853.9s | `eflow_active_alarm` |
+| `g` | 1 | RAN Greenplum 取数（2026-10-19 新增）：经 control1 两跳 SSH 到 193.168.0.6，与 eFlow/UME/VMAX GBase/SFTP 无任何会话与写库交集。独立成组的理由是**故障域**：SSH 通道挂死的风险与当年 s 组 sp_data_sync 同型（worker.py:83-93 记载其 channel 读挂死 5.5h 拖停整组）；实测单轮 72.6s（10.4 亿行明细靠 12h 分区裁剪 + 列存），虽短于 m 组每分钟的告警推送周期，但不愿让它去挤那条道 | `gp_ran_user_sync` |
+| `p` | 1 | PG 全量快照专属组（2026-10-28 从 `m` 拆出）：每小时 `:45` 把 PG 全库灌进 `db/app.db`（113 表 / 489 万行 / 输出 1511 MB，实测单轮 577~1174s）。只读 PG + 只写本地快照，不占任何上游会话，因此可独占一条道 | `pg_to_sqlite_sync` |
+
+> **2026-09-27 拆组（`n` → `n`/`s`/`w`）的实测依据**：`n` 组近 24h 单 worker 串行占用
+> `sp_data_sync` 347min + `eflow_sync` 236min + `eflow_active_alarm` 103min ≈ 686min，
+> 即约 48% 时间在忙且全挤在一条串行道上；队列实测最长等待 `mw_ume_kpi_sync_rt` 964s。
+> 拆组后三组并行消费，且 `sp_data_sync` 再次挂死时**只影响 `s` 组**（不再拖停实时告警与 MW 实时看板）。
+>
+> **2026-10-15 拆组（`n` → `n`/`x`）的实测依据**：用户要求实时告警滞后 ≤1 分钟。
+> 仅把 `eflow_active_alarm` 的 cron 从 `*/5` 改成 `*/1` **不够** —— 它排在 `n` 组的串行道上，
+> 整点前后要等 `eflow_sync`（`22 * * * *`，实测平均 192.5s/最久 214.3s）与 `ms_sla_full`（最久 600.1s）。
+> `task_queue` 计时（近 3 天 856 次）显示等待 >60s 的占 5.3%，最差 853.9s。独立成 `x` 组后
+> 不再与任何长任务争道。代价是多一个常驻 worker（本机 28 逻辑核、worker 基本闲置；本任务单次仅 ~0.3s）。
+>
+> **2026-10-28 拆组（`m` → `m`/`p`）的实测依据**：`pg_to_sqlite_sync` 每小时 `:45` 全量快照
+> 113 张表 / 489 万行 / 输出 1511 MB，单轮 577~1174s（9.6~19.6 分钟）。它挂在 `m` 组时，
+> 该组的 `ume_alarm_whatsapp_alert`（`* * * * *`）与 `tt_alarm_whatsapp_alert`（`2-59/5`）
+> 整段被堵在串行道上，每分钟触发被队列单飞保护拒绝（`task_runner.py:174-197`
+> 「任务已在队列中等待或执行」），`task_execution_log` 没有新记录 —— sync 页
+> 「任务分布时间线」因此出现 5~10 分钟空白。用 `app.task_execution_log` 自算 `LAG`，
+> 近 7 天 >2 分钟的空窗共 20 次，其中 **14 次起点是 00:50 或 12:50**（= 同步 `:45`
+> 启动后 5 分钟），每天两轮、天天复现。
+>
+> **同一根因还有第二半（不在分组侧）**：`sync_pg_to_sqlite.py` 原先只
+> `set_session(readonly=True)`、全脚本没有一处 `commit`/`rollback`，于是 113 张表的
+> `SELECT` 落在同一个读事务里，`ACCESS SHARE` 锁跨越整轮同步。而 `app.realtime_alarm`
+> 的写入走「影子表 + `DROP` + `RENAME`」（`eflow_alarm_service.py::_replace_table_via_engine`
+> → `_swap_in_staging_table`，PG 分支是单条 `DO` 块 DDL），需要 `ACCESS EXCLUSIVE` ——
+> 实测 `x` 组的 `eflow_active_alarm` 每轮都被卡住 341~720s，且其 `completed_at`
+> 比同步的 `finished_at` 早 **0.6~1.7 秒**（6 轮全部吻合）。现已改为**每张表结束读事务**
+> （`_end_pg_read_txn`，放在循环的 `finally` 里覆盖跳过/失败路径）。两处必须一起改：
+> 只拆组不切事务，`x` 组的实时告警仍会被拖住。
+>
+> **2026-10-30 二次优化（单表锁窗口再压 93%）**：上面「每张表结束读事务」只解决了
+> **跨表**累积的问题，**单表内部**的锁窗口仍等于「读 PG + 写 SQLite」——`battery_reading`
+> 105 万行最坏实测 399.5s。现改为在 `sync_table` 里 `SELECT` 的 `execute()` 返回后
+> **立刻**调用 `_end_pg_read_txn()`，不等数据写完 SQLite。依据：psycopg2 普通（非命名）
+> 游标在 `execute()` 时已由 libpq 把整个结果集**同步**拉回客户端，因此 commit 之后游标
+> 仍可继续 `fetchmany`（已实测验证，见 `TMP/t_sync_lockwindow.py`）。于是 `ACCESS SHARE`
+> 只覆盖「纯 SELECT 执行」，写 SQLite 的那段时间不再持锁。
+> 对照实测 `TMP/t_sync_lock_ab.py`（`battery.battery_reading`，113.5 万行）：
+> 旧逻辑 8.8s / 锁窗口 **9.1s** → 新逻辑 6.2s / 锁窗口 **0.6s**，行数完全一致。
+> **刻意不用 `fetchall`**：三张百万行表（140 万 / 110 万 / 105 万）整体转成 Python 对象
+> 峰值内存约 900MB，会顶爆 worker —— 仍保持 `fetchmany(BATCH_SIZE)` 分批消费客户端缓冲，
+> 并在 `finally` 里显式 `cur.close()` 及时释放该缓冲。
+>
+> ⚠️ **这个改造必须重启 `p` 组 worker 才生效**（Python 不热重载模块）。2026-10-30 排查时
+> 发现：10-28 的 4 处 `ctid NOT IN (SELECT MIN(ctid)...)` 反模式早已改成
+> `dialect_helpers.dedupe_rows`，但**旧进程还在跑旧模块**，`ipran_ume.Metro_ring_me_15mins`
+> 上一条 22 小时的 `DELETE` 把 `DROP INDEX` 和后续 8 个读全堵在锁队列里，
+> 连带 `pg_to_sqlite_sync` 卡 1h49m、`eflow_sync` 跑满 7265s。
+
+`m` 组末尾几条有注释记录：`finebi_report_sync`/`pg_to_sqlite_sync`（2026-08-25）、`whatsapp_send_ext`（08-31）、`sp_email_details`（09-01）、`cells_kpi_sync`/`sp_material_sync`（09-09~11）在启用分组模式后都因**未归入任何组而无人认领，队列 pending 卡死断档**才补进来（`worker_watchdog.py` 内的补录注释）。其中 `pg_to_sqlite_sync` 已于 2026-10-28 拆到独立的 `p` 组（见上文拆组依据），`m` 组现为 38 项。
+
+> **新增任务必须同时登记进 `GROUP_TASK_MAP`；新增/调整「组」必须同步五处**（2026-10-15 补全：原文档只写了 2 处，拆 `x` 组时守卫当场抓出 `start.bat` 与帮助文档两处遗漏）：`worker_watchdog.py::GROUP_TASK_MAP` 的键、`start_hidden.ps1` 的 `$env:MY_APP_WORKER_GROUPS` **与** `$groups` 等待清单（两处）、`restart_workers.py::ALL_GROUPS` 兜底值、`start.bat` 的 worker pid 计数与 `%WCOUNT% / N` 分母、`frontend/src/pages/helpTaskDocs.ts` 的 `group` 字段与 `WORKER_GROUP_INFO`。只加分组表不改启动脚本 = 该组 worker 从不被拉起，症状与漏登记完全一样；漏改 `start.bat` 则「该组 worker 死了仍报全绿」。`restart_workers.py::ALL_GROUPS` 已改为从 `GROUP_TASK_MAP` 取键，其字面值只是 import 失败时的兜底。
+>
+> 只写进 `TASK_SPECS` 而不分组 = 任务入队后永远 pending，且不报任何错。这是本项目已发生**四次**的事故模式，2026-09-18 第四次（`olib_soc_kpi_daily_sync`、`olib_soc_vmax_report`、`vmax_multi_data_sync` 上线后一次也没跑过，90 天经营看板停在 09-16）之后上了三道防线：
+> ① `tests/test_worker_group_coverage.py`（不依赖 pytest，`python tests\test_worker_group_coverage.py` 即可跑，2026-09-18 实跑 PASS=5）—— 5 个用例：任务覆盖（缺项 + 幽灵 id）、同组不重复、三处组集合一致、共用 8790 会话的任务必须同组、前端任务帮助（`frontend/src/pages/helpTaskDocs.ts` 的 `TASK_DOCS`）与分组表一一对应且组名相同；任一项失配在跑测试时就失败。**跑它必须用 PATH 上的 `python`（系统 3.12）**，工作区的 `Scripts\python.exe` 与 `.venv\Scripts\python.exe` 都没装 apscheduler，用错解释器会报 `ModuleNotFoundError: apscheduler` 而“假失败”（看着像分组配错了）；
+> ② `worker.py::_expire_orphan_pending`（每 300s）—— pending 超过 `STALE_PENDING_SECONDS`（默认 6h）仍无人认领就置 failed 并补执行日志，释放被它占住的单飞名额，让下一次调度能正常入队（以前一条陈旧 pending 会把该任务**之后每一次**调度静默挡在门外）；
+> ③ `worker_watchdog.py::main()` 启动自检 —— 分组表与 `MY_APP_WORKER_GROUPS` 两侧任一漏改，看门狗启动时打 warning（只告警不退出）。
+
+## 文档一致性守卫（文档与代码对不上时，跑测试就失败）
+
+> **2026-10-31 新增。** 手册里的任务数、页面数、分组数、worker 组数、路由数、文件体积、
+> iframe 页数、队列保留期、凭据分组数这类**从代码抄来的数字**，一直在悄悄过期，且**不影响任何功能** ——
+> 没有运行时症状能暴露它们，只有人工逐个比对才发现。实测一次审计抓到 14 处：
+>
+> | 位置 | 文档写的 | 实际 |
+> | --- | --- | --- |
+> | `01-overview.md` | 41 个定时任务 / 23 个功能页 | 80 个任务 / 79 个页面 |
+> | `04-task-system.md` | 分组表 n=17 / v=3 | 18 / 4（漏登记 `soc_trend_sync`） |
+> | `04-task-system.md` | 全量任务清单表 | 漏了 `soc_trend_sync` 整行 |
+> | `13-operations.md` | worker × 5 组 | 10 组（u/n/s/w/v/m/c/x/g/p） |
+> | `13-operations.md` | 队列保留 3 天 | 默认 7 天（`TASK_LOG_RETENTION_DAYS`） |
+> | `90-appendix.md` | 25 处 `include_router` | 75 处 |
+> | `11-feature-guide.md` | 13 个 iframe 页 | 12 个 |
+> | `11-feature-guide.md` | 页面表编号重复（33 出现两次） | 编号连续到 79 |
+> | `helpContent.ts` | 队列保留 3 天 | 7 天（**与已改好的手册对不上**） |
+> | `helpContent.ts` | 页面清单 | 4 个已在侧边栏的页面（`ms_wo_sla` / `ms_contract_kpi` / `ran_cells_kpi` / `person`）**完全没有帮助条目** |
+> | `App.tsx` | 菜单 | `socTrendDashboard` 已进路由/i18n/刷新配置，却**没进 `DEFAULT_GROUPS`** —— 侧边栏没有它的位置 |
+> | `AGENTS.md` | `task_registry.py` 68KB | ≈109KB |
+> | `component-api.md` | `helpContent.ts` 171KB / 54 个页面 | ≈175KB / 62 个页面 |
+> | `05-security-and-credentials.md` | 18 个凭据分组 | 21 个（漏 `ume_alarm` / `gp_ran_control` / `gp_ran_master`） |
+>
+> 靠"提醒 agent 记得改文档"治不住（这正是本节存在的原因），必须让**跑测试就失败**。
+>
+> **守卫脚本**：`tests/test_doc_consistency.py`（不依赖 pytest，纯 assert + 计数器）。
+> ```
+> cd D:/01_RPA/Task/my_app
+> python tests/test_doc_consistency.py
+> ```
+> **零第三方依赖、跨平台**（任何有 Python 3.10+ 的机器都能跑，Linux / macOS 亦可）。
+> 真相源取法见 `tests/doc_truth.py`：用 **AST 静态解析源码**取 `TASK_SPECS` /
+> `GROUP_TASK_MAP` / 保留天数 / 路由数，**不 import 业务模块** ——
+> 早前版本直接 `from backend.task_registry import TASK_SPECS`，在 Linux 上会因
+> `ctypes.wintypes` 直接失败，且要求整套后端运行环境（apscheduler / sqlalchemy），
+> 那样就进不了 CI 了。
+>
+> **17 个用例**：
+> 1. 文档里的「N 个定时任务」= `TASK_SPECS` 条数（5 个文件逐个核对）；
+> 2. `04-task-system.md` 的全量任务清单表 = `TASK_SPECS` 的每个 `task_id`；
+> 3. 分组表里的每组任务数 = `GROUP_TASK_MAP` 的实际条数；
+> 4. 手册里的 worker 组数 = `GROUP_TASK_MAP` 的组数；
+> 5. 手册里的队列保留天数 = `TASK_LOG_RETENTION_DAYS` 默认值；
+> 6. `90-appendix.md` 的 `include_router` 处数 = `main.py` 实际处数；
+> 7. `11-feature-guide.md` 说的 iframe 页数 = `PAGE_LIST` 里 `iframe:true` 的数量；
+> 8. `11-feature-guide.md` 顶部页面表 = `App.tsx` 的菜单结构（key 集合、iframe 形态列双向核对）；
+> 9. `PAGE_LIST` 的每个页面都有中英双份 `PAGE_DOCS`；
+> 10. `PAGE_LIST` 与 `PAGE_META` 一致（只允许 `help` 自身与 iframe/门户页两类刻意差异）；
+> 11. 文档里的「N 个功能页 / N 个页面指南」= `PAGE_META` + `FINEBI_BOARDS` / `PAGE_LIST`；
+> 12. 站内帮助（`helpContent.ts`）里的「保留 N 天」= 代码默认值；
+> 13. `05-security-and-credentials.md` 的凭据分组数与分组 key 清单 = `credential_store.py` 实际条数；
+> 14. `component-api.md` 里的前端页面数 / 通用组件数 = 磁盘实际 `.tsx` 文件数；
+> 15. `AGENTS.md` 里标的关键文件体积与磁盘实际值相符（容差 ±25%）；
+> 16. **每个页面都有按页刷新设置**（2026-11-04 新增的项目硬要求）：`PAGE_META` 里每个自研页面都必须在 `App.tsx` 的 `AR_PAGE_DEFAULTS` 登记建议间隔、间隔必须是 `AR_OPTIONS` 档位，且不得再出现按页禁用刷新控件的白名单（细则见 `AGENTS.md` 三.3d 与 `16-new-page-guide.md` 3.4d）。
+> 17. **看板下推的每张表都要有本机 PG 巡检，且回看天数与看板默认窗口同档**（2026-11-05 新增）：`dashboard_service.PUSH_DOWN_TABLES` ⊆ `pg_schema_freshness.PG_SCHEMA_CHECKS[].tables`、`lookback_days` == `PUSH_DOWN_DAYS`，并且 `dashboard_service` 仍在输出 `meta.coverage`、`NativeBoard` 仍常驻渲染缺档告警。背景：IP RAN 看板 11-04 改读本机 PG，而镜像只追头部水位，「近 31 天只有 10 天有数」这种洞当时**任何巡检都查不到**（远端一直绿、判据只问最新时间），见 `backend/services/pg_schema_freshness.md`。
+>
+> **三道防线，同一份代码，不规则分叉**：
+>
+> | 层 | 位置 | 作用 |
+> | --- | --- | --- |
+> | 本地钩子 | `.githooks\pre-commit`（**仓库内**，随仓库分发） | 提交前就拦 |
+> | CI | `.github\workflows\docs-consistency.yml` | push / PR 都跑，`--no-verify` 绕不过 |
+> | 手工 | `npm run check:docs`（在 `frontend\` 下）或直接跑上面的 python | 随时自查 |
+>
+> **钩子怎么装**：新克隆一台机器后跑一次 `npm run setup:hooks`（在 `frontend\` 下）
+> 或 `node scripts\setup-git-hooks.mjs`（工作区根）。它把 `core.hooksPath` 指向仓库内的
+> `.githooks\` —— 钩子文件随仓库分发，不再只存在于某台机器的 `.git\hooks\` 里
+> （`core.hooksPath` 是本地配置，所以每台机器装一次）。
+>
+> ⚠️ **`core.hooksPath` 是相对路径，Git 按「当前工作树根目录」解析** ——
+> 并行开发用的 worktree（`.agent-worktrees\<任务>`）若所在分支还没合入含 `.githooks\`
+> 的提交，**钩子会静默不执行**（不报错，只是不拦）。在那个 worktree 里跑
+> `npm run setup:hooks -- --check` 可查；修复是把 `.githooks\` 合进该分支。
+>
+> **守卫取不到真相源时必须显式失败**，不能当成「不适用」跳过 —— 门户侧 2026-10-31
+> 踩过这个坑（正则失配 → 两个检查静默跳过 → 守卫显示 PASS 却什么都没查）。
+> `tests/doc_truth.py` 里解析不到内容会直接抛 `TruthSourceError`。
+>
+> **改动页面/任务时的配套动作**（漏了会被上面第 2、8、9、10 条抓住）：
+> | 改了什么 | 必须同步 |
+> | --- | --- |
+> | 新增/删除一个功能页 | `App.tsx` 的 `PAGE_META` + `DEFAULT_GROUPS` → `helpContent.ts` 的 `PAGE_LIST` / `NAV_KEY_MAP` / `CATEGORIES` / `PAGE_DOCS`（zh + en）→ `11-feature-guide.md` 页面表与章节 → 跑 `npm run docs` 重生成 `15-user-help*.md` 与 `manual.html` |
+> | 新增一个定时任务 | `task_registry.py::TASK_SPECS` → `worker_watchdog.py::GROUP_TASK_MAP` → `04-task-system.md` 清单表 → `helpTaskDocs.ts` → 跑 `npm run docs` |
+> | 改了任何"从代码抄来的数字" | 对应手册 + 站内帮助两处都要改（两边口径不同，最容易只改一处） |
+
+## 任务健康告警（漏跑不再靠人肉发现）
+
+`db_freshness_check`（每小时 `15 * * * *`）除了查数据滞后，还算六类**任务执行健康异常**（5 个检测维度 + 1 个 `overdue` 的子分类）：
+
+| kind | 判据 | 备注 |
+| --- | --- | --- |
+| `group_missing` | `TASK_SPECS` 有、`GROUP_TASK_MAP` 无 | 未登记 = 永不认领 |
+| `silent` | 注册任务在回看窗口（`TASK_HEALTH_LOOKBACK_HOURS`，默认 24h）内**完全没有执行记录** | 按 cron 收紧：调度间隔大于窗口的低频任务（如 `59 23 */3 * *`）未到下一期不报；cron 解析不出来则宁可多报 |
+| `stuck` | `task_queue` 滞留 pending>`10min` / running>`30min` | running 超时由 worker 周期回收补写失败 |
+| `overdue` | 上次成功后按 cron 过一个完整周期（+grace）仍无新的成功 | 与 `silent` 互补：小时级任务中断 3 小时，`silent` 因当天有记录而不报 |
+| `overdue_dependency` | `overdue` 的**子集**：最新一次失败是「外部依赖不可用」（EWS / DbWriter 落库 API / 网络超时）而非任务自身停摆 | 2026-09-18 新增。`overdue` 仍保留该任务（用于算 `status` 与 STALE 清单），本类只把告警**聚合成一条**并改文案，见下。2026-11-06 起还会按**实际故障源**（DbWriter/EWS/网络）给不同处置指引 |
+| `empty_output` | 最近 `EMPTY_OUTPUT_CONSECUTIVE`（默认 2）次**成功**执行，`result_json` 自报产出都是 0 条（按 `EMPTY_OUTPUT_CHECKS` 登记的任务与字段） | 2026-11-06 新增。补「跑了、绿了、什么都没产出」这一类：前面四类全都覆盖不到（有记录、有分组、无滞留、每小时都成功）。起因是 `vmax_multi_data_sync` 连续 34 天 `rows=0` 却每轮 `success=1`。判据必须能区分「明确是 0」与「没有自报条数」，否则任务改字段名会变成永久误报 |
+
+2026-09-18 之前这些结果**只进日志没人看**（本次停摆两天是用户先发现的），故新增 `backend/services/task_health_alert.py` 把 findings 推到人前：
+
+- **翻转去重**：以 `kind:task_id` 为键，状态文件 `TMP/task_health_alert_state.json`（原子写 tmp + `os.replace`）。新增异常通知一次、恢复通知一次，不再每小时刷屏；
+- **持续重提**：同一异常持续超过 `TASK_HEALTH_ALERT_RENOTIFY_HOURS`（默认 24h）再提一次；
+- **发送失败不记为已通知**：`notified_at` 留空，下一轮巡检自动重试；
+- **通道**：微信 `weixin_notifier.send_weixin_message` + 邮件 `email_notifier.send_status_email`（复用 task_runner 的同两套凭据）；
+- **降噪**：`overdue` 只收「近 24h 连尝试都没有」的真停摆；「跑了但一直失败」由 `task_runner` 的失败告警通道负责，不重复刷两条；
+- **再降噪（2026-09-18 晚，`overdue_dependency`）**：`overdue` 中「最新失败是外部依赖不可用」的任务（EWS 401 / 连接失败 / 子进程超时）另归一类，**聚合成一条**告警并给出依赖侧（凭据/网络）修复指引。理由：一次 EWS 故障会连带十几个报表任务各自"逾期"，逐条推送等于刷屏，而真正要看的只有"EWS 挂了"这一条；
+  2026-11-06 补：这条路原先 guidance 是**写死的一份 EWS 文案**，而现场近 5 天的依赖类失败**全是** `[DbWriter] 请求失败: http://192.168.100.19:8765/...`（`main_kpi_sync` / `cnn_kpi_sync` / `cnn_kpi_sync_5mins` / `ipran_kpi_sync`），照那份文案会让人去核对 Exchange 账号密码 —— 方向完全错了。现在 `_dependency_source()` 把失败细分为 `db_writer` / `ews` / `network`，guidance 按实际出现的故障源拼装；同时把 `[DbWriter]` 一并纳入依赖类特征（原先连 `[DbWriter] ... timed out` 都没被判为依赖类，被当成「任务真停摆」逐条告警）；
+- **静音**：`TASK_HEALTH_ALERT_ENABLED=0`（维护窗口用）；
+- 告警本身**不影响巡检结论**（异常置 `success=False` 会让巡检被 auto_retry 反复重跑），通知失败只记 warning。
+
+> 同期修掉两个既有缺陷：`_cron_next_and_interval` 因 aware/naive datetime 相减抛 `TypeError` 被裸 `except` 吞掉，「成功逾期」维度自 2026-08-13 上线以来**从未生效**；以及「24h 无执行记录」对每 3 天跑一次的低频任务每小时误报一次。守卫见 `tests/test_task_health_detect.py`（检测判据）与 `tests/test_task_health_alert.py`（告警翻转去重，6 场景）。
+
+### 测试任务不得进入运维告警（2026-10-06）
+
+**现象**：运维收到一封失败告警邮件，内容为「统计失败 / `agg failure sample`」，堆栈落在 `tests/test_task_runner.py`。
+
+**根因**：`tests/test_task_runner.py::test_get_task_stats_and_failures` 会**故意注册并运行一个必失败的任务** `__t_stat_bad__`（`raise RuntimeError("agg failure sample")`），以验证失败统计与失败聚类。测试 fixture 只 `monkeypatch` 了微信通知 `notify_task_failure`，**漏了邮件通知 `notify_task_failure_email`** —— 于是 `run_task` 的失败分支每次都会真发一封告警邮件给 126 邮箱。测试任务用 `__t_` 前缀命名，但统计/告警查询并未排除它们。
+
+**修复（两层防御）**：
+
+1. **测试侧堵源**：fixture 补 `monkeypatch.setattr(tr, "notify_task_failure_email", ...)`，与微信通知一起屏蔽；`test_get_task_stats_and_failures` 的失败聚合断言改用**非测试 ID**，并新增「`__t_` 任务不得出现在聚合里」的契约断言。
+2. **运维视图隔离**：`backend/services/task_stats.py` 新增 `TEST_TASK_PREFIX = "__t_"`，在面向运维/前端的查询里排除测试任务 —— `get_recent_failures`（失败聚类 + active/recovered/needs_attention 分层）、`get_task_history`（最近历史）、`get_global_history`（含内存兜底）、`_fetch_latest_runs`（任务卡片最新记录）。`get_task_stats` / `get_task_history_by_task` 是**按 ID 精确查**，不过滤，以免破坏测试自身断言。
+3. **`run_task` 新增 `is_test` 开关**（`register_task(..., is_test=...)`，默认 `False`）：测试任务仍正常落库（便于测试断言 `task_execution_log`），但**跳过微信/邮件/降级通知**。默认不影响线上行为。
+
+> 约定：单元测试注册的任务一律以 `__t_` 开头。
+
+## 全量任务清单（默认 cron）
+
+下表与 `GROUP_TASK_MAP` 逐一对应（task_id 覆盖由 `tests/test_doc_consistency.py::test_task_list_table_covers_every_registered_task` 校验，组名由 `tests/test_worker_group_coverage.py` 针对前端帮助校验；新增任务后请补行，漏行现在会被守卫拦下）。
+
+| task_id | 名称 | 默认 cron | 组 |
+| --- | --- | --- | --- |
+| `eflow_sync` | eFlow 数据同步 | `22 * * * *` | n |
+| `eflow_sync_full` | eFlow 每日全量同步（大窗口下 TT/WO **分段拉取**，默认 30 天/段，避免单次大导出超过 120s 轮询窗口而 500 失败；TT/WO 缺失即判失败，不再静默成功） | `0 1 * * *` | n |
+| `ran_ume_daily` | RAN UME 日报 | `0 2 * * *` | u |
+| `site_outage_screenshot` | Site Outage 截图 | `0 1 * * *` | m |
+| `whatsapp_send` | WhatsApp 消息发送 | `0 3 * * *` | m |
+| `ms_sla_full` | MS SLA 完整同步 | `0 5 * * *` | n |
+| `eflow_active_alarm` | eFlow 实时告警同步 | `*/1 * * * *` | x |
+| `eflow_history_alarm` | eFlow 历史告警同步 | `0 */3 * * *` | n |
+| `eflow_tt_rules_check` | eFlow TT 规则收集与匹配检查 | `20 4 * * *` | n |
+| `eflow_push_rules_check` | eFlow 推单规则批量检查（规则判定 vs 实际派单 + 周快照） | `10 5 * * 2` | n |
+| `main_kpi_sync` | RAN Main KPI 同步 | `0 4 * * *` | u |
+| `cell_availability_sync` | RAN 小区可用性 1-Day 同步 | `30 4 * * *` | u |
+| `network_kpi_sync` | RAN Network KPI 同步 | `0 5 * * *` | u |
+| `cnn_kpi_sync` | CNN UME KPI 同步 | `0 6 * * *` | n |
+| `cnn_kpi_sync_5mins` | CNN UME KPI 5分钟同步（窗口昨天 00:00→现在，写 `5mins_*` 新表；**混合粒度**：5 个模板 5 分钟 + 3 个模板走上游 15 分钟档模板；0 行跳过不计失败） | `*/15 * * * *` | n |
+| `sp_data_sync` | SP 备件数据同步 | `10 * * * *` | s |
+| `ipran_kpi_sync` | iPRAN UME KPI 同步（**每小时全量拉取 3 天窗口是本意**，2026-11-06 与用户确认；写入侧按远端水位增量裁剪） | `0 * * * *` | u |
+| `liberia_email_1h` | Liberia 宕站 1小时报告邮件 | `15 * * * *` | m |
+| `liberia_email_8h` | Liberia 宕站 8小时报告邮件 | `20 */8 * * *` | m |
+| `kpi_ms_contract` | MS Contract KPIs 日报邮件 | `30 5 * * *` | m |
+| `kpi_ms_wo_sla` | MS WOs SLA 日报邮件 | `35 5 * * *` | m |
+| `kpi_sp_spareparts` | SpareParts 备件报表邮件 | `45 9 * * *` | m |
+| `kpi_sp_consumables` | Comsumables 耗材报表邮件 | `50 9 * * *` | m |
+| `sp_report_generate` | SP 备件报表生成 | `15 5 * * *` | m |
+| `kpi_ran_availability` | MS Network Availability 日报邮件 | `30 9 * * *` | m |
+| `email_recovery` | EWS 恢复后邮件补发 | `*/10 * * * *` | m |
+| `packet_loss_sync` | Packet Loss 丢包同步 | `30 6 * * *` | u |
+| `packet_loss_email` | Packet Loss 丢包日报邮件 | `45 6 * * *` | u |
+| `ipran_m6k_chart_email` | IP RAN M6K-FW 图表邮件 | `45 6 * * *` | m |
+| `ccn_free_rating_chart_email` | CNN Free Rating 图表邮件 | `45 7 * * *` | m |
+| `fw_kpi_sync` | FW 吞吐 KPI 同步+图表邮件 | `15 7 * * *` | n |
+| `battery_kpi_sync` | 电池 KPI 同步 | `5 * * * *` | u |
+| `battery_email` | 电池 KPI 邮件 | `10 7,19 * * *` | m |
+| `mailbox_cleanup` | 邮箱空间清理 | `0 * * * *` | m |
+| `incident_overview_sync` | Incident Overview 数据同步 | `20 * * * *` | m |
+| `finebi_report_sync` | FineBI 报表文件同步 | `10 * * * *` | m |
+| `db_freshness_check` | 数据库数据新鲜度巡检 | `15 * * * *` | m |
+| `auto_retry_failed` | 失败任务自动重试 | `*/10 * * * *` | m |
+| `cm_data_sync` | RAN CM 小区数据同步 | `30 8 * * *` | u |
+| `pg_to_sqlite_sync` | PG→SQLite 数据快照 | `45 * * * *` | p |
+| `mw_ume_kpi_sync` | MW UME KPI 同步 | `15 5 * * *` | w |
+| `mw_ume_kpi_sync_rt` | MW UME KPI 实时同步（15 分钟粒度） | `*/15 * * * *` | w |
+| `ems_kpi_cache_sync` | CN EMS KPI 缓存同步 | `*/15 * * * *` | c |
+| `ems_kpi_daily` | CN EMS KPI 日粒度CSV | `20 0 * * *` | c |
+| `vmax_multi_data_sync` | VMAX 多报表指标采集 | `45 * * * *` | v |
+| `olib_soc_vmax_report` | OLIB SOC VMAX 例行报表 | `30 7 1 * *` | m |
+| `olib_soc_kpi_daily_sync` | OLIB SOC 看板 KPI 增量 | `20 6 * * *` | m |
+| `whatsapp_send_ext` | WhatsApp 消息发送（扩展） | `0 3 * * *` | m |
+| `whatsapp_send_baileys` | WhatsApp 消息发送（Baileys；**默认禁用**，需在「任务管理」页手动启用） | `0 4 * * *` | m |
+| `tt_alarm_whatsapp_alert` | eFlow P1 告警 WhatsApp 推送（**可在「任务配置」页调级别/告警码/触发窗口/重报间隔/群组**） | `2-59/5 * * * *` | m |
+| `ume_alarm_whatsapp_alert` | DC server  alarm WhatsApp push（**可在「任务配置」页调告警码:级别对/群组/催报间隔**） | `* * * * *` | m |
+| `eflow_fiber_assign` | Fiber Break 告警自动派单 + WhatsApp 通报（**默认 dry_run 演练**；可在「任务配置」页调告警码/关联码/时间窗/目标组/群组） | `3-59/5 * * * *` | m |
+| `eflow_5g_assign` | 5G 站点告警自动派单 + WhatsApp 通报（**告警码支持多个**、一站多小区合并；**默认 dry_run 演练**；可在「任务配置」页调告警码/关联码/restype/时间窗/目标组/群组） | `8-59/5 * * * *` | m |
+| `cells_kpi_sync` | RAN Cells KPI 同步 | `50 4 * * *` | u |
+| `sp_email_details` | SP 备件明细报表邮件 | `5 7 * * *` | m |
+| `sp_details_files_email` | SP 备件明细分文件邮件（6 份 xlsx 一文件一邮件发 NOC） | `5 10 * * *` | m |
+| `sp_material_report` | SP 物料库存与消耗报表邮件 | `45 7 * * *` | m |
+| `sp_online_report_generate` | SP 在线未关闭单报表生成（Inbound 读明细 xlsx；**Outbound 读库表 `sp_outbound`**，跟踪等待更新/等待归还/等待确认） | `0 6 * * *` | m |
+| `sp_online_report_send` | SP 在线未关闭单报表发送 | `35 6 * * *` | m |
+| `sp_whatsapp_report` | Comsumables&SpareParts Report Whatsapp | `55 7 * * *` | m |
+| `sp_weekly_report` | SP 备件周报（**上周一→上周日** 完整自然周，周一 07:00 生成 8 sheet xlsx 到 `data/sp_weekly` 并邮件发送；收件人组 `sp_weekly_report` 可配） | `0 7 * * mon` | m |
+| `sp_online_sync` | SP Online 工单同步（原始 filter 与状态全集 filter **取并集**，避免过滤条件与返回结果自相矛盾时静默取错数据；表语义=上游快照，**全量重建**删除上游已消失的单据，拉取不完整时只 upsert 不删除） | `35 */6 * * *` | n |
+| `ipt_power_collect` | IPT 站点电源采集（IPT Digital Platform / RMS 能源监控，AWS 外网）：filter-map 刷全站（约 500 站）连接状态 + `/sites` 分页回填站点属性 + full_kpi 并发拉全站 popup 轻量 KPI（8 线程；上游健康时 32 线程实测 501 站 60s）→ **全站每 2 分钟一条快照** + full_shard 并发拉 diagram 完整明细分片轮采（约 20 分钟覆盖全站，关注站每轮必采）；池内 20s 超时 + 失败补采 + popup 环形游标防漏站 + 低成功率熔断退避；OIDC 隐式流表单模拟登录（token 缓存 1h） | `*/2 * * * *` | m |
+| `eflow_site_update` | CMDB 站点同步比对（源表 `my_app/db` 下最新 `ZTE OLR MS Master Site Database` → 与 eflow 基线、PG `master_site_db` 基线比对，产出带 A/M/D 标记与着色的差异文件；**服务层显式 `--pg none --cmdb none`，只产文件不写库**，审查后人工导入。Email Reports →「站点同步」页签按钮也触发本任务） | `0 7 * * *` | m |
+| `sp_material_sync` | SP 物料主数据同步（表语义=上游快照，**全量重建**删除上游已消失的物料，拉取不完整时只 upsert 不删除） | `55 4 * * *` | n |
+| `ume_in_kpi_sync` | 客户业务 KPI 同步 | `45 5 * * *` | n |
+| `ume_in_osg_report` | 客户业务 KPI + OSG 周报邮件 | `30 6 * * *` | n |
+| `eflow_alarm_rules_collect` | eFlow 告警规则收集 | `59 23 */3 * *` | n |
+| `eflow_push_rules_collect` | eFlow 推单规则收集 | `59 23 */3 * *` | n |
+| `whatsapp_kb_sync_alarm_rules` | WhatsApp 知识库同步（告警规则） | `4 0 */3 * *` | n |
+| `whatsapp_kb_sync_push_rules` | WhatsApp 知识库同步（推单规则） | `4 0 */3 * *` | n |
+| `whatsapp_kb_sync_tt_rules` | WhatsApp 知识库同步（TT 级别规则） | `35 4 * * *` | n |
+| `log_cleanup` | 日志文件清理 | `17 3 * * *` | m |
+| `cxo_dashboard_cache_sync` | CXO看板数据缓存同步 | `*/10 * * * *` | v |
+| `vmax_cxo_daily_sync` | VMAX CXO天粒度日值归档 | `15 * * * *` | v |
+| `avail_recon_sync` | 可用率核对宽表重建 | `10 6 * * *` | u |
+| `bp_report_sync` | BP Cells Report 更新（RAN_UME 增量 + UME 小时级活跃用户 + 周月重算 + 判定回填） | `20 6 * * *` | u |
+| `tmp_cleanup` | TMP 目录清理 | `47 3 * * *` | m |
+| `mttr_tt_sync` | MTTR/TT 宽表重建 | `40 7 * * *` | m |
+| `progress_sync` | Progress 宽表重建 | `50 7 * * *` | m |
+| `tt_mttr_report_generate` | TTs and MTTR 报表生成（供 EmailReports 页「TTs and MTTR」页签下载） | `20 7 * * *` | m |
+| `gp_ran_user_sync` | RAN 用户身份清单（VoLTE / N78 去重 **IMSI**，经 control1 两跳 SSH 到 Greenplum，取最近 7 个完整 UTC 日；实测 72.6s / 10.4 亿行扫描） | `20 13 * * *` | g |
+| `soc_trend_sync` | SOC 多维趋势同步（**直连 VMAX 数仓 GBase 只读**，拉流量/TCP/分业务类目的小时与天粒度聚合，落 `data/soc_trend/soc_trend.sqlite3`；**只允许 SELECT/SHOW/DESC，禁止在数仓建对象或回写**） | `40 * * * *` | v |
+| `ran_element_management_sync` | RAN 网元管理表同步（RNM `/api/res/v1/ranmes` 全量 934 行 / 15 字段 → PG `app.ran_element_management` 当前全量 + `app.ran_element_management_daily` 每日快照 + `app.ran_element_management_sync_log`；行数 <100 视为上游残片判失败，不覆盖已有数据） | `0 23 * * *` | u |
+
+### WhatsApp 发送通道矩阵（2026-10-08）
+
+目前 `site_outage` 截图与文档的发送有**三种并行实现**，共享同一份图片目录
+（`backend/services/data/site_outage/`）与群组配置（`WHATSAPP_GROUPS`），
+但走完全不同的发送链路：
+
+| 任务 | 通道 | 确认送达 | 依赖 | 默认 | 用途 |
+|---|---|---|---|---|---|
+| `whatsapp_send` | Playwright 自启 Chrome + WhatsApp Web DOM | 数 DOM 气泡（**假成功风险**——2026-09-15 SP Details Report 1.5MB 静默漏发） | 浏览器、Playwright、Node session 持久化 | `0 3 * * *` | 原版主通道 |
+| `whatsapp_send_ext` | 浏览器扩展 + 已登录的 WhatsApp Web 标签页 | 数 DOM 气泡 + 双信号 | 浏览器开着 + WhatsApp Web 已登录 | `0 3 * * *`；**2026-10-21 起由用户手动关闭**（`manually_stopped=1`），主开关不再覆盖它 | 兜底 + 侧栏手动 |
+| `whatsapp_send_baileys` | Baileys 协议直发（不走 Web） | **服务端 message id**（真实回执） | `whatsapp-kb-bot/src/notify.js` 常驻 + `auth-notify/` 凭据 | `0 4 * * *`，但**默认禁用**（`enabled=False`） | 治本通道（取代扩展、补充 Playwright） |
+
+**为什么保留三条**：每条都有不同故障域——Playwright 任务会随 WhatsApp Web 改版失效；
+扩展依赖浏览器开着 + 人工扫码登录；Baileys 走非官方库违反 ToS 有封号风险。
+三条并存 = 任一通道挂了另两条兜底。半年内**不删**任何一条（避免单点）。
+
+**Baileys 通道的额外要求**（与聊天机器人 / P1 告警推送共用 `whatsapp-kb-bot`）：
+
+- **必须**用副号，不与员工工作号同号（参见 `whatsapp-kb-bot/README.md`「风险与前提」）；
+- 启用前确认 `whatsapp-kb-bot/src/notify.js` 在跑、且 `data/notify_heartbeat.json` 新鲜（< 5 分钟）；
+- 启用时**先在「任务管理」页手动执行一次**验证群内是否真的收到图+文档；
+- 单作业配额由 `whatsapp-kb-bot` 的 `NOTIFY_FILE_SEND`（`.env`）/ `config.js → notify.fileSend` 控制。
+  2026-10-11 起放宽为**图片 8 + 文档 3**（原默认 6 + 1）——SP 报表需一次发 2 份 xlsx，
+  默认 1 份会把第 2 份**静默跳过**。my_app 侧 `whatsapp_dispatch` 的默认配额与之对齐，
+  **两边改一个必须改另一个**；
+- **已被主开关豁免**（`MASTER_SWITCH_EXEMPT_IDS`），批量切换不参与，避免「一键启用」把它打开。
+
+### 2026-10-20：Baileys 通道「断线续发 + 重投只补发缺的部分」
+
+实测事故：16:00 那轮 `whatsapp_send_baileys` 把 ALL.png 发到第一个群后，Baileys
+WebSocket 被服务端关闭（`code=428`，与 408/500 同属日常抖动，实测 2~15s 自愈）。
+旧逻辑是**断开即作废整批**，任务判失败；4 分钟后 `auto_retry` **整批重发**，
+第一个群因此在 4 分钟内收到两张一模一样的 ALL.png，第二个群则白等 4 分钟。
+
+两处改动（缺一不可，且必须**先发 notify.js 再发 my_app**）：
+
+1. `whatsapp-kb-bot/src/notify.js` `runFileJob`：发送前发现断开改为先等重连，
+   上限 `CONFIG.notify.fileSend.resumeWaitMs`（默认 45000ms，必须远小于 my_app
+   侧 `WHATSAPP_BAILEYS_WAIT_SECONDS=600`，否则作业挂在 running 变成任务超时）；
+   等不到才作废整批。发送一律用护栏之后**重新取到的 `sockRef`**，不用形参
+   `sock`（重连是 `start()` 换的新 socket，旧那份的 ws 已 close）。
+   同时把真正拿到服务端 message id 的 `(payloadSignature|jid)` 写进
+   `result.sent_pairs`，并在 `skip_pairs` 命计时**不扣单作业配额**。
+   收尾判据扩成「有一个群收到 **或** 全部命中去重台账且无错误」—— 后者是为了
+   让全去重的重投报成功，否则它会触发 Playwright 回退，把已送达的图再发一遍。
+2. `backend/services/whatsapp_send_baileys_service.py` `_retry_skip_pairs`：
+   仅当「上一份作业已终态且当初判失败」+「result 里有 sent_pairs」+「本次 items
+   与上次逐条指纹完全一致（指纹在投递时记录进 `items[].fingerprint`，两边都现读
+   磁盘是测不出字节变过的）」+「旧作业完成距今小于
+   `RETRY_DEDUP_WINDOW_SECONDS`（默认 1800s）」四条同时成立，才把 sent_pairs
+   作为 `skip_pairs` 交给 notify.js。任一不成立即退回整批重发。
+   **只覆盖 `create_pending_job`**（本任务这条路）；SP 报表走的 `dispatch_items`
+   失败后按设计回退 Playwright，语义不同，刻意不共用。
+
+开关：`resumeWaitMs=0` 关续发；`WHATSAPP_BAILEYS_RETRY_DEDUP_WINDOW_SECONDS=0`
+关去重台账。生效需重启 notify.js 进程与 worker（改的是任务实现，见本节上方说明）。
+
+### 主开关跳过「手动停止」的任务（2026-10-20）
+
+`task_schedule_config.enabled` 一个布尔量原本同时表达两件事：「该不该跑」与
+「用户是否手动关过」。主开关（`POST /api/tasks/toggle-all`）因此只能全开或全关，
+用户逐个关掉几个任务后点一次「一键启用」，那些**刻意关掉的会被全部重新打开**。
+
+新增 `manually_stopped` 列把两者拆成正交：
+
+| 字段 | 含义 | 谁写 |
+| --- | --- | --- |
+| `enabled` | 现在该不该调度 | 单任务开关 + 主开关 |
+| `manually_stopped` | 用户手动关过（1）/未标记（0） | 单任务开关 + 主开关 |
+
+| 操作 | 对 `manually_stopped=1` 的任务 |
+| --- | --- |
+| 单任务关闭 | 置 1 |
+| 单任务启用 | 清 0 |
+| 主开关**关闭** | **跳过**，标记与 `enabled` 都原样保留 |
+| 主开关**开启** | **跳过**，保持 `enabled=0` |
+
+即主开关**双向都不覆盖**用户的手动决定：手动关过的任务只有行内开关能再打开，
+主开关拨到哪边都不动它（用户 2026-10-20 明确要求）。
+
+⚠️ 早期实现是「开启时跳过、**关闭时清零标记**」，理由是「全部禁用后不存在还想
+单独留着的意图，再开一次主开关理应全部恢复」。已作废：清零会让该任务在**下一次**
+主开关 ON 时被重新打开，等于把用户的手动决定静默丢弃 —— 用户反馈的实际形态
+就是「又自己跑起来了」。
+
+实现要点：
+
+- 跳过发生在 `task_runner.toggle_all_tasks()`，被跳过的 task_id 通过返回值
+  `skipped_tasks` 告知前端（不计入 `changed`/`total`）；
+- `list_tasks()` 与 `get_task_config()` 都回传 `manually_stopped`；
+  「任务配置」导出/导入（`04` 节配置页签）也带上该字段，往返不丢标记；
+- 前端主开关的状态判定同样要排除这些任务（`masterTasks`），否则它们会让开关
+  **永远显示关闭**——与 `master_switch_exempt` 踩的是同一个坑（2026-10-05 / 2026-10-20 各一次）；
+- 数据库迁移 `alembic/versions/0006_manual_stop_flag.py`（PG 侧）。
+  ⚠️ **本表在生产环境有两份，2026-10-21 起「读侧只认本地、写侧同时双写」**（见下文
+  「双库一致性」）：判定一律以 `db/app.db` 为准；PG `app` schema 那份由
+  `_save_schedule_config` 双写成镜像，代码里无人据它判定。
+  `main.py` 的 `_init_schedule_table()` 原先只在 `if DB_MODE == "sqlite"` 分支里调用，
+  pg 模式根本不执行 —— `main.py:510-515` 已补 pg 分支调用（Alembic 只管 PG 那份，
+  本地 SQLite 那份要自建）。首次上线需对线上 SQLite 手工补列（现在由
+  `task_runner._ensure_schedule_table` 幂等完成）。
+  回滚：`alembic downgrade 0005_tt_exclude_table`，SQLite 侧 `ALTER TABLE ... DROP COLUMN`。
+
+##### ⚠️ SQLite 侧曾缺主键，导致每任务多行、状态随机（2026-10-21 修复）
+
+**这是本功能上线当天发现的真实线上故障，症状极具迷惑性**，务必读完再改这张表。
+
+`task_schedule_config` 在生产 SQLite 里的实际 DDL 是：
+
+```sql
+CREATE TABLE "task_schedule_config" ("task_id" TEXT, "cron" TEXT,
+    "enabled" INTEGER, "updated_at" TEXT, "manually_stopped" INTEGER)
+-- indexes: []   ← 无 PRIMARY KEY、无 UNIQUE
+```
+
+与 alembic `0001_baseline.py:58-64`（建表时带 `PrimaryKeyConstraint('task_id')`）**不一致**，
+PG 侧主键则一直完好（`task_schedule_config_pkey`）。何时丢的已无从追溯。
+
+**后果**：`task_runner._save_schedule_config` 走 `dialect_helpers.upsert()`，
+SQLite 分支是 `INSERT OR REPLACE`（`backend/dialect_helpers.py:126`）。
+该语句依赖**唯一约束**决定替换目标 —— 没有约束时它**不报错，直接追加新行**。
+于是每次保存 cron / 启用状态都新增一行：实测 73 个任务共 **146 行**（71 个 task_id 有重复）。
+
+**为什么症状是「状态随机」而不是「状态不对」**：`SELECT ... WHERE task_id=?` 会命中
+多行中的任意一行（取决于插入顺序），于是同一任务的 `enabled` / `manually_stopped`
+读出来时对时错。实际发生过的连锁反应：
+
+1. 用户手动关掉两个任务 → 写入 `enabled=0 / manually_stopped=1`（新行）；
+2. 读接口命中的是更早的 `enabled=1 / manually_stopped=0` 旧行 → 界面显示仍是开启；
+3. 用户再点主开关 → 旧行被保留、新行再追加一条 → 混乱加剧。
+
+排查时若看到「刚写进去的值又变回去了」，**先查重复行，别急着怀疑有人回滚**：
+
+```sql
+SELECT task_id, COUNT(*) FROM task_schedule_config GROUP BY task_id HAVING COUNT(*) > 1;
+```
+
+**修复**：`tools/fix_task_schedule_dupes.py`（原地删陈旧行 + 建唯一索引，不重建表）：
+
+- 保留规则：每个 task_id 只留 `updated_at` **最新**的一行（`rowid` 最大兜底）；
+- 理由：`updated_at` 的语义就是「这条配置最后一次被写入的时间」，最新行必然是最近一次
+  用户/主开关操作的结果。`cron`/`enabled`/`manually_stopped` **一律取那一行的值**，
+  不做字段级择优 —— 混搭不同时间点的字段会造出从未存在过的组合状态；
+- 脚本默认 dry-run，写库前自动备份整库到 `db/app.db.bak_dedup_<时间戳>`。
+
+修复后 `INSERT OR REPLACE` 恢复「替换」语义（已实测：写入后行数仍为 1）。
+
+##### 双库一致性：权威只有一份，PG 只是镜像（2026-10-21）
+
+生产是**双库**：本地 `db/app.db` + PG `192.168.100.20:5432/myapp`（`app` schema）。
+这次事故的本质是**读写分家**——写只写一处、读读两处，于是任何一处陈旧都会表现成
+「页面改了但没生效」。收口后的分工：
+
+| 角色 | 存储 | 谁用它 |
+| --- | --- | --- |
+| **权威**（唯一判定依据） | 本地 `db/app.db` | `load_schedule_config_rows`（`task_runner.py:291`）、`_load_schedule_config`、注册期 `register_task`、启动排程 `schedule_all_tasks`、执行前 `_refresh_task_schedule_from_db`、设置页 `get_task_config` / 导出 |
+| **镜像**（只写不读） | PG `app.task_schedule_config` | 代码里无人据它判定；供 `pg_dump` 备份、直查库的人、以及漂移核对 `log_schedule_store_drift` |
+
+**改前的形态（这就是本次事故根因）**：`_save_schedule_config` 只写 SQLite，而
+`get_task_config`（设置页导出）、`db_freshness_check`、`tt_alarm_trigger` 经
+`get_raw_connection` 读 PG —— 写一处、读两处，PG 那份因此停在 2026-10-20T12:03 的
+「主开关关闭」状态；同时 `pg_to_sqlite_sync`（注册表默认 `45 * * * *`、`task_registry.py:723`，
+**生效值被库里覆盖成 `45 */12 * * *`** —— 判窗口要按库里的值，启动日志的 `[SCHEDULE]` 覆盖告警
+会把这条差异直接打出来）把 PG **整表 DROP+CREATE** 灌回 SQLite —— 用户 15:26 点主开关，
+16:05:07 那次同步认领、16:15:40 结束（`log/worker_runtime_m_20261021.log`），SQLite 随即
+变回 1 行 enabled。
+
+**后果有迷惑性**：运行中的进程每次执行前重读库，于是 16:15 起 **24 个任务按
+「任务 xxx 已禁用」被跳过**（`grep "跳过执行.*已禁用" log/worker_runtime*.log`），
+页面却仍显示 70 运行/3 停用（那是 15:26 的内存快照）；此时若重启，
+`schedule_all_tasks` 照库里的旧值只会调度 1 个任务。
+
+**现在的写法**（`task_runner.py:396`）：
+
+- 先写 SQLite，再在 `DB_MODE == "pg"` 时写 PG；**每个存储各回读各的原值**来补齐
+  调用方没传的 `enabled`/`manually_stopped`（`_upsert_schedule_row`，`:376`），
+  因此单边缺行不会把另一边的默认值灌过去；
+- 两侧各一个 try/except：一侧坏了另一侧照写，日志**点名是哪个存储失败**
+  （旧代码的 `except` 只留一行「保存调度配置失败」，正是它让 PG 侧的写失败被吞了一整天）；
+- 方言差异交给 `dialect_helpers.upsert()`（SQLite 用 `INSERT OR REPLACE`、
+  PG 用 `ON CONFLICT (task_id) DO UPDATE`），不再需要绕开 `get_raw_connection`；
+- sqlite 模式下 `get_raw_connection` 返回的就是同一个文件，**不再重复写第二遍**。
+
+**读侧收口（同日追加，这一步才叫「老数据覆盖不掉页面配置」）**：只有双写不够 ——
+只要还有代码按 PG 那份判定，它一滞后行为就跟着错。三处读方都改成只认本地权威
+（`load_schedule_config_rows`，`task_runner.py:291`）：
+
+| 读方 | 改前 | 改后 |
+| --- | --- | --- |
+| `get_task_config` / `export_all_task_configs`（设置页「任务配置」导出） | `get_raw_connection` → PG | 本地权威。**「导出 → 导入」不再把镜像里的旧值写回库里** |
+| `db_freshness_check._task_health_db_query` 的 `disabled_ids` / `cron_map` | 同一条连接 → PG | pg 模式改读本地权威；sqlite 模式沿用 conn（本就是同一个文件） |
+| `tt_alarm_trigger._resolve_sync_stale_threshold`（TT 推送的触发窗口） | 传入的 conn → PG | 同上，本地读不到才退回 conn 兜底 |
+
+镜像因此变成**只写不读**：它滞后最多让备份里带旧值，不会改变任何行为。
+
+**漂移哨兵**：`log_schedule_store_drift()`（`task_runner.py:319`）比对本地与镜像，
+不一致就刷 `WARNING 调度配置镜像漂移 N 个任务（以本地 db/app.db 为准，PG 那份仅供备份）`；
+`_init_schedule_table()` 每次后端启动跑一次。它是「还有进程按旧代码单边写」的唯一征兆
+（worker 未重启的窗口里就会看到这行）。本机 2026-10-21 实测输出
+`INFO 调度配置镜像核对：本地与 PG 一致（73 行）`，漂移 0。
+双写本身会把镜像同步回来，所以重启 worker 后这行告警会自行消失。
+
+**同时切断覆盖源**：`task_schedule_config` 已列入 `sync_pg_to_sqlite.py:80` 的
+`SKIP_TABLES`（`:210` 处早退，不触碰连接）。按该文件里既有的判定标准 ——
+「写入方是否与 DB 模式无关地固定写 SQLite」—— 本表合格：`_save_schedule_config`
+无条件写 SQLite。仅双写而不跳过是不够的：同步的 `DROP+CREATE` 只按 PG 的**列**建裸表，
+会把 SQLite 的主键与 `ux_task_schedule_config_task_id` 一起抹掉，
+`INSERT OR REPLACE` 随即退化成追加重复行（即 2026-10-21 那次事故的第二个症状）。
+这与 2026-09-18 的 `credentials` 事故是同一个模式。
+
+**兜底自修**：`_ensure_schedule_table`（`:232`）在启动时对两侧建表/补列，并在 SQLite
+侧 `CREATE UNIQUE INDEX IF NOT EXISTS`；表里已有重复行时建索引必然失败，此时只告警并
+指向 `tools/fix_task_schedule_dupes.py`（合并重复行是取值决策，不在启动路径上替用户做）。
+
+**一次性状态对齐**：`tools/reconcile_task_schedule_state.py`（默认 dry-run，`--apply` 才写，
+SQLite 先整库备份到 `db/app.db.bak_tscfix_<时间戳>`）。目标状态不写死任务名，
+按表自身的 `manually_stopped` 推导：`enabled = 0 若 manually_stopped=1，否则 1`。
+它同时做 SQLite 去重 + 补唯一索引 + 两侧写回，幂等。
+
+> ⚠️ **跑它的时机**：必须在 `SKIP_TABLES` 改动生效**之后**（即重启跑 `pg_to_sqlite_sync`
+> 的 **`p` 组**之后；2026-10-28 前它在 `m` 组，现已拆出）。`sync_pg_to_sqlite` 与 `task_runner` 都是 worker 进程 import 进
+> `sys.modules` 的常驻模块（`task_registry._lazy_loader` → `importlib.import_module`，
+> 只在首次调用时导入），**改文件不重启不生效**。
+
+**改完自查**（三条都要成立）：
+
+```
+python tools/reconcile_task_schedule_state.py            # 期望：需改动 0 行 / 两侧一致
+sqlite3 db/app.db "SELECT COUNT(*), SUM(enabled), SUM(manually_stopped) FROM task_schedule_config"
+# 与 PG 上同样一条查询结果一致，且 SQLite 侧 indexes 里有 ux_task_schedule_config_task_id
+python -c "import sys; sys.path.insert(0,'.'); from backend.services.task_runner import log_schedule_store_drift as d; print('漂移', d())"
+# 期望 0；非 0 就是还有进程按旧代码单边写（worker 没重启）
+```
+
+`tools/sync_manual_stop_to_pg.py` 是双写上线**之前**手工补 PG 用的退路，现在只作应急备份。
+
+#### SP 报表任务的双通道回退（2026-10-11）
+
+`sp_email_details` / `sp_online_report_send` / `sp_whatsapp_report` 三个任务**不再直接**
+调 Playwright，改为经 `backend/services/whatsapp_dispatch.send_with_fallback` 编排：
+**Baileys 主通道 → Playwright 回退**（回退判据：投递失败 / 超时 / 零确认 / 任一单项有错）。
+编排层细节与设计理由见 `architecture.md` 第八节决策记录。
+
+- 发送者由「用户桌面 WA 主号」变为「Baileys 副号」（用户 2026-10-11 决策并接受）；
+- 应急退场：设 `WHATSAPP_DISPATCH_CHANNEL=playwright` 可把三个任务整体打回 Playwright；
+- 任务结果里带 `channel` / `fell_back` 字段，便于执行历史里区分实际走的哪条通道。
+
+**「默认禁用」的实操**：`task_registry.py` 里 `whatsapp_send_baileys` 的 spec 带
+`enabled=False`，`register_all_tasks` 会把它传给 `register_task`；首次启动后该任务
+`enabled` 为 False、未排进 APScheduler。在「任务管理」页点开关（启用）即把
+`enabled=1, current_cron='0 4 * * *'` 落库到 `task_schedule_config`，并触发
+`schedule_task` 把它加进调度器。
+
+### FineBI `schedule/` 的重算空档：读它的任务一律排在 :06 之后（2026-09-30）
+
+**现象**：`incident_overview_sync` 报 `在 /webroot/WEB-INF/schedule/TT_WO 及其子目录下未找到 incident_overview.xlsx`，
+2026-09-30 一天 18 次跑挂 8 次（05/08/09/11/12/13/16/17 点），微信+邮件每小时误报一次；
+同一天 `finebi_report_sync` 报 `NUR_SLA: 未找到 Excel`。
+
+**根因（实测，不是代码问题）**：FineBI 每小时 **:53** 触发重算，**先删掉上一轮的
+`<报表>/<YYYY-MM-DD>/<HHMM>/通用结果/` 目录**，新副本约 **:02–:05** 才落盘。任意时刻源树只保留一份副本
+（一层只有一个日期目录、再一层只有一个 HHMM 目录），因此 **:53 → :05 约 12 分钟里目录是空的**。
+该任务的 cron 存在 `task_schedule_config`（库里 `3 * * * *`，与注册表默认 `0 * * * *` 已经不一致），
+两个分钟都落在空档里。14:03/15:03 那两次"成功"是赶上落盘瞬间——远程 mtime 与任务认领时间同秒。
+旁证：跑在 :10 的 `finebi_report_sync` 同期只有 NUR_SLA 一次缺文件。
+
+**处理（三处，缺一不可）**：
+
+1. **排期避开空档**：`incident_overview_sync` 的生效 cron 改为 `20 * * * *`（经
+   `POST /api/tasks/{id}/schedule` 落到 `task_schedule_config`），注册表
+   `backend/task_registry.py` 的 `default_cron` 一并改掉，避免新环境回到整点。
+2. **把「源正在重算」与「源断了」分开判定**：`services/incident_overview_sync.py` 取不到文件时先看
+   本地最新副本年龄，`NO_SOURCE_GRACE_MINUTES=90` 内返回 `success + skipped + note`（不告警），
+   超龄才算失败并把年龄写进错误信息。`services/finebi_report_sync.py` 同理：单个目录本轮没有 Excel
+   而本机已有历史副本 → 只记进 `missing`，**不再把整任务拖红**（一个目录的空档会连带其余已同步成功的
+   报表一起被判失败）；本机连历史副本都没有才算 `error`。
+3. **让"数据陈旧"本身可见**：`services/db_freshness_check.py` 新增 `FILE_CHECKS`（第 2b 类检查），
+   按本机最新文件的落盘年龄判定文件型看板源（首条即事件总览的 `data/incident_overview/incident_overview_*.xlsx`，
+   `max_age_hours=2.0`）。**取数任务红/绿 与 页面数据是几小时前的 是两件事**——2026-09-30 那次只有人
+   看到任务告警，没人看到"页面停在 15:03 那份"。
+
+   第 2、3 条是 `services/*.py` 代码，**必须重启认领它们的 `m` 组 worker 才生效**（模块已被长驻进程
+   import，与本文件下方 `sp_data_sync` 一节「改动需重启 `s` 组 worker 才生效」同一回事）：
+   `python restart_workers.py --groups m --mode worker --reason "..."`。
+   只用 `--groups m`，**别顺手加 `--mode watchdog`**——那种模式会连 watchdog 一起杀，七组 worker 全部重来，
+   只有在改分组清单时才必要（分组清单在 watchdog 内存里）。
+
+**新增读 `/webroot/WEB-INF/schedule/` 的任务时**：cron 分钟 **≥ 06**；「未找到文件」默认按上游常态处理；
+若该文件是某个页面的真相源，同步在 `FILE_CHECKS` 里加一条。**别再加第二条链路拉同一个文件**
+（TT_WO 这份目前被 `incident_overview_sync` 与 `finebi_report_sync` 各拉一次到两个目录，属待合并的重复来源）。
+
+### `sp_data_sync` 的镜像问题（2026-09-30 已根治 + 一次 worker 挂死事故）
+
+排查「`n` 组为什么总是堵」时定位到两个独立问题。**缺陷一的根因已在 2026-09-30 查清并
+从代码侧彻底解决（改为本地构建+整文件推送）；缺陷二已通过拆组 + 分段计时处理。**
+
+**缺陷一（已修）：FineBI 镜像库长期写不进去，且会把 worker 永久卡死。**
+
+`sp_data_sync` 的 `result_json` 里有 `mirror_success: false` 与 `mirror_errors`（5 张表全失败），
+`detail` 统一是 `database is locked`。
+
+> **⚠ 修正 2026-09-27 的结论（当时判断有两处错误）。**
+> 1. **不是「WAL-over-SMB 天生不可用」。** 2026-09-30 实测：在同一 SMB 目录新建库、
+>    甚至把它切成 WAL，只要**没有远端持有者**，本机打开与读写**都正常**。
+> 2. **不是「本仓库无法单方面解决」。** 该结论建立在「`inventory.db` 的唯一写入方就是
+>    my_app」这一错误推断上；实测远端确有其它活进程持库。而绕开它并不需要远端配合。
+
+确切根因：**远端主机上有活进程长期持有该库的 `-shm` 字节范围锁**
+（`inventory.db` 处于 WAL 模式，模式持久化在文件头）。SMB 无法代理这套共享内存语义，
+于是本机**每一次** `sqlite3.connect()` 都被拒 —— 而且是以**永久阻塞**的形式，
+不是抛异常，`timeout` / `busy_timeout` 对它完全没有作用。
+
+2026-09-30 逐项排除后的实测对照：
+
+| 探测 | 结果 | 含义 |
+| --- | --- | --- |
+| 裸 `open()` 读主库 | **成功**（`SQLite format 3`） | 文件本身完好、共享可达 |
+| 复制主库到本机再打开 | **成功**，`journal_mode=wal`，5 张表齐全 | **数据库没坏** |
+| 在同一 SMB 目录**新建** sqlite 库 | **成功** | SMB 本身能跑 SQLite |
+| 把该新库切成 WAL 后打开 | **成功** | WAL 本身在 SMB 上可用 |
+| 独占打开远端 `inventory.db-wal` | 被拒（`being used by another process`） | 远端有活进程持锁 |
+| 独占打开远端 `inventory.db-shm` | 被拒（`another process has locked a portion`） | **持的是 `-shm` 字节锁** |
+| 打开生产 `inventory.db` | **立即** `database is locked` | 本机永远连不上 |
+| **整文件 `copyfile` 覆盖生产库** | **成功（即使库正被占用）** | ← 这就是修法的依据 |
+
+**修法：不再直连远端库，改为「本地构建 + 整文件推送」**
+（`backend/services/sp_mirror_push.py`）。
+在本机临时目录建一个新库（`journal_mode=delete`、单文件），再用 `shutil.copyfile`
+整文件覆盖过去 —— **整文件覆盖不需要 SMB 字节锁**，因此远端持库也不影响。
+
+> 关键简化：**不再需要旧的「远端反连接增量追加」**。镜像内容直接取自 `app.db`，
+> 而 `app.db` 的 `inventory_details` 本身就是「历史累计 + 保留期清理」后的全量结果
+> （`get_sp_table._write_table` 的 APPEND 分支已完成合并去重），
+> 因此本地构建出的库与 `app.db` **天然同口径**，比旧实现更简单也更准。
+
+实测效果：本地构建 1.0s + 推送 0.5s（约 90MB/s），**一轮镜像合计约 2s**，
+对比旧路径的「永久阻塞直到人工重启」。同时生产库从 113MB（含 14.7MB 未 checkpoint 的
+`-wal`）降到 47.7MB 单文件，`integrity_check=ok`，`ocrule_details` 表此前在远端**整个缺失**，
+现已补齐。
+
+> **回滚路径**：`sp_sftp_config.json` 的 `mirror_mode` 设为 `"direct"` 可切回旧的直连实现
+> （保留在 `get_sp_table._mirror_write_all_direct`，**默认禁用**）；设为 `mirror_enabled=false`
+> 则完全关闭镜像。
+
+**并发事故（2026-09-30）：镜像挂死会把整组 worker 卡死 6 小时以上。**
+
+09:10 那轮 `sp_data_sync` 卡在镜像阶段，worker 进程 `64468` 一直存活（单线程、CPU 零增长），
+持有远端 `inventory.db` 与 `inventory.db-wal` 句柄。它直到 10:22 服务栈重启才被判失败回收，
+且它持有的句柄让后续每一轮镜像继续撞 `database is locked`。
+任务页面上的报错是 `❌ Worker 进程中断，任务未完成（启动时自动回收）`
+—— **但它并没有"中断"**，pid 一直活着。
+
+对应修复两条：
+
+1. **镜像阶段加进程级硬超时**（`get_sp_table._run_mirror_with_timeout`，
+   `MIRROR_HARD_TIMEOUT_SECONDS=900`）。`sqlite3` 的 `timeout`/`busy_timeout` 管不到
+   SMB 层的 open 与字节锁，所以必须由调用方给上限。
+2. **回收文案区分「进程已失效」与「任务挂死」**（`worker.py`）。旧文案一律写
+   `Worker 进程中断`，而实测那次 pid 存活、真实故障是**任务挂死**——
+   照字面排查会被引向"崩溃"这个错误方向。
+
+> **回滚/排障时注意**：`worker.py` 的时间阈值回收（`TASK_MAX_RUNNING_SECONDS`，默认 4h）
+> 与本次的 15min 镜像硬超时是**两层不同的兜底**，前者兜「任何任务挂死」，后者兜「镜像这一处」。
+
+> **已做的代码侧改进（2026-09-27，保留）**：
+> 1. **不再静默**：镜像失败会追加进 `result["warnings"]`，并由
+>    `task_runner.py` 在 `success=True` 时也消费 warnings 发出**降级告警**
+>    （此前告警只在 `success=False` 触发，所以看板停更半个月而监控全绿）。
+> 2. **诊断可执行**：`_diagnose_mirror_failure()` 把 `database is locked` 翻译成可执行结论
+>    （其旧文案里"WAL-over-SMB 架构限制、本仓库无法解决"的措辞已按上文更正）。
+> 3. 守卫用例 `tests/test_engineering_guards.py` 的
+>    `test_mirror_failure_is_surfaced_as_warning`、
+>    `test_mirror_never_connects_remote_db_directly`、
+>    `test_mirror_stage_has_hard_timeout`、
+>    `test_worker_recovery_message_distinguishes_hang_from_crash`
+>    钉住上述结论，防止退回静默或退回直连。
+
+> **排查 FineBI 仓库看板数据不动时**：不要只看任务成功状态 —— 看
+> `result_json` 的 `mirror_success`，或看是否收到过 `[降级]` 通知。
+> 2026-09-30 起还可直接看日志里的 `[耗时] 镜像本地构建 Xs` 与 `[镜像] 推送完成`。
+
+> **⚠ 2026-09-28 已修的回归（上面第 2 条改进自己引入的）。** `_diagnose_mirror_failure()`
+> 把诊断**字符串**塞进了 `_mirror_write_all()` 返回值的 `_diagnosis` 键，而消费侧
+> `run_sp_data_sync()` 原先按 `v.get("status")` 遍历该返回值的全部键，于是在镜像失败的
+> 每一轮都抛 `AttributeError: 'str' object has no attribute 'get'`。异常被外层 `try` 捕获后
+> 包装成 **"SFTP 连接/同步失败(第N次尝试)"** —— 三个后果都误导排查：
+> ① 报错文案指向 SFTP，而实测 `[耗时] SFTP下载+入库 ≈17s` 说明下载入库一直是好的；
+> ② 触发 `SFTP_MAX_ATTEMPTS=3` **整轮重试**（重新下载 5 份报表 × 3 + 每轮 2 次镜像重试与
+> SMB 探测），单轮耗时从 ≈534s 涨到实测 **1576s**；
+> ③ 任务被判 `success=False`，上面第 1 条精心加的**降级告警根本没走到**，
+> 报告里只显示含糊的 `'str' object has no attribute 'get'`。
+> **修法**：遍历只取表条目（`not t.startswith("_")` 且 `isinstance(v, dict)`），
+> 见 `get_sp_table.py` 的 `mirror_errs` 推导式。**改动需重启 `s` 组 worker 才生效**
+> （`python restart_workers.py --groups s --reason "..."`，模块已被长驻进程 import）。
+> 教训：**往聚合返回值里混入与业务条目不同形状（str）的元数据键时，所有遍历该 dict 的
+> 消费点都要同步收紧**，否则诊断信息反而成了崩溃源。
+
+**缺陷二：单次固定耗时约 534s，正好吞掉 `:15` 触发点。**
+
+实测 76 次中位 534s、区间 484~545s，极稳定。它在每小时 `:10` 启动、占线到 `:19`，
+而 `eflow_active_alarm` 是 `*/5`（`:10/:15/:20`）——`:15` 那次必然排队。
+
+> **分段计时已补（2026-09-27）**：`get_sp_table.py` 现在打两行
+> `[耗时] SFTP下载+入库 Xs` 与 `[耗时] 镜像写入 Xs`，并把数值写进
+> `result_json` 的 `sftp_seconds` / `mirror_seconds`。
+> 此前只能靠 SFTP 会话起止粗估（`[完成]` 先于会话关闭打印，两者混在一起无法区分）。
+> 拿到这两行后即可确认 534s 的真实构成。
+
+这解释了 `eflow_active_alarm` 实测 **419 次/天（理论 `*/5`×24h=288 次，超 1.45 倍）**：
+超出的不是"重试"，而是**队列在 worker 忙碌期间累积后补跑**，实测平均等待 59s、最长 688s。
+`2026-09-27` 拆组（`sp_data_sync` → `s` 组）后两者不再互相阻塞，此现象应随之消失；
+**若拆组后 `eflow_active_alarm` 仍显著超过 288 次/天，则另有一个独立成因待查。**
+
+> **2026-10-15 后续（`eflow_active_alarm` 再拆到 `x` 组）**：上一段的"应与随之消失"只对
+> `sp_data_sync` 成立，`n` 组**内部**的阻塞仍在 —— `eflow_sync`（`22 * * * *`，平均 192.5s）
+> 与 `ms_sla_full`（最久 600.1s）同样占着 `n` 组的串行道。实测（近 3 天 `task_queue` 856 次）
+> 等待 >60s 占 5.3%、最差 853.9s。因用户要求实时告警滞后 ≤1 分钟，本任务已独立为 `x` 组。
+> ⚠️ 本段提到的「≥288 次/天」判据对应的是 `*/5` 时代；现为 `*/1`（理论 1440 次/天），
+> 判据要按新周期重算，不要直接套用旧数字。
+
+### `cn_kpi` 页面的两条供数链路：一条自动、一条人工（2026-10-01）
+
+`?page=cn_kpi` 读的 `db_ps_cs_cn` 里，同一个 KPI 可能有**两张同名不同源**的表，
+分属两条**彼此独立**的流水线 —— 这是该页曾经整块空白的根因，改这里的东西前必须先分清：
+
+| 表后缀 | 写入方 | 触发 | 覆盖范围 |
+| --- | --- | --- | --- |
+| `_EMS` | `Task\PS_CS_CORE_Scripts\ps_cs_core.py`（**不是本项目的任务，不进 `TASK_SPECS`**） | **人工**导出 CSV 后手动运行 | 8+ 个模板，含 USSD / LOCATION_UPDATE |
+| `_UME` | 任务 `cnn_kpi_sync`（本项目，每天 06:00，`ccn_ume_kpi_service.py`） | 自动 | **仅 8 个模板**（`CNN_KPI_QUERY_CONFIGS`） |
+
+**两条链路的三个不对称**（都实测过，别再踩）：
+
+1. **覆盖面不同**：`USSD_RATIO` 与 `LOCATION_UPDATE` **没有 UME 孪生表**，
+   只有人工链路。人工不跑 → 这两个 KPI 永远停在最后一次导出。
+2. **写入模式不同**：`ps_cs_core.write_via_api()` 用 `mode="full_replace"`（**整表覆盖**），
+   `ccn_ume_kpi_service` 用 `mode="upsert"`。所以人工导出会把整表**连粒度一起换掉** ——
+   选了「2026-04-01 ~ 10-01」导出，表就从 `1Day(s)` 变成 `1Month(s)` 的 6 行。
+3. **停摆表现不同**：`_EMS` 停摆是**静默的**（表还在、只是没新行），
+   页面原先不会报错，只是图变空或点变少 —— 这正是最难排查的一类故障。
+
+**因此**：`cn_kpi_service.py` 实现了三级降级取数 + 粒度标注，
+判定规则与排查手段见 `11-feature-guide.md` 第 33 节。
+**不要把「图是空的」直接归因为「数据库里没有」** ——
+先按 33.6 的三步确认是停摆还是粒度漂移（2026-10-01 的实例：
+USSD 的日表当时只剩 2026-08-25~27 三行，而月表里有完整的 6 个月）。
+
+
+### `olib_soc_kpi_daily_sync` 的三类自愈（2026-09-24 首次加固，2026-10-11 再次加固）
+
+该任务给 VMAX 90 天经营看板（`?page=vmaxCxoDashboard_90Days`）供数，每天 06:20 只补
+`daily_kpi` 里缺的天。它的「缺口」判定有**三类**，缺一不可：
+
+| 类型 | 判定函数 | 背景 |
+| --- | --- | --- |
+| 整天没有行 | `olib_soc_kpi_store.gap_days()` | 任务被跳过 / 数仓分区晚到 |
+| **有行但关键指标为 NULL（窗口内）** | `olib_soc_kpi_store.incomplete_days()` | 单个块临时取数失败，仍写入一行，只是该块那列为 NULL |
+| **有行但关键指标为 NULL（窗口外）** | `olib_soc_kpi_store.all_incomplete_days()` | 同上但不限回看窗口，补滑出窗口的历史残留 |
+
+第二类是 2026-09-24 的线上事故：`blocks_ok` 从 7 掉到 6 却**不报错**，
+`gap_days` 也不认为缺天，于是 `active_user` 在 2026-09-18~23 **连丢 6 天**且永久残留
+（看板「Active Users」停在 17 号）。判定列见 `olib_soc_kpi_store.REQUIRED_COLUMNS`
+（**全部主数值列**，不再只是 `traffic_tb` / `active_user` / `video_tb`）；取数幂等，重取一次即自愈。
+
+第三类是 2026-10-11 加固：`incomplete_days()` 只看最近 N 天，历史残留一旦滑出窗口就永远补不到
+（实测 2026-09-07 的 `traffic_tb` 残留了整整一个月）。同步任务现在额外扫全表，
+把窗口外的残缺日**单独跑一次**（不并进主 `gaps`，否则区间会暴涨）。
+
+**取数侧**（2026-10-11）：`run_block()` 新增 `days_empty` —— 「分区缺失」或「分区在但查出 0 行」
+都算该块某天没取到数，块降级 `partial`；`BLOCKS_ALLOW_EMPTY_DAY`（TOP 业务/游戏）例外。
+
+> 排查同类问题的第一步：`SELECT day, blocks_ok FROM daily_kpi ORDER BY day DESC`，
+> **`blocks_ok` 小于块总数（看板为 7）的那天就是残缺日**。
+> 也可以直接 `curl /api/olib-soc-dashboard/status` 看 `incomplete_days` 计数；
+> 看板页面顶部在存在缺口日时会显示「数据完整 x/y 天 · 缺 n 天」提示条，明细表对应行标「数据残缺」。
+
+### `tt_alarm_whatsapp_alert` 的口径与实测坑（2026-09-28 首版，2026-10-05 机制切换）
+
+**触发制**（2026-10-05 起）：每 **5 分钟**扫 `realtime_alarm`（由 `eflow_active_alarm`
+同步的实时告警表，注册表默认与生产配置均为 `*/1`），挑出「带 TT（`tt_id` 非空）+ 告警升起时间
+（`alarmraisedtime`，epoch 毫秒）在触发窗口内 + 告警码在白名单内」的告警，
+随后**实时回 eFlow 查单**（`eflow_data_mapper.fetch_tt_live_batch`，一次分页遍历
+匹配全部目标单）拿当前 `ticket_severity` / `last_modified_time` / `alarm_clear_time`，
+只推级别命中的单。发送状态落 `eflow_tt_whatsapp_alert_log`。
+
+> **为什么触发源不是 `eflow_tt`**：那张表由 `eflow_sync` 每小时 :22 才落库，
+> 旧机制（每 15 分钟扫它的 3 小时窗口）端到端时延 45~75 分钟，对 P1 太慢。
+> `realtime_alarm` 新鲜度（生产 `*/1` 同步，2026-10-15 起独立 `x` 组）+ 本任务 5 分钟轮询 + 实时查单，
+> 首推时延压到分钟级。触发扫描的完整口径见
+> `backend/services/tt_alarm_trigger.py` 的模块 docstring；三层单据来源
+> （实时/镜像/触发行）的取舍见 `tt_alarm_sources.py`。
+
+> **⚠️ 2026-10-15 事故：这张触发源表每分钟曾真的消失约 0.14 秒。**
+> 现象是本任务报 `RuntimeError: realtime_alarm 表不存在或缺少 tt_id/alarmraisedtime 列`
+> （实测 16:02、16:57、22:42 三次，起跑相位都在「整分 +1.0s」，与 `*/1` 的
+> `eflow_active_alarm` 撞上；该任务今天刚从 n 组拆到 x 组并把 cron 提到每分钟，
+> 之前 30 分钟一次时撞上的概率极低，所以问题一直存在但直到今天才暴露）。
+> 根因**不是没同步**，而是**换表 DDL 写了裸表名**：PG 的 `DROP TABLE` 会顺着
+> `search_path`（`app,eflow,lte_pl,…`，见 `backend/database.py` 的
+> `_PsycopgRaw._SEARCH_PATH`）逐级向下解析，而库里有两份同名 `realtime_alarm`
+> —— `app` 全量 149/150 列、`eflow` 过滤 36 列（列名是 `TT ID`，且**没有**
+> `alarmraisedtime`）。`fetch_and_save_active_alarm()` 每轮先 `write_alarm_sqlite()`
+> （eflow 置顶连接）再 `_write_alarm_to_appdb()`（app 置顶连接），两处影子表换名
+> 都用裸名，于是**互相删掉对方的正式表**：2026-09-29 那次「影子表 + 单条 `DO` 块
+> 原子换表」的修复（`eflow_alarm_service._swap_table_sql`）被跨 schema 解析**绕过**，
+> `app.realtime_alarm` 每分钟仍有一个真实空窗，空窗里只有 36 列副本可见；
+> 而本任务的触发扫描原先用 `table_schema = ANY(current_schemas(false))` 取
+> **跨 schema 并集**判存在性与列，于是判成「表在、关键列不在」→ 抛错。
+>
+> **修复（2026-10-15）**：写端 `_swap_table_sql` 增加 `schema` 参数，
+> `_replace_table_atomically` / `_replace_table_via_engine` /
+> `_write_alarm_to_appdb` 的影子表清理、换名、列漂移 `ALTER`、`DELETE`、
+> 建索引全部按 `_conn_schema(conn)`（PG = `current_schema()`）限定；
+> 读端 `tt_alarm_trigger` 新增 `TRIGGER_SCHEMA`（默认 `app`，可用环境变量
+> `TT_TRIGGER_SCHEMA` 覆盖），存在性判断、列清单、扫描 SQL 都只认这一个 schema。
+> 前提是影子表与目标表同 schema —— 实测全局 engine 的会话
+> `current_schema()=app`、`search_path=app,eflow,…`，与 app 置顶连接一致，
+> 不一致时限定名会直接报 `relation does not exist`（响），不会再悄悄换掉别的
+> schema 的正式表。回归守卫：`tests/test_eflow_alarm_swap_schema.py`；
+> 复现与验证探针：`TMP/_observe_schema.py`（每 20ms 分别采样两个 schema 的
+> 存在性/关键列，跑 130s 即可覆盖两个同步周期）。
+> **附带结论**：`eflow.realtime_alarm` 这份镜像在此前一直被对方反复删除
+> （等于长期不存在），修复后它才真正稳定存在；若有消费者依赖它，
+> 需按 `ALARM_COLUMNS`（36 列、`TT ID` 风格列名）单独核对口径。
+> **两份同名告警表的口径与「写端必须限定 schema / 读端不得取并集」这条数据层规矩，
+> 权威版本记在 `03-data-layer.md`**（含为什么不能把 eflow 副本一删了之）。
+
+**消息内容 = `whatsapp-kb-bot` 的完整 TT 分析**（2026-09-29 按用户要求改）：
+
+| 段落 | 内容 |
+| --- | --- |
+| 头部 8 行 | 单号·站点｜标题 / 告警 / 告警对象 / 影响 / 级别 / 命中规则 / 判定依据 |
+| `[Milestone timeline]` | 9 个里程碑（告警发生→建单→接单→派单→填报→…），带耗时与经办人 |
+| `[Assignment basis]` | 创建/派单命中了哪条规则、路由到哪个组、命中条件 |
+| `[Timeliness]` | SLA 达成情况、目标时长、截止与剩余、故障持续时长 |
+
+> **不在本任务里自己拼这套格式**，而是子进程调
+> `Task/whatsapp-kb-bot/scripts/tt-analyze.py`（2175 行，纯标准库 + openpyxl）：
+> 那是**群里机器人回答问题时用的同一个引擎**，两份分析逻辑并存必然分叉，
+> 而「群里的分析」与「告警推送里的分析」不一致是最难排查的那类问题。
+> 封装见 `backend/services/tt_alarm_render.py`。
+>
+> **引擎读的是 SQLite 副本 `db/app.db`，不是生产的 PG**（`tt-analyze.py:57`），
+> 而该副本由 `pg_to_sqlite_sync` 刷新（2026-09-29 时是**每小时第 45 分**；生效 cron 现被库里
+> 覆盖成 `45 */12 * * *`，见上文「双库一致性」—— 滞后可长达半天，别按一小时估）—— 本任务每 5 分钟跑一次。
+> 2026-09-29 实测到最坏情况：副本落后 **84 分钟**（SQLite 最新 `alarm_occur_time` 16:17
+> vs PG 17:41；17 点这一小时 PG 有 5 单、SQLite **0 单**）。
+>
+> 后果：**副本落后期间每一条新告警都会降级成 7 行模板** —— 这不是偶发异常，
+> 而是这个任务的常态，也正是用户报「发的信息不是我想要的」的真正原因。
+>
+> 修法是渲染前用 `tt_alarm_render._snapshot_tt()` 造一份「这一单」的新鲜快照指给引擎
+> （只抄一单，开销与单量无关，实测每次 <50ms）：本地镜像已有该单时从 PG 抄；
+> **刚触发、镜像里还没有的新单直接用实时查单行造快照**（引擎读快照时按
+> `PRAGMA table_info` 与自己的列清单取交集，实时行的紧凑字段集不会让它报错）。
+> 拿不到快照时退回镜像库 —— 宁可降级，也不能因快照失败就漏发整条告警。
+> 不去改引擎本身：它是 `whatsapp-kb-bot` 的共享组件（群机器人也在用），
+> 且它依赖 `immutable=1` 打开 SQLite，改成 PG 会牵动全文。
+>
+> **降级会在任务结果里显式暴露**（`degraded` 计数 + `errors` 里逐单原因），
+> 因为降级**不报错、照样发得出去**，只是内容从 ~30 行缩成 6 行 ——
+> 没有这个字段，运维只能靠群里的人问「这次信息怎么这么少」才发现。
+> 看到 `degraded > 0`，第一件事是查快照是否失败（`[TTAlert] 取 PG 单行失败`）。
+>
+> ⚠️ **超时是踩过的坑（2026-09-29）**：引擎单独跑只要 **0.3~0.5 秒**，
+> 但与 `pytest` 全量**并发**时曾超过 60 秒被判超时（读 1.5G 的 `app.db` + 两张 xlsx，
+> 抢磁盘所致，机器有 28 核并不慢）。故默认超时放宽到 **120 秒**
+> （`TT_ALERT_ANALYZE_TIMEOUT`）—— 这个引擎的耗时**对磁盘 IO 竞争极其敏感**，
+> 正常值是秒级，一旦排队就是几十秒，余量给足远好过把完整消息降级成残篇。
+>
+> 语言由 `TT_ALERT_LANG` 控制（默认 `en`）；超时 `TT_ALERT_ANALYZE_TIMEOUT`（默认 120s）；
+> 引擎路径可用 `TT_ALERT_ANALYZE_SCRIPT` 覆盖。引擎不存在时同样降级。
+> 契约由 `tests/test_tt_alarm_render.py` 锁定，其中真实层用真实单号逐字回放，
+> 新鲜度链路（快照建/删/传参/失败退回）另有 5 条单测 + 1 条突变验证防回归。
+
+**这张单的四个口径都可在页面上配置** —— 「设置 → 任务配置 → `eFlow P1 Alarm WhatsApp Push`」
+（配置文件 `backend/services/tt_alert_whatsapp_config.json`，注册在
+`backend/services/task_configs_registry.py`，读写实现见 `backend/services/task_config_files.py`）：
+
+| 配置项 | 页面标签 | 留空 / 默认的含义 |
+| --- | --- | --- |
+| `window_minutes` | 触发窗口（分钟） | 默认 180；**2026-10-05 语义已变** —— 指 realtime_alarm 中 `alarmraisedtime` 距今 N 分钟内才触发首推（兼防首次部署把历史积压一次性全推出），不再是 eflow_tt 的 occur 窗口 |
+| `resend_minutes` | 重报间隔·有更新档（分钟） | 默认 30；自上次发送以来工单**有更新**（有人在处理）→ 距上次发送满 N 分钟才重报（较缓） |
+| `stall_minutes` | 重报间隔·无更新档（分钟） | 默认 10；自上次发送以来工单**没更新**（一直没人动）→ 距上次发送满 N 分钟即催报（较勤） |
+| `severities` | 级别 | 默认 `P1`；**留空 = 不限级别**（P1/P2/…全推） |
+| `alarm_codes` | 告警码 | 默认不含 `99933`；**这是白名单**，留空 = 不限告警码 |
+| `groups` | WhatsApp 群组 | 默认 `test123`；**留空会回退到测试群并在结果里告警**（见下） |
+| `mail_enabled` | 邮件开关 | 默认 `true`；控制首次通报/结束汇总邮件是否发送（收件人在「邮件收件人」页，不在此表） |
+
+> **两个语义容易记反，改配置前先确认**（2026-09-28 按用户要求调整为现状）：
+> 1. **告警码是「白名单」而不是「排除表」**。`99933` 之所以默认不推，只是因为它**不在**
+>    默认白名单里 —— 用户把它填进白名单就会推送。空 = 不过滤（全推），不是「全不推」。
+> 2. **群组留空回退到 `test123`，不再拒发**。回退时任务结果的 `group_fallback` 为 `true`，
+>    并在 `errors` 里带一条「正在发往测试群」的告警 —— 这是刻意的：**避免有人清空配置后
+>    生产 P1 告警静默消失**。看到这条告警说明群组没配对，请去页面补上真实群名。
+
+> ⚠️ **「空集当无条件」这个坑实际发生过**：过滤写成 `x not in SEVERITIES` 时，级别留空会让
+> 集合为空、`in` 恒为假，于是**每一单都被丢掉**（界面标签却写着「留空=不限」）。已修为
+> `if SEVERITIES and ... not in SEVERITIES`，并有变异测试守着
+> （`tests/test_tt_alarm_config.py::test_empty_severities_means_no_filter_not_drop_all`）。
+
+### 同步发邮件（2026-10-06 新增，Orange EWS）
+
+用户要求：**发 WhatsApp 的同时也发邮件**，主题英文 `P1 TT Progress Notification`。
+时序与范围由用户当面明确为两条，实现严格照此：
+
+| 时机 | 发什么 | 幂等键（日志表列） |
+| --- | --- | --- |
+| 每单**第一次**通报**确认发出后** | 完整分析（与 WhatsApp **同一份内容**，原样内嵌不重渲染） | `mail_notified_time` |
+| 该单**结束**（`alarm_clear_time` 非空） | 生命周期时间轴 + 总历时 | `mail_summary_time` |
+
+重报（20 分钟停滞再推）**不发**邮件。两列非空即「已发过」，**永不重发**。
+
+**收件人不写死在代码里** —— 走已有的「Settings → 邮件收件人」页
+（`backend/services/email_recipient_store.py` 的 `tt_alarm_p1_email` 组，
+默认 `dong.xinmin@zte.com.cn`）。该页是收件人的**唯一真相源**：页面保存值优先、
+30 秒缓存生效、无需重启。开关是任务配置页的 `mail_enabled`
+（环境变量 `TT_ALERT_MAIL_ENABLED`，默认开）。
+
+**通道是项目的 Orange 邮箱**（发件人 `ztenoc.olr@orange.com`，凭据组 `owa_mail`），
+不是 126 —— 用户 2026-10-06 明确指定。实现见 `backend/services/tt_alarm_mailer.py`。
+
+> ⚠️ **汇总不能挂在活跃告警循环上（本特性最容易做错的一点）**：告警一清除，该单就
+> 从 `realtime_alarm` **彻底消失**（2026-10-06 实测：4 个已清除单在实时表里 **0 命中**，
+> 而 `eflow_tt` 里 4/4 都在）。所以主循环里那个 `if cleared:` 分支**几乎永不命中** ——
+> 汇总若挂在那里，**一封都发不出去**。故汇总走**独立的日志表扫描**
+> （`store.pending_summary_mail()` 选「发过通报 + 未发汇总」的候选，再回 `eflow_tt`
+> 查 `alarm_clear_time`），与告警是否还活跃无关。三条早退路径
+> （无候选 / 无 due / 投递失败）**都必须调用** `run_summary_mail_scan()`
+> —— 「本轮没有新告警」恰恰是最常发生的情况，而「某单该发汇总了」与之无关。
+
+> ⚠️ **幂等列不能被 upsert 抹掉**：日志表 upsert 是**整行覆盖**，一旦
+> `mail_summary_time` 被写成 NULL，同一单的汇总会被**反复重发**（清除是持久事实，
+> 不会自己消失）。`store.base_record` 原样保留这两列，且 `record_result` 在调用方
+> 未传 `existing` 时会主动回查一次兜底。`tests/test_tt_alarm_mail.py` 有两条
+> 突变验证守着（故意破坏即失败）。
+
+**邮件失败绝不影响推送**：`tt_alarm_mailer.send_mail()` 只返回 bool、不抛异常，
+失败只记进任务结果的 `warnings` 与 `mail_notified_failed` / `mail_summary_failed`
+计数 —— 邮件是 WhatsApp 之外的附加通道，它挂掉不能让告警推送"失败"。
+
+> **两个实测坑（写进 `tt_alarm_mailer.py` 模块 docstring，勿重犯）**：
+> ① `EXCHANGE_2016` 是 `Build` 不是 `Version`，必须包
+> `Version(build=EXCHANGE_2016, api_version="Exchange2016")`，否则 `InvalidTypeError`；
+> ② 内网 EWS 自签证书，必须设 `Protocol.HTTP_ADAPTER_CLS = NoVerifyHTTPAdapter`，
+> 否则 `SSLCertVerificationError: unable to get local issuer certificate`。
+> 另：`liberia_email_report.py` 里「后端未装 exchangelib、须用托管 venv 子进程」的
+> 注释**已过时** —— 实测后端 Python 3.12 自带 exchangelib 5.6.0，本通道**进程内直发**。
+
+> 🔴 **测试误发真信事故（2026-10-06，本特性引入，已修）** —— 加外部副作用时必读。
+>
+> **现象**：用户收到十几封 `P1 TT Progress Notification`，正文是
+> `TT No: TT1 / Site: s / Alarm: 9920`，即**测试夹具值**而非真实单号。
+>
+> **根因**：本特性给 `run_tt_alarm_whatsapp_alert()` 加了"发信"这个**外部副作用**。
+> 而 `tests/test_tt_alarm_render.py` 里两条**早就存在**的用例
+> （`test_task_result_surfaces_degradation`、`test_task_result_reports_due_count`）
+> 会调用这个真实函数，它们只桩了 `dispatch` / `wait_for_job_result` /
+> `render_message_ex` —— 因为**当时还没有邮件这回事**。于是每跑一次全量回归
+> 就真发 2 封，我反复跑了几轮回归，累计十几封。
+> 实测证伪：关掉下面的防线后单跑那条用例，`real_send_attempts = 2`。
+>
+> **这不是"某条用例忘了桩"**，而是**给被测试直接调用的函数新增了外部副作用** ——
+> 指望每个写测试的人记得桩新通道，是治标的。故按纵深防御在**入口统一封死**：
+>
+> | 层 | 位置 | 作用 |
+> | --- | --- | --- |
+> | 主防线 | `tests/conftest.py` 的 `_block_real_email`（autouse fixture） | 把 `send_mail` 换成"记录但不发"的替身，返回记录列表供断言 |
+> | 兜底 | `tt_alarm_mailer.send_mail()` 函数体内 | `"pytest" in sys.modules` 时拒发 |
+>
+> ⚠️ **兜底闸门必须放在收件人解析之后**。放到函数开头会把「空收件人不发」这条
+> 校验也一起短路掉，于是测它的用例即使断言写错也会恒返回 False 而"通过" ——
+> **假绿比不过更危险**（这个坑在本次修复过程中真的踩到了，5 条用例先"通过"后暴露）。
+> 需要测闸门之后的真实异常逻辑时，用 `tests/test_tt_alarm_mail.py` 的
+> `fresh_mailer` fixture（从磁盘再加载一份未打补丁的同源副本，
+> 并把 `_get_account` 换成地雷，因此仍然不碰网络）。
+>
+> **验证真实发信能力请手工跑探针**（`_agents/rules/shell_safe.md` 的一次性探针约定），
+> 不要在 pytest 里放开。回归锁见 `tests/test_tt_alarm_mail.py::TestNoRealMailFromTests`。
+
+**级别过滤口径**：以**实时查单行**的 `ticket_severity` 为准（镜像兜底）；留空语义见
+`tt_alarm_config.py`（级别/告警码留空 = 不过滤）。在跟单的级别若被 eFlow 改掉
+（P1→P2），同样停止推送。配置优先级为**环境变量 > 配置文件 > 内置默认**，且在
+**模块导入期**解析一次 —— 故页面保存后由 `PUT /api/task-configs/{task_id}` 触发
+worker 分组重启才生效（`backend/routers/task_configs.py`）。
+
+**重报语义（2026-10-08 起双档，判定函数 `decide_push()`）**：
+
+1. **首推** —— 单子首次触发（日志表无记录）**立即推**；
+2. **重报**（按「自上次发送以来工单有没有更新」分两档，消息头带
+   `⚠️ REMINDER #N · open Xh Ym · no update for Zm` 横幅，N = 该单第几次发送）：
+   * **无更新**档 —— 距上次成功发送满 `stall_minutes`（默认 **10**）→ 催报
+     （一直没人动，勤提醒）；
+   * **有更新**档 —— 距上次成功发送满 `resend_minutes`（默认 **30**）→ 重报
+     （有人在处理，缓报别打扰）；
+3. **不报** —— 未满所在档间隔（冷却中）只刷新跟踪字段；告警清除
+   （`alarm_clear_time` 非空，或告警从 realtime_alarm 消失）自然止损；
+   更新时间完全不可知时按**无更新档**（较短）节流，**绝不静默停推**。
+
+> 两档差的是**间隔长短**，不是「有更新就不报」：有更新仍旧重报，只是缓到 30 分钟。
+> 检测（从 eFlow 实时查单）恒为每 5 分钟一轮，与重报窗口无关。
+
+三个**实测**坑，改这个任务前务必知道（都有单测守着，见
+`tests/test_tt_alarm_whatsapp_service.py`）：
+
+| 坑 | 现象 | 正确做法 |
+| --- | --- | --- |
+| `alarm_code` 形态不一 | 库里 `'99933'`（2159 行）与 `'99933.0'`（16599 行）**并存** | 匹配**必须**在 Python 侧走 `norm_alarm_code()` 归一化后判等；写进 SQL 的 `<> '99933'` 会漏掉 `.0` 那批，`CAST(... AS INTEGER)` 又会在文本告警码上抛错（库里有 `'Ethernet Physical (ETPI)…'` 这类值） |
+| `down_site_count` 的 `'0'` 是有效值 | 全表 27254 行为 `'0'`；`site_outage` 是 `'Yes'/'No'` 文本 | 只在 `> 0` 时输出 `N site(s) down`；只有 `site_outage='Yes'` 才算断站。旧写法把 `'0'` 当假值、把 `'No'` 当断站，两条都错 |
+| 历史单的告警对象字段为空 | `sub_alarm_*` 在近 30 天单上填充率 >95%，但在**未清除的老单上 100% 为空** | 回退链：`sub_alarm_ne_name → ne_name`、`sub_alarm_name → specific_problem → alarm_description` |
+
+> ⚠️ **「每轮 0 条」是正常结果，不是故障**：触发窗口内「带 TT + P1 + 白名单告警码」
+> 的实时告警本来就少（告警升起 → eFlow 建 TT 有时差，power-off 类 99933 告警默认不推），
+> 每轮候选为 0 是常态。要扩大推送面，在**页面上**把级别改成 `P1,P2`、放宽触发窗口
+> 或把 `99933` 填进告警码白名单即可，**不需要改代码**。
+
+> **发送通道（2026-10-01 起为 Baileys 推送进程，不再依赖浏览器）**：后端把文本作业
+> 写进 `whatsapp-kb-bot/data/notify_job.json`，常驻的 `src/notify.js`（Baileys，
+> WhatsApp WebSocket 协议，凭据独立于问答 bot）轮询消费，`sendMessage()` 返回的
+> **服务端 message id** 就是发送回执。切换理由与两通道对比见
+> `backend/services/wa_notify_service.py` 的模块 docstring；通道在线检查、投递前
+> 心跳预检也都在该模块。
+> 无论何时，**只有推送进程回报的 `sent` 列表里的 `tt_no` 才会被置 `'Y'`** —— 超时或
+> 未确认一律写 `'N'` + `last_error`，**绝不写假 `'Y'`**；一条都没确认发出的轮次会
+> 通过 `warnings` 走微信/邮件主动喊人（2026-10-01「群内静默数小时」事故的治本项）。
+>
+> 群组在页面上配置，留空回退测试群 `test123` 并显式告警（见上文）。
+>
+> `GET /api/whatsapp/tt-alert/log` 可核对发送状态；`GET/POST
+> /api/whatsapp/tt-alert/job[/result]` 是旧扩展通道的**自测端点**（P1 文本作业
+> 2026-10-01 起已不走扩展）。
+
+**模块拆分**（单文件 500 行上限，故按职责拆开；改哪块去哪个文件）：
+
+| 文件 | 职责 |
+| --- | --- |
+| `backend/services/tt_alarm_whatsapp_service.py` | 编排与**发送决策** `decide_push()`（任务入口 `run_tt_alarm_whatsapp_alert`） |
+| `backend/services/tt_alarm_trigger.py` | **触发扫描**：realtime_alarm 里带 TT 的白名单告警 + 表新鲜度检查 |
+| `backend/services/tt_alarm_sources.py` | **单据来源层**：实时查单 / 本地镜像兜底 / 三层合并 |
+| `backend/services/tt_alarm_config.py` | 配置读取、归一化、「留空」语义 |
+| `backend/services/tt_alarm_message.py` | 消息渲染（纯函数，**降级模板**：头部 7 行 + 重报横幅） |
+| `backend/services/tt_alarm_render.py` | **主渲染路径**：子进程调 kb-bot 分析引擎出完整消息 |
+| `backend/services/tt_alarm_store.py` | 日志表建表、幂等补列（含邮件幂等列）与读写 |
+| `backend/services/tt_alarm_mailer.py` | **邮件发送通道**（Orange EWS，进程内直发，失败不抛异常） |
+| `backend/services/tt_alarm_mail_body.py` | 邮件正文构造（首次通报 / 结束汇总，纯函数） |
+| `backend/services/wa_notify_service.py` | **Baileys 发送通道**（投递/回报/心跳/通道预检） |
+| `backend/services/eflow_data_mapper.py` | 实时查单实现（`fetch_tt_live_batch`，base/list 分页遍历） |
+
+## 任务凭据分组对应表
+
+任务失败若报"鉴权失败 / 登录失败 / 未获取到 Cookie"，先到**「设置 → 凭据管理」**
+核对下表中对应分组的账号密码（改完最迟 30 秒生效，无需重启）。
+
+| 任务 | 凭据分组 key | 上游系统 |
+| --- | --- | --- |
+| `ran_ume_daily`、`main_kpi_sync`、`network_kpi_sync`、`ms_sla_sync`、`cells_kpi_sync` | `zte_ume` | RAN UME 网管 |
+| `battery_kpi_sync`、`battery_email` | **`battery_ume`** | Battery UME 电池网管 |
+| `cm_data_sync` | **`cm_data`** | RAN UME 网管（CM 取数） |
+| `ipran_kpi_sync` | `ipran_ume` | iPRAN UME 网管 |
+| `ccn_kpi`、`ccn_free_rating_chart_email` | `ccn_ume` | CCN UME 网管 |
+| `eflow_sync`、`site_outage_screenshot` 等 eFlow 系 | `eflow` | eFlow 告警系统 |
+| `fw_kpi_sync` | `fw_kpi` | FW UMC |
+| `mw_ume_kpi_sync`、`mw_ume_kpi_sync_rt` | `mw_ume` | MW UME 微波网管 |
+| `ume_in_kpi_sync`、`ume_in_osg_report` | `ume_in` | UME em-portal |
+| `vmax_multi_data_sync`、`cxo_dashboard_cache_sync`、`vmax_cxo_daily_sync` | `vmax_cxo` | VMAX CXO 门户 |
+| `olib_soc_vmax_report` | `vmax_gbase` | VMAX 数仓 GBase 8a |
+| `gp_ran_user_sync` | **`gp_ran_control`**（`gp_ran_master` 留空即复用同一口令） | RAN Greenplum 的 control1 跳板机 SSH（ubuntu） |
+| `sp_data_sync`、`sp_report_generate` 等备件系 | `sftp_sp` | SFTP 备件服务器 |
+| `liberia_email_*`、`kpi_*` 等邮件类 | `mail_126` / `owa_mail` | 126 邮箱 / Exchange OWA |
+
+> ⚠️ **`battery_ume` 与 `zte_ume` 不是同一台设备**（Battery UME 是 `192.168.170.2:443`，
+> RAN UME 是 `10.100.28.27:28001`），账号**不通用**，不要拿 RAN UME 的账号去配 Battery UME。
+> 该 UME **未进「一键门户登录」的 direct 反代**，若启用图形验证码需人工登录一次（见下）。
+
+### Battery UME 鉴权失败排查
+
+任务报 `Battery UME 鉴权失败：RSA 登录未成功且无可用 auth_info.json` 时，按序检查：
+
+1. **凭据**：「设置 → 凭据管理 → Battery UME」点"测试连接"，失败则更新账号密码；
+2. **图形验证码**：该 UME 若启用了验证码，RSA 纯接口登录必然失败 ——
+   到「门户登录」页选 **Battery UME** 人工登录一次；
+3. **回退文件**：`backend/services/battary_kpi_fetch/auth_info.json` 由
+   `ensure_auth_info()` 用上述凭据调 RSA 接口自动生成（原生成脚本
+   `battary_kpi_login.py` 与 playwright 依赖均已不在仓库，故内置此兜底）；
+   超过 8 小时视为过期会被忽略并重新生成；
+4. **环境变量覆盖**：若设了 `BATT_USERNAME`/`BATT_PASSWORD`，它们**优先于**页面配置，
+   页面改了不生效时先查这里。
+
+## 超时、僵尸与自动重试
+
+| 机制 | 参数 | 出处 |
+| --- | --- | --- |
+| **没有** per-task 超时 | — | 调度器不主动杀长任务，这是设计缺口 |
+| 僵尸 running 回收 | `STALE_RUNNING_SECONDS = 30min`，并用 PID 存活核对，每 300s 扫一次 | `worker.py:78,82,302` |
+| 陈旧 pending 过期 | `STALE_PENDING_SECONDS = 6h`（漏分组/无 worker 认领时不再永久占住单飞名额），每 300s 扫一次 | `worker.py:_expire_orphan_pending` |
+| 失败自动重试 | `AUTO_RETRY_ENABLED=1`、`MAX_ATTEMPTS=2`、`COOLDOWN_MIN=15`、`SCAN_WINDOW_HOURS=24`、`MAX_PER_RUN=3` | `services/auto_retry.py:75-82` |
+| 漏跑补投 | `MISS_GRACE_MIN=15`、`MISS_MIN_INTERVAL_MIN=30`（时效窗口内完全没有执行记录才补投） | 同上 |
+| 邮件类不参与补投 | 由 EWS 恢复补发机制 `email_recovery` 负责，默认排除 | `task_registry.py:320` |
+| 失败通知 | 微信 + 邮件双通道；**2026-11-07 起加延迟语义（C）**：能被 auto_retry 重投的任务，自上次成功以来的连续失败次数 < `FAILURE_ALERT_DEFER_STREAK`（默认 2）时只记日志不发通知（等 5 分钟重投自愈），达阈值 / 不可重投任务 / 失败记录落库异常才立即告警；开关 `FAILURE_ALERT_DEFER=0` 恢复旧「失败即告警」。取证：`outputs/cnn_kpi_sync_5mins_失败复盘_2026-11-07.md`（远端 watchdog 强杀窗口内 auto_retry 均自愈成功，旧逻辑却每天发 1~3 封失败告警） | `task_runner.py`（`_should_defer_failure_alert` / `_consecutive_failures`） |
+| 漏跑/停摆通知 | 每小时巡检后按 `kind:task_id` 翻转去重推送（24h 重提） | `services/task_health_alert.py` |
+| 保留期 | 队列与执行日志保留 **7 天**（`TASK_LOG_RETENTION_DAYS` 可调，默认 7；2026-09-11 由 3 天放宽） | `task_runner.py:880-893`、`worker.py:479-484` |
+| 低频任务「最近运行」兜底 | 月/周级任务的执行记录会被上面 7 天保留期清掉，任务列表因而显示 **No Record / 未记录**（`sync.statUnknown`）。修法：在 `TASK_SPECS` 给该任务加 `recent_runs_provider=(模块路径, 函数名)`，`task_stats._fetch_latest_runs()` 在**日志表无该任务记录时**才调用提供者，从任务自己的产物库补回最近几次运行（唯一主源仍是 `task_execution_log`）。参考 `olib_soc_vmax_report` → `olib_soc_report_service.recent_runs_for_task` | `services/task_stats.py`（`register_recent_runs_provider`）、`task_registry.py`（`register_all_tasks`）、`backend/services/olib_soc_report/README.md` §12 |
+
+重试的判定不是"失败就重跑"，而是**先看数据缺口是否已被后续成功执行补上**；超过 24h 硬上限直接放弃（`task_registry.py:320`）。
+
+## 看门狗与自愈
+
+- `backend_watchdog.py`：托管 uvicorn，端口探活，启动宽限 `STARTUP_GRACE=60s`，崩溃退避 `min(30, 2^n)`，**连崩 10 次降级为 `SLOW_RETRY_INTERVAL=300s` 慢速重试、不再退出**（`:52-57`、`_enter_slow_retry()` `:212-240`；2026-10-06 改，原为"连崩 10 次永久退出"，事故经过见 `13-operations.md` 的「后端静默停摆」）。
+- `worker_watchdog.py`：同参数托管 **10 组** worker（u/n/s/w/v/m/c/x/g/p）。子进程存活 <`CRASH_THRESHOLD=10s` 视为异常崩溃。⚠ **连崩 10 次仍是"摘除不再拉起"**（`:560-562`），与 backend 的降级语义不同。
+- 心跳：`log/heartbeat_*.json`，15s 一次。启动脚本判定"心跳超过 3 分钟未更新即 hung"并强杀重拉（`start_hidden.ps1:63,154-158`）。
+
+## 加一个任务的最小步骤
+
+1. `backend/task_registry.py` 的 `TASK_SPECS` 追加一条 `dict(task_id, name, name_en, description, description_en, loader|func, default_cron, category)`；
+2. **`worker_watchdog.py` 的 `GROUP_TASK_MAP` 选定归属组**（漏了就会 pending 卡死；新建组则两处同步，见上方分组章）；
+3. 业务函数放 `backend/services/`，抛异常即算失败，不要自己吞异常；
+4. 重启后端（`stop.bat` → `start.bat`）让注册表重载；只改分组清单无需重启后端，`python restart_workers.py --mode watchdog --force`（**需管理员权限**，否则 watchdog 进程杀不掉而静默失败，旧组清单会一直在内存里生效）；
+5. 在任务管理页手动"执行"一次验证链路，再更新本页任务清单表格与前端帮助（`frontend/src/pages/helpTaskDocs.ts`，改完跑 `npm run docs`）。
+
+### `eflow_fiber_assign` 的口径与上线步骤（2026-10-26 首版）
+
+**做什么**：Fiber Break（默认告警码 **4758**，页面可配）自动派 TT + WhatsApp 通报。
+
+**判定链**（全部满足才派单）：
+1. 告警码命中白名单；
+2. 告警**存续时长满 15 分钟**（`min_age_minutes`，页面可配）—— 业务口径「告警发生到选择超过 15 分钟，才要指派单子和发送 WhatsApp 消息」，**不是一升起就派**。留这段时间给短时闪断自然清除，避免建出无效 TT。配 `0` = 恢复「一升起就派」；
+3. `alarmraisedtime` 在触发窗口内（`window_minutes`，默认 180 分钟，防上线瞬间把积压的历史告警一次性派出去）—— 这是**上界**，与第 2 条的**下界**独立生效：存续时长必须落在 `[min_age_minutes, window_minutes]` 区间内；
+4. **同站点在同时间窗口内没有关联告警**（默认 `99933`、窗口 60 分钟）—— 站点已因 99933 派过单就不重复派；
+5. 告警**上游没有 TT**：eFlow 自己的 `assign_rule` 会给部分 fiber 告警先建 TT，这类告警
+   `ttid` 已非空，必须直接跳过（否则会建出重复单，2026-10-26 生产自查发现：Zardun 两条
+   告警都有 `TT202610260083` / `TT202610270031`，而本地状态表是空的）；
+6. 状态表里没有 `Y` 记录。**`D`（演练）只在 `dry_run=true` 时算「已处理」** —— 一旦关掉
+   演练，演练期扫过的告警必须重新走完整流程真派单，否则会被永久跳过（同一次自查发现）。
+7. **eFlow 侧 `ttstatus` 不是阻断条件**（2026-10-27 按业务要求由「非 0 一律跳过」改为
+   「照派 + 收缩预算 + 失败通报」）：非 `0` 也照样尝试派单，只是把本轮的尝试/回查预算
+   收窄，失败后记 `N` 并通报人工。
+
+   | ttstatus | 含义 | 处理 |
+   | --- | --- | --- |
+   | `0` | UnAssigned | 正常派单：最多 3 次尝试 × 3 次回查（`FIBER_ASSIGN_MAX_ATTEMPTS`） |
+   | `1` | Assigned | 已派（此时 `ttid` 已有，第 5 条已先跳过） |
+   | `2` / `4` / `5` / `6` | 其它状态 | **仍尝试派单**：1 次尝试 × 2 次回查；失败记 `N`、通报人工 |
+
+   **为什么曾经挡、后来放开**（2026-10-27）：切生产首轮发现 `ttstatus=2` 的告警（全库
+   6669 条里只有 5 条：1 条 fiber + 4 条环境温度 761761）派单接口**每次都回
+   `200 manual assign succeed.`，但 `ttid` 永远为空、`ttstatus` 不变** —— 共同特征是
+   `site` 是 ME 名、`sitename` 为 `--`/None，即 **ME 未在 eFlow 侧关联站点**（站点 ID/名
+   都对，**不是 payload 问题**）。当时为不白烧 70 秒/轮、不误发失败通知而加了「非 0 一律
+   跳过」。业务随后明确要求 **不能被 eFlow 侧的 ME 绑定问题挡住** —— 该试还得试，于是改为：
+   `ttstatus` 异常时用最小预算（1 次尝试 × 2 次回查，约 15s）照派；失败记 `N`（`last_error`
+   写明 `ttstatus`），并在群里发一条「需人工在 eFlow 处理」（同一条只发一次，`send_status`
+   抑制）。ME 绑定修好后下一轮自动派单成功 —— 任务不需要人再去改配置。
+
+   结果字段：`suspect_ttstatus`（本轮 `ttstatus` 异常的条数）、`suspect_ttstatus_samples`。
+
+**关联判定的站点键：为什么是「集合」而不是「一个字段」**（2026-10-27 生产实测，原实现会静默漏判）：
+两类告警的站点字段形态**不同，且同一类也不稳定**：
+
+| 字段 | 4758（Fiber） | 99933（小区退服） |
+| --- | --- | --- |
+| `site` | 有时数字（`4030`）、有时 ME 名（`6120HS_..._UPE80`） | 数字站号（`4523`） |
+| `sitename` | 有时真名（`Old Road`）、有时 `--` | 站点名（`Tokpah Camp`） |
+| `mename` | ME 名，或 **UUID**（`6784c258-...`） | 站点名 |
+
+原实现「优先 `site_id` → 再 `site_name` → 最后 `mename`」只认**数据库列名**，对原始 API 行
+（`site` / `sitename`）取不到值，最后落到 `mename` 的 UUID —— 4758 的键成了 UUID、99933 的键
+是站点名，**永远不相交，「同站已有 99933 就不派单」会静默失效、导致重复派单**。
+现改为 `_alarm_site_keys()` 收集全部站点标识（`id:<数字站号>` / `name:<站名小写>`），
+**任一相交即同站**。实测收益：`Tailing Storage Facility`（站号 4847）的 4758 与 8.1 分钟后的
+99933 正确命中（旧写法漏判）。回归测试见 `tests/test_fiber_assign.py::test_correlation_matches_raw_api_field_shapes`。
+（`mename` 是 UUID 时不再当站点名收键，只保留数字站号键。）
+
+**关联判定的三态：匹配不到就当作「没有」，继续派单**（2026-10-27 按业务要求明确化）：
+
+| 结论 | 触发条件 | 动作 |
+| --- | --- | --- |
+| `hit` | 站点键相交 + 升起时间差 ≤ 关联窗口 | 跳过派单（记 `S`） |
+| `none` | 有数字站号、确实查过没有 | 继续派单 |
+| `undetermined` | **站点名写法对不上**（fiber 只有 ME 推导的站名、无数字站号），或任一侧站点信息缺失 | **继续派单**，并写 `warnings` / `correlation_undetermined_samples` 留痕 |
+
+为什么不因 `undetermined` 卡住：fiber 的站名来自 ME 名（`<机型>_<站点名>_UPE<nn>`），
+与 99933 的 cmdb 站名可能写法不同（实测 `Peter_luogan_town` vs `Peter Luogon Town`）——
+强求对得上会**长期漏派**，而漏派无人知道比重复派单更难发现。故按「匹配不到即没有」处理，
+每轮结果里的 `correlation_undetermined` 计数与明细可事后复核是否出现重复派单。
+
+**为什么必须先解析数字站号（实测教训，最容易踩的坑）**：
+Fiber（TRM/IPRAN）告警的 `site` 字段是**ME 名**（如 `6120HA_zardun_UPE128`）、
+`sitename` 恒为 `--`。直接把 ME 名放进派单 payload，接口**返回 `status:true` 但 TT 不生成**
+（`ttid` 仍为空、`ttstatus` 停在 2）。必须解析出**数字站点 ID + 站点名**再派单，
+TT 才会真正建出（实测 `site=3462` + `sitename=Zardun` → `ttid=TT202610260089`）。
+
+解析优先级（`eflow_assign_client.resolve_site`）：
+1. 告警自带站号是纯数字 + 有站点名 → 直接用（生产 `realtime_alarm.site_id` 多数已带）；
+2. 有站点名 → 查 cmdb Site 拿数字 `_id`；
+3. 从 ME 名解析站点名（`<机型>_<站点名>_UPE<nn>` 取中间段）再查 cmdb。
+**解析不出站点则跳过该告警**（不派没有站点的单），并在 `last_error` 里写明原因；
+**同时在 WhatsApp 群里发一条「需人工在 eFlow 处理」通报**（2026-10-27 起），
+同一条告警只发一次（状态表 `send_status=Y` 抑制，避免每 5 分钟刷屏）。
+`Tokadeh` 就是这类：cmdb 830 个站点里连 0.75 相似度的候选都没有，属站点数据缺失。
+
+**站点名近似匹配（cmdb 命名与网管不一致时的兜底，2026-10-27 上线）**：
+生产实测 `6120HS_Peter_luogan_town_UPE80` 推出站名 `Peter luogan town`，而 cmdb 写作
+`Peter Luogon Town`（`luogan` / `luogon` 差一字母）→ 精确查不到、每轮记 `N`、永远派不出去。
+故在精确匹配之后加了两档（都在 `SiteIndex.lookup` 里，`matched_by` 字段标明命中方式）：
+
+| 档 | 条件 | 是否算「近似」告警 |
+| --- | --- | --- |
+| `exact` | 大小写不敏感完全相同 | 否 |
+| `normalized` | 归一化（去空格/下划线/连字符）后相同 | 否 |
+| `fuzzy` | **等长且差异位全是元音互换** + 相似度 ≥ 阈值(0.9) + 唯一领先 | **是**，写 `warnings` 并在 WhatsApp 通报里附提示 |
+
+⚠ **为什么不直接用「相似度 ≥ 0.9」**（扫生产 cmdb 830 个站点得出的硬结论）：
+这些是 Liberia 网络上**互不相同**的站点，相似度却不低于目标案例（0.9333）——
+
+| 站点 A | 站点 B | 相似度 |
+| --- | --- | --- |
+| `Garplay` | `Gbarplay` | 0.9333 |
+| `Banwea` | `Gbanwea` | 0.9231 |
+| `Butuo` | `Buutuo` | 0.9091 |
+| `Sanniquillie 5` | `Sanniquillie 1` | 0.9231 |
+| `Buchanan 3 AML` | `Buchanan AML` | 0.9565 |
+| `18th Street` | `16th Street` | 0.9000 |
+
+即「插入/删除一个字母」与「两个不同站点」在分数上完全无法区分，纯分数兜底必然错派。
+加上「等长 + 仅元音互换」这条硬约束后，830 个站点里**误判 0 对**，同时仍覆盖目标案例。
+另有两道保护：**分期站点**（`X` / `X2` / `X3`，生产 cmdb 里 66 对近似名绝大多数是这类）
+一律拒绝；**最优候选取不到唯一领先**（歧义）时放弃。
+
+**代价（已知且有意）**：漏字母/多字母/辅音打错的拼写差异**不再兜底**，会如实记
+「站点解析失败」等人工处理。**宁可漏派，不可错派** —— 错派到隔壁站比不派更难收拾。
+命中的近似匹配会在结果 `warnings` 与状态表 `skip_reason` 里留痕，便于逐个核对 cmdb 命名。
+
+配置项：`site_fuzzy_enabled`（默认开）、`site_fuzzy_threshold`（默认 0.9，钳在 0.5~1.0），
+均在「任务配置」页可改；关掉即回到「必须完全一致（含分隔符归一化）」才派单。
+
+**Fiber 派单"时灵时不灵"**（2026-10-26 实测）：同一告警、同一 payload，有时建出 TT、
+有时接口回 success 却不建。故实现是「派单 → 回查 `ttid` → 没建出就重试」，
+单轮最多 3 次（`FIBER_ASSIGN_MAX_ATTEMPTS`），**只有回查到 TT 编号才记 `Y` 并通报**。
+未建出的记 `N`，下一轮会再次尝试（因为状态不是 `Y`）。
+
+**TT 标题**：由 eFlow 自动生成，格式 `<站号>.[<站点名>]<告警名>`（如 ` 3462.[Zardun]Fiber/Link Break`）。
+派单接口**不接受自定义标题**，故 `SITE ID_Site name_Alarm Code` 的格式只在 WhatsApp 通报里呈现。
+
+**⚠ 通报正文一律英文**（2026-10-27 如意要求）：群里是一线英文环境（`lbr_assistant`），
+故通报的字段标签、警示语、失败原因全为英文；中文只允许留在状态表 `last_error`、
+结果里的 `warnings` 与日志里（内部排障用）。成功通报模板：
+
+```text
+Fiber Break Alarm TT Assign Notification
+
+TT Title : 3462_Zardun_4758
+Site ID  : 3462
+Site Name: Zardun
+Alarm    : 4758 Fiber/Link Break
+Occurred : 2026-10-27 11:38:12
+ME       : 6120HA_zardun_UPE128
+TT No.   : TT202610270046
+Assigned : ZTE_NOC_FO
+```
+
+需人工处理的通报共用同一标题，首行换成
+`⚠ Auto assign failed — manual action required in eFlow`，并带 `Reason` 行与英文 `Note:` 说明段
+（站点解析失败 → 补 cmdb 站点；`ttstatus` 异常 → 先把 ME 绑定到数字站点）。
+站点名近似匹配、99933 关联无法判定时，末尾附 `⚠` 英文提示行，便于事后核查命名/派单依据。
+
+#### 同一次光纤中断只派一个 TT（合并派单，2026-10-27）
+
+**问题**：一条光缆断掉会让链路上多个站点**同时**告警。2026-10-27 14:21 一次故障在
+**9 秒内**产生 5 条 4758 告警（R.I.A×3 + Tower Hill + HQ_Site），按原逻辑建出 5 个 TT
+（`TT202610270066`~`070`），现场反馈却是同一个故障。
+
+**做法**：升起时间落在 `group_window_minutes`（默认 **10 分钟**）内的 fiber 告警
+**合并成一个 TT**，以组内升起最早的那条为**组长**（最可能是根因站点）建单；
+同组其余告警登记同一个 `tt_no`、不再单独建单，结果里计 `merged`。
+通报正文列出本单实际涵盖的站点：
+
+```text
+This TT covers 3 sites from the same fiber cut:
+  - 4017/R.I.A  (TT created on this site)
+  - HQ_Site/HQ_Site
+  - 4016/Tower Hill
+```
+
+**⚠ 为什么用时间窗而不是拓扑**：实测项目现有数据**判不出**「同一条光纤」——
+`probeid` 全库同一个 UUID（无区分度）、告警的 `impact_site_list` / `link_path` 全空、
+`flm_database.fdn` 被 **96 个站点共用**（太粗，会把大半个蒙罗维亚合成一单）、
+`victim_topology` 里 R.I.A 与 Tower Hill 互不包含且各是独立网关、
+eFlow 的 `relatedAlarms` 对这 5 条返回 **0 条**（eFlow 自己也没把它们关联）。
+时间聚集是唯一立即可用的强信号。
+
+**分组规则**（`group_by_occurrence`）：按升起时间升序，与组内**第一条**的差 ≤ 窗口则并入。
+刻意不用「与上一条比」的链式比较 —— 那会让 A→B(9min)→C(9min) 三条形变 18 分钟却同组，
+窗口形同虚设。取不到升起时间的告警**不参与合并**（无法判断时序时宁可多派一单，
+也不把来路不明的告警并进别人的 TT）。
+
+**风险与回滚**：窗口越大越省单，但**不同地点恰好同时断纤会被误合并**
+（正文会列出站点名，人工能看出来）。`group_window_minutes` 配 **0** 即关闭合并，
+恢复「每条告警各派一单」的旧行为 —— 这是最快的回滚开关，不需要改代码。
+
+**状态表** `eflow_fiber_assign_log`：`assign_status`（`Y` 成功 / `N` 失败 / `S` 跳过 / `D` 演练）、
+`tt_no`、`skip_reason`、`send_status`（WhatsApp 是否确认送达）。
+`Y` 有三种来源，用 `skip_reason` 区分：真正由本任务派出的单（空）、
+**上游已有 TT** 的单（`上游已存在 TT（eFlow 规则已派单），不重复派`）、
+以及**合并到组长**的单（`同一次光纤中断，已合并到组长告警 … 的 TT（本组共 N 条告警）`）。
+`D` 是演练记录，关掉 `dry_run` 后会被重新处理。
+
+**⚠ 上线顺序（默认演练，必须按此走）**：
+1. 部署后任务默认 `dry_run=true`：只查告警、匹配、写状态表（`D`），**不派单、不发消息**；
+2. 在任务管理页手动执行 1~2 轮，看结果里的 `due` / `samples`（含解析出的站点 ID/名）是否符合预期，
+   并核对 `eflow_fiber_assign_log` 的 `site_id` / `site_name`；
+3. 到 **Settings → 任务配置 → Fiber Break 告警自动派单** 核对 `groups`
+   （2026-10-27 已配成 `lbr_assistant`）；
+4. 仍保持 `dry_run=true` 跑一段，确认没有误判（尤其关联 99933 的跳过是否合理）；
+5. 确认无误后，把 `dry_run` 关掉 → 下一轮开始真派单；此时先用 `window_minutes` 小值（如 30）
+   观察首批，稳定后再放到 180；
+6. 若出现异常，**先开回 `dry_run`** 止血（这是最快的回滚开关，不需要改代码/重启）。
+
+> 演练期留下的 `D` 记录在关掉 `dry_run` 后会被自动重新处理，**但跑过 30 天窗口的探针会留下
+> 一批 `D` 行让演练结果看着"跳过变多"**。上线前清一次即可：
+> `DELETE FROM eflow_fiber_assign_log WHERE assign_status='D'`。
+
+**配置项**（Settings → 任务配置，文件 `backend/services/eflow_fiber_config.json`）：
+`alarm_codes`（告警码，留空回退 4758）、`correlation_codes`（关联码，默认 99933）、
+`correlation_window_minutes`、`window_minutes`、`min_age_minutes`（**派单等待时长**，
+默认 15，业务口径「超过 15 分钟才派单」；配 0 = 立即派）、`assign_group`
+（默认 `ZTE_NOC_FO`）、`dry_run`、`groups`、
+`group_window_minutes`（**合并派单时间窗**，默认 10；配 0 = 关闭合并）。
+改完保存会自动重启各 worker 组使配置生效。
+
+**排障速查**：
+- `due=0` 但确实有新 fiber 告警 → 先看 `waiting`（还在等派单时机，存续时长未满 `min_age_minutes`，正常等下一轮）与 `expired`（超过 `window_minutes` 已过期）；
+  再看告警是否被关联 99933 跳过（看 `skip_reason`）；
+- `skipped` 里出现 `skip_existing_tt` → 该告警上游已有 TT（eFlow 规则先派了），属正常，不会重复建单；
+- `failed>0` 且 `last_error` 是「接口回执成功但未回查到 TT」→ 上文的时灵时不灵，下一轮会重试；
+- `suspect_ttstatus>0` → 这些告警在 eFlow 侧 `ttstatus` 非 0（ME 未关联站点）。
+  **任务已照派**（不阻断），只是用最小预算；派不出时记 `N` 并在群里通报一次「需人工在
+  eFlow 处理」。明细见 `suspect_ttstatus_samples`。在 eFlow 页面确认 ME→站点绑定
+  （`site` 应显示数字站号、`sitename` 应有值），绑定修好后下一轮自动派单成功，
+  不需要改配置。**已知案例（2026-10-27）**：`6120HS_Peter_luogan_town_UPE80`
+  站号已解析为 `4478`/`Peter Luogon Town`，但 `ttstatus` 在 `2`/`6` 之间跳，
+  接口回 `manual assign succeed.` 却不建 TT —— 必须在 eFlow 侧把 ME 绑到站点；
+- `last_error` 是「站点解析失败」→ ME 名不在 cmdb；`last_error` 里会附 `已尝试站名 [...]`，
+  拿它去 cmdb 比对命名。若只是拼写差异（且不是等长元音互换），近似匹配**不会**兜底，
+  应修 ME 命名或 cmdb 站名，而不是调低 `site_fuzzy_threshold`（调低只会把它变成错派风险）。
+  这类告警**不静默**：群里会收到一条「需人工在 eFlow 处理」通报（同一条只发一次）。
+- `merged>0` → 有告警被合并进组长告警的 TT（同一次光纤中断），这是**预期行为**，不是漏派。
+  核对方法：拿 `skip_reason` 里的组长 alarm_key 去状态表查它的 `tt_no`，
+  确认这个单号确实建出来了；若组长那条失败（`N`），成员**不会被合并**
+  （合并只在组长真正建出 TT / 演练覆盖后才生效），会各自独立派单；
+- 通报里出现 `This TT covers N sites` 但站点列表看着不对 → 说明窗口内混进了另一次故障，
+  调小 `group_window_minutes`（如 3~5 分钟）；真出了误合并就配 0 止血；
+- `correlation_undetermined>0` → 这些告警的 99933 判定无法完成（站名对不上），
+  已按「没有关联」继续派单；明细见结果里的 `correlation_undetermined_samples`，
+  若发现同一站点出现重复派单，优先修 ME 命名让站名与 cmdb 一致。
+- `warnings` 里出现「站点名近似匹配」→ 派单是按近似结果走的，**必须人工核对** cmdb 命名，
+  确认是同一站点后建议直接修正命名，让后续走 `exact`。
+  **已知案例（2026-10-27）**：`6120HS_Peter_luogan_UPE80` 解析出的 `peter luogan town`
+  在 cmdb 里写作 `Peter Luogon Town`（`luogan` / `luogon` 差一个字母）→ 走了
+  `fuzzy` 档（等长元音互换），解析到 `4478`，通报里会附提示。
+- `warnings` **同一告警只在首次出现时报告**：`warnings` 非空会让 `task_runner` 判
+  「任务降级完成」并推一条微信，而「近似匹配 / 关联判定不了 / ttstatus 异常」是告警级的
+  长期状态，每轮都写就等于每 5 分钟推一条微信。后续轮次只写 `samples` /
+  `correlation_undetermined_samples` / `suspect_ttstatus_samples` 与状态表（2026-10-27 实测
+  11:33 与 11:38 两轮之间微信通知只在首轮出现）。
+- WhatsApp 没收到 → 看 `send_status` 是否 `Y`；`wa_notify` 离线会写进结果的 `warnings`。
+
+
+### `eflow_5g_assign` 的口径与上线步骤（2026-10-28 首版）
+
+**做什么**：5G 站点退服类告警自动派 TT + WhatsApp 通报，参考 `eflow_fiber_assign`，
+但按 5G 的字段形态与业务口径改了三处：**告警码支持多个**、**一站多小区合并**、
+**站点直接用告警自带的数字站号**（不再从 ME 名解析）。
+
+**默认 5 个告警码**（页面可改成逗号分隔的任意多个）：
+
+| 告警码 | 告警名 |
+| --- | --- |
+| `200201001` | DU cell out-of-service |
+| `200201018` | Super cell CP out-of-service |
+| `200201041` | gNodeB DU out-of-service |
+| `200201043` | NSA unavailable |
+| `200201060` | Super MIMO cell CP out-of-service |
+
+**判定链**（与 Fiber 同一套引擎 `backend/services/eflow_assign/assign_engine.py`，口径参数见
+`g5_assign_service.py:89` 的 `CTX`）：告警码命中白名单 → 存续时长落在
+`[min_age_minutes, window_minutes]`（默认 15 / 180 分钟）→ 上游无 TT（`ttid` 空）→
+状态表无 `Y` → 同站同窗口无 `99933`。
+
+**与 Fiber 的三处实质差异**：
+
+1. **一站多小区合并**（`group_by_site_occurrence`，`g5_assign_service.py:178`）：同一 gNB 的
+   多个小区（实测 cell 50/51/52）各自产生一条告警 → 按「**同站点** + 时间窗」合并成一个 TT，
+   组长 = 组内最早升起的那条，其余成员共用组长建出的单号，通报正文列 `Cells` 与
+   `This TT covers N cells`。
+   ⚠ **不同站点即使同时退服也绝不合并** —— 那是两个故障，现场要跑两个站。
+   这与 Fiber 的「纯时间窗跨站合并」正好相反（Fiber 是同一条光缆上的多个站）。
+2. **服务端按码过滤 + 全量审计**（`fetch_target_alarms`，`g5_assign_service.py:272`）：
+   eFlow 的 `alarmcodeconds` **必须同时带 `restype`**（只给 `alarmcode` 返回 HTTP 499），
+   且**通配 restype 不被支持**（`zte.ran.*` 返回 0 条）→ 只能穷举 12 个候选 RAN restype。
+   默认码里有 4 个当前无实例、无法实测其 restype，配错会**静默永不触发**，故每 60 分钟
+   拉一次全量与过滤结果对账：发现「全量里有、过滤里没有」的目标码 → 写 `warnings` +
+   `logger.error`，提示把该码的 restype 补进配置。
+3. **站点解析**：5G 的 `site` 已是数字站号（实测 `4162`）、`sitename` 已是站名（`Liscr`），
+   通常第一档 `alarm_fields` 直接命中；仍走 `resolve_site` 兜底（cmdb 校准 + 近似匹配）。
+
+**状态表** `eflow_5g_assign_log`（与 Fiber 表结构一致，多一列 `cell_name`）：
+`assign_status`（`Y` 成功 / `N` 失败 / `S` 跳过 / `D` 演练）、`tt_no`、`skip_reason`、
+`send_status`、`cell_name`。建表走幂等 `CREATE TABLE IF NOT EXISTS`，不进 Alembic。
+
+**配置项**（Settings → 任务配置，文件 `backend/services/eflow_5g_config.json`）：
+`alarm_codes`（**多个**，逗号分隔，留空回退 5 个默认码）、`correlation_codes`（默认 99933）、
+`correlation_window_minutes`、`window_minutes`、`min_age_minutes`、
+`group_window_minutes`（一站多小区合并窗，默认 10；配 0 = 关闭合并）、
+`restypes`（服务端过滤候选）、`fallback_full_scan`（全量审计开关）、
+`cell_dedupe`（去重开关）、`assign_group`、`dry_run`、`groups`、
+`site_fuzzy_enabled` / `site_fuzzy_threshold`。
+
+**⚠ 上线顺序**（默认 `dry_run=true`，与 Fiber 同款流程）：
+1. 部署后先手动执行 1~2 轮，看结果里的 `due` / `groups` / `merged` / `samples`；
+   **`dry_run_preview` 里就是「将发的通报正文」**（演练模式不投递，只渲染），
+   关掉 `dry_run` 前先用它核对文案与 Cells 行；
+2. 核对 `eflow_5g_assign_log` 的 `site_id` / `site_name` / `cell_name` 是否符合预期；
+3. 到 **Settings → 任务配置 → 5G 站点告警自动派单** 把 `groups` 从测试群改成正式群；
+4. 保持 `dry_run=true` 跑一段，确认「合并的小区确实是同一个 gNB」；
+5. 关掉 `dry_run` → 下一轮开始真派单；出现异常**先开回 `dry_run`** 止血。
+
+**排障速查**：
+- `target_alarms=0` 但 eFlow 页面能看到 5G 告警 → 先看 `warnings` 里有没有
+  「告警码被 restype 配置漏掉」（全量审计会明确点名该码），把 `restypes` 补上；
+- `merged>0` → 有小区告警被合并进组长的 TT，属**预期**；组长失败（`N`）时成员不会被合并，
+  会各自独立派单；
+- 两个不同站点被合并了 → 说明 `alarm_site_identity` 取不到数字站号、退化成站名匹配，
+  先查告警行的 `site` / `sitename` 字段是否为空或 `--`；
+- `waiting>0` → 存续未满 15 分钟，正常等下一轮；`expired>0` → 超过 180 分钟窗口不派。

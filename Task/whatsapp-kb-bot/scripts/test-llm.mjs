@@ -1,0 +1,462 @@
+#!/usr/bin/env node
+/**
+ * 对话 provider 分发层测试。
+ *   node scripts/test-llm.mjs
+ *
+ * 不需要真实 API Key —— 通过替换 globalThis.fetch 验证：
+ *   请求是否构造正确（URL / 认证头 / 模型名 / 参数）
+ *   错误是否被翻译成人能看懂的话
+ *   两个 provider 是否正确分发
+ */
+import { CONFIG, RUNTIME_CONFIG, FALLBACK_CONFIG } from '../src/config.js';
+import {
+  chat,
+  resolveApiKey,
+  providerInfo,
+  validateProvider,
+  pingProvider,
+  stripModelMarkup,
+} from '../src/llm.js';
+
+// CONFIG 的对话字段（chatProvider/chatModel/chatBaseUrl/chatApiKey/chatApiKeyEnv/
+// chatTimeoutMs/enableThinking）在 2026-10 的 RUNTIME_CONFIG 改造后是**只读 getter**，
+// 直接赋值会抛 "Cannot set property … which has only a getter"。测试要改这些值时
+// 必须写底层 RUNTIME_CONFIG（CONFIG 的 getter 会实时回读它）。读取则仍可用 CONFIG。
+const setCfg = (key, value) => { RUNTIME_CONFIG[key] = value; };
+
+let pass = 0;
+let fail = 0;
+
+function check(cond, label, detail = '') {
+  if (cond) {
+    pass++;
+    console.log(`  ✓ ${label}`);
+  } else {
+    fail++;
+    console.log(`  ✗ ${label}${detail ? `\n      ${detail}` : ''}`);
+  }
+}
+
+const realFetch = globalThis.fetch;
+const ENV_NAME = CONFIG.chatApiKeyEnv;
+
+/** 安装一个假的 fetch，记录调用参数 */
+function mockFetch(responder) {
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return responder(String(url), init);
+  };
+  return calls;
+}
+
+function jsonResponse(body, status = 200) {
+  return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+}
+
+/* ------------------------------ 密钥解析 ------------------------------ */
+
+console.log('\n[1] API Key 解析优先级');
+
+delete process.env[ENV_NAME];
+setCfg('chatApiKey', '');
+const noKey = resolveApiKey();
+check(noKey.key === '' && noKey.source === null, '都未配置时 → 空值且 source 为 null');
+
+setCfg('chatApiKey', 'from-config');
+const cfgKey = resolveApiKey();
+check(cfgKey.key === 'from-config' && cfgKey.source === 'config.json', '仅配置文件 → 取配置文件的值');
+
+process.env[ENV_NAME] = 'from-env';
+const envKey = resolveApiKey();
+check(
+  envKey.key === 'from-env' && envKey.source === `环境变量 ${ENV_NAME}`,
+  '环境变量优先于配置文件（避免密钥被写进可能提交的文件）'
+);
+
+process.env[ENV_NAME] = '   ';
+setCfg('chatApiKey', 'from-config');
+check(resolveApiKey().key === 'from-config', '环境变量为空白字符时回退到配置文件');
+
+setCfg('chatApiKey', '');
+delete process.env[ENV_NAME];
+
+/* ------------------------------ 配置校验 ------------------------------ */
+
+console.log('\n[2] 启动自检');
+setCfg('chatProvider', 'openai');
+const bad = validateProvider();
+check(!bad.ok, 'openai 但无密钥 → 校验失败');
+// 断言「点明了**当前配置的那个**环境变量」，不硬编码具体名字 ——
+// chatApiKeyEnv 是部署时可切的（AGNES_API_KEY / OPENWEBUI_API_KEY …），
+// 硬编码会让「换个 provider 就测试红」，而那是配置变更、不是代码回归。
+check(
+  ENV_NAME ? bad.message.includes(ENV_NAME) : /环境变量/.test(bad.message || ''),
+  '错误信息里点明了该设置哪个环境变量',
+  bad.message
+);
+check(/export|env:/.test(bad.message || ''), '错误信息给出了具体设置命令');
+
+process.env[ENV_NAME] = 'test-key-123';
+check(validateProvider().ok, '设置密钥后 → 校验通过');
+
+setCfg('chatProvider', 'ollama');
+check(validateProvider().ok, 'ollama provider 不需要密钥');
+setCfg('chatProvider', 'openai');
+
+setCfg('chatProvider', 'bogus');
+const unknown = validateProvider();
+check(!unknown.ok && /未知/.test(unknown.message || ''), '未知 provider 名 → 明确报错');
+setCfg('chatProvider', 'openai');
+
+/* ---------------------------- provider 信息 ---------------------------- */
+
+console.log('\n[3] provider 信息');
+const info = providerInfo();
+check(info.provider === 'openai', 'provider 正确');
+// ⚠️ 断言**取自 config 的值**，而不是硬编码某个部署的模型名 ——
+// config.json 的 chatModel/chatBaseUrl 是部署时可切换的（本项目实测在
+// agnes 云端 与 本地代理 deepseek 之间切过）。硬编码会让「换个 provider 就测试红」，
+// 而那是配置变更、不是代码回归。这里要验的是「provider 层如实回读 config」。
+check(info.model === CONFIG.chatModel, `模型名取自 config（${info.model}）`);
+check(info.baseUrl === CONFIG.chatBaseUrl, `baseUrl 取自 config（${info.baseUrl}）`);
+check(info.keySource === `环境变量 ${ENV_NAME}`, '密钥来源可追溯');
+
+/* ---------------------------- OpenAI 兼容调用 ---------------------------- */
+
+console.log('\n[4] OpenAI 兼容请求构造');
+let calls = mockFetch(() =>
+  jsonResponse({
+    id: 'chatcmpl_x',
+    model: CONFIG.chatModel,
+    choices: [{ index: 0, message: { role: 'assistant', content: '年假15天。' }, finish_reason: 'stop' }],
+    usage: { prompt_tokens: 120, completion_tokens: 8, total_tokens: 128 },
+  })
+);
+
+const r = await chat([
+  { role: 'system', content: '只依据资料回答' },
+  { role: 'user', content: '年假有几天？' },
+]);
+
+// URL 由 config 的 chatBaseUrl 拼出（同样不硬编码具体部署的地址）
+const expectUrl = `${CONFIG.chatBaseUrl.replace(/\/$/, '')}/chat/completions`;
+check(calls.length === 1, '发起了 1 次请求');
+check(calls[0].url === expectUrl, `URL 由 baseUrl 拼出（${calls[0].url}）`);
+check(calls[0].init.method === 'POST', 'method 为 POST');
+check(
+  calls[0].init.headers.Authorization === 'Bearer test-key-123',
+  '认证头为 Bearer <key>'
+);
+check(calls[0].init.headers['Content-Type'] === 'application/json', 'Content-Type 正确');
+
+const sent = JSON.parse(calls[0].init.body);
+check(sent.model === CONFIG.chatModel, `请求体 model 取自 config（${sent.model}）`);
+check(sent.messages.length === 2, 'messages 完整传递');
+check(sent.messages[0].role === 'system', 'system 消息保留');
+check(sent.max_tokens === CONFIG.maxTokens, `max_tokens 取自配置（${sent.max_tokens}）`);
+check(sent.temperature === CONFIG.temperature, `temperature 取自配置（${sent.temperature}）`);
+check(sent.stream === false, '非流式');
+
+check(r.content === '年假15天。', '正确解析 choices[0].message.content');
+check(r.stats.promptTokens === 120 && r.stats.outputTokens === 8, '正确解析 usage');
+
+/* --------------------- Thinking 参数与空内容处理 --------------------- */
+
+console.log('\n[5] Thinking 开关与空内容处理');
+
+const okBody = () => jsonResponse({ choices: [{ message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }] });
+
+async function sentBody() {
+  calls = mockFetch(okBody);
+  await chat([{ role: 'user', content: 'hi' }]);
+  return JSON.parse(calls[0].init.body);
+}
+
+const savedThinking = CONFIG.enableThinking;
+
+setCfg('enableThinking', false);
+let b = await sentBody();
+check(b.chat_template_kwargs?.enable_thinking === false, 'enableThinking=false → 显式关闭 thinking');
+
+setCfg('enableThinking', true);
+b = await sentBody();
+check(b.chat_template_kwargs?.enable_thinking === true, 'enableThinking=true → 显式开启 thinking');
+
+setCfg('enableThinking', null);
+b = await sentBody();
+check(b.chat_template_kwargs === undefined, 'enableThinking=null → 不传该字段，用服务端默认');
+
+setCfg('enableThinking', savedThinking);
+
+// lenient 模式（ping 专用）：只要模型吐出任何文本就算连通，不因 content 为空而判定失败。
+// 这条很关键 —— 否则一个「只返回思维链」的模型会让启动自检直接失败，把用户挡在门外。
+const reasoningOnly = () =>
+  jsonResponse({
+    choices: [{ message: { role: 'assistant', content: '', reasoning_content: '让我想想……' }, finish_reason: 'stop' }],
+    usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+  });
+
+mockFetch(reasoningOnly);
+const lenientR = await chat([{ role: 'user', content: 'hi' }], { lenient: true });
+check(lenientR.degraded === 'reasoning_only', 'lenient 模式：只有 reasoning_content 时返回 degraded 标记而非抛错');
+check(lenientR.content === '', 'lenient 模式：content 保持空串，不伪造内容');
+check(lenientR.reasoningChars > 0, `lenient 模式：记录 reasoning 字符数（${lenientR.reasoningChars}）`);
+
+mockFetch(reasoningOnly);
+try {
+  await chat([{ role: 'user', content: 'hi' }]);
+  check(false, '非 lenient 模式：只有 reasoning_content 时抛错', '未抛异常');
+} catch (err) {
+  check(
+    /reasoning_content/.test(err.message) && /enableThinking/.test(err.message),
+    '非 lenient 模式：抛错并点明「思考吃掉了预算」这一成因'
+  );
+}
+
+// 启动自检路径：这一条直接对应「ping 失败即终止启动」那个被修掉的坑。
+// 模型可达但 content 为空时，必须判为「可继续启动」，只是附加警告。
+setCfg('chatProvider', 'openai');
+mockFetch(reasoningOnly);
+const pingR = await pingProvider();
+check(pingR.ok === true, 'ping：模型只返回 reasoning_content 时仍判为可达（不阻断启动）');
+check(pingR.warning === true, 'ping：同时带 warning 标记，提示实际问答可能返回空');
+check(/diag/.test(pingR.message || ''), 'ping：警告里给出下一步排查命令');
+
+mockFetch(() => jsonResponse({ error: { message: 'Invalid token' } }, 401));
+const pingBad = await pingProvider();
+check(pingBad.ok === false, 'ping：真正的鉴权失败仍判为不可用');
+
+/* ------------------------------ 错误翻译 ------------------------------ */
+
+console.log('\n[6] 错误信息翻译');
+
+async function expectError(responder, matcher, label) {
+  mockFetch(responder);
+  try {
+    await chat([{ role: 'user', content: 'hi' }]);
+    check(false, label, '未抛异常');
+  } catch (err) {
+    check(matcher.test(err.message), label, `实际信息：${err.message.slice(0, 160)}`);
+  }
+}
+
+await expectError(() => jsonResponse({ error: { message: 'Invalid token' } }, 401), /API Key 无效/, '401 → 提示密钥无效');
+await expectError(() => jsonResponse({ error: { message: 'not found' } }, 404), /模型名或路径不对/, '404 → 提示模型名/路径问题');
+await expectError(() => jsonResponse({ error: { message: 'rate limited' } }, 429), /限流|额度/, '429 → 提示限流或额度');
+await expectError(
+  () => jsonResponse({ choices: [{ message: { content: '' }, finish_reason: 'length' }] }),
+  /空内容.*length|finish_reason=length/,
+  '空内容 → 报出 finish_reason 便于定位（如被 max_tokens 截断）'
+);
+await expectError(() => new Response('not json at all', { status: 200 }), /不是 JSON/, '非 JSON 响应 → 明确报错');
+
+mockFetch(() => {
+  throw Object.assign(new Error('connect ECONNREFUSED'), { cause: { code: 'ECONNREFUSED' } });
+});
+try {
+  await chat([{ role: 'user', content: 'hi' }]);
+  check(false, '网络不可达 → 抛出可读错误', '未抛异常');
+} catch (err) {
+  check(/连不上云端模型/.test(err.message), '网络不可达 → 抛出可读错误', err.message.slice(0, 160));
+}
+
+/* ---------------------------- Ollama 分发 ---------------------------- */
+
+console.log('\n[7] provider 分发（切回 ollama 应打本地接口）');
+setCfg('chatProvider', 'ollama');
+calls = mockFetch(() =>
+  jsonResponse({
+    message: { role: 'assistant', content: '本地回答' },
+    prompt_eval_count: 10,
+    eval_count: 5,
+    total_duration: 1e9,
+  })
+);
+const local = await chat([{ role: 'user', content: 'hi' }]);
+check(calls[0].url.endsWith('/api/chat'), `打到 Ollama 的 /api/chat（${calls[0].url}）`);
+check(local.content === '本地回答', '正确解析 Ollama 响应格式');
+check(!calls[0].init.headers.Authorization, 'Ollama 请求不带 Authorization 头');
+
+setCfg('chatProvider', 'openai');
+
+/* ------------------- 模型输出净化（think / tool_call 泄漏） ------------------- */
+
+// 实测背景：mimo-v2.6-flash 约 1/4 的请求会把「决定调用工具」这一轮原样写进
+// content，群里收到的是 `I'll check the available tools…<tool_call><function=…>`。
+// 旧代码只防了「content 为空」，这类「非空但全是标记」的回复被当成正常答案发出，
+// answered 还是 true —— 用户在群里看到的是一段 XML。
+console.log('\n[7b] 模型输出净化（think / tool_call 标记）');
+
+// 纯文本：一个字都不该动
+const plain = stripModelMarkup('告警码 9920 表示 Complete site down。');
+check(plain.text === '告警码 9920 表示 Complete site down。', '正常文本原样保留');
+check(!plain.think && !plain.toolCall, '正常文本不误判为标记');
+
+// think 块：剥掉思考、留下正文（正文是好的，不该整轮弃用）。
+// 标签用拼接写法，避免在源码里直接出现标签干扰阅读。
+const T_OPEN = '<' + 'think>';
+const T_CLOSE = '<' + '/think>';
+const thinkR = stripModelMarkup(`让我想想站点告警……${T_CLOSE}告警码 9920 表示 Complete site down。`);
+check(thinkR.text === '告警码 9920 表示 Complete site down。', '孤立闭合标签 → 它前面的思考文字一并丢弃', thinkR.text);
+check(thinkR.think && !thinkR.toolCall, 'think 块被标记为 think（不当作工具调用）');
+
+const thinkPair = stripModelMarkup(`${T_OPEN}用户问站点告警${T_CLOSE}告警码 9920。`);
+check(thinkPair.text === '告警码 9920。', '完整 think 块被剥离', thinkPair.text);
+
+// 未闭合 think：被 max_tokens 截断时只剩开头，必须吃到结尾，不能漏出半句思考
+const thinkOpen = stripModelMarkup(`先看资料${T_OPEN}用户问的是站点告警`);
+check(thinkOpen.text === '先看资料', '未闭合的 think 块被截到结尾，不泄漏半句思考', thinkOpen.text);
+
+// tool_call 块：整轮不可信（实测样本，注意 <function=x> 是不带右尖括号的开标签）
+const toolSample =
+  "I'll check the available tools for querying site alarm and ticket status." +
+  '<tool_call><function=mcp-eflow-ops-kb-mcp__search_knowledge>' +
+  '<parameter=query>site alarm trend</parameter></function></tool_call>';
+const toolR = stripModelMarkup(toolSample);
+check(toolR.toolCall === true, 'tool_call 标记被识别');
+check(!/tool_call|<function=|<parameter=/.test(toolR.text), '标记本身被剥干净', toolR.text);
+check(toolR.text === "I'll check the available tools for querying site alarm and ticket status.", '标记前后的旁白被单独留下（由调用方判定整轮弃用）');
+
+// 只有标记、没有任何正文 → text 为空
+check(stripModelMarkup('<tool_call><function=x></function></tool_call>').text === '', '纯标记 → 净化后为空串');
+check(stripModelMarkup('').text === '', '空输入 → 空串');
+
+// —— 接线验证：净化必须真的作用在 openaiChat 的返回值上 ——
+
+// ① think + 正文 → 只拿到正文，并带 degraded 标记
+calls = mockFetch(() =>
+  jsonResponse({
+    choices: [{ message: { content: `思考中……${T_CLOSE}真正的答案。` }, finish_reason: 'stop' }],
+  })
+);
+const thinkChat = await chat([{ role: 'user', content: 'hi' }], { noFallback: true });
+check(thinkChat.content === '真正的答案。', 'chat() 返回的 content 已剥离 think 块', thinkChat.content);
+check(thinkChat.degraded === 'think_stripped', '带 degraded=think_stripped 便于日志追溯');
+
+// ② 第一次只吐工具调用、第二次正常 → 自动重试一次并拿到正文
+let seq = 0;
+calls = mockFetch(() => {
+  seq++;
+  return seq === 1
+    ? jsonResponse({ choices: [{ message: { content: toolSample }, finish_reason: 'stop' }] })
+    : jsonResponse({ choices: [{ message: { content: '重试后的正常答案。' }, finish_reason: 'stop' }] });
+});
+const retried = await chat([{ role: 'user', content: 'hi' }], { noFallback: true });
+check(calls.length === 2, '工具调用标记 → 自动重试一次（共 2 次请求）', `实际 ${calls.length} 次`);
+check(retried.content === '重试后的正常答案。', '重试拿到正常正文');
+check(retried.stats.attempts === 2, 'stats.attempts 记录重试次数，便于统计泄漏频率');
+check(!/tool_call/.test(retried.content), '重试结果里没有标记残留');
+
+// ③ 一直只吐工具调用 → 重试后仍失败，必须抛错（不能把标记当答案返回）
+calls = mockFetch(() =>
+  jsonResponse({ choices: [{ message: { content: toolSample }, finish_reason: 'stop' }] })
+);
+try {
+  await chat([{ role: 'user', content: 'hi' }], { noFallback: true });
+  check(false, '连续工具调用 → 抛错而不是返回标记', '未抛异常');
+} catch (err) {
+  check(calls.length === 2, '连续失败时只重试一次，不做无限重打', `实际 ${calls.length} 次`);
+  check(/工具调用标记/.test(err.message), '错误信息点明「只有工具调用标记」这一成因', err.message.slice(0, 120));
+}
+
+// ④ 纯粹的 content 为空（思考烧光预算）不该重试 —— 重打也是同样结果，只会白等一轮
+calls = mockFetch(() =>
+  jsonResponse({ choices: [{ message: { content: '', reasoning_content: '想很久' }, finish_reason: 'stop' }] })
+);
+try {
+  await chat([{ role: 'user', content: 'hi' }], { noFallback: true });
+  check(false, '只有 reasoning_content → 抛错', '未抛异常');
+} catch {
+  check(calls.length === 1, '只有 reasoning_content 时不重试（重打也是空）', `实际 ${calls.length} 次`);
+}
+
+/* ---------------------------- 主模型回退兜底 ---------------------------- */
+
+console.log('\n[8] 主模型失败 → 自动回退兜底 provider');
+
+// 保存并改出一个「主/备不同源」的场景：主 = 假 OWU，备 = 假 WorkBuddy。
+// FALLBACK_CONFIG 是 config.js 在 loadRuntimeConfig 覆盖前抓的快照，
+// 测试里直接改它来模拟「API 已把主模型切到另一个源」。
+const fbSaved = { ...FALLBACK_CONFIG };
+const mainSaved = {
+  chatBaseUrl: CONFIG.chatBaseUrl,
+  chatModel: CONFIG.chatModel,
+  chatApiKeyEnv: CONFIG.chatApiKeyEnv,
+};
+
+setCfg('chatBaseUrl', 'http://main.example/api/v1');
+setCfg('chatModel', 'main-model');
+setCfg('chatApiKeyEnv', ENV_NAME);
+process.env[ENV_NAME] = 'main-key';
+
+FALLBACK_CONFIG.chatProvider = 'openai';
+FALLBACK_CONFIG.chatBaseUrl = 'http://fallback.example/v1';
+FALLBACK_CONFIG.chatModel = 'fallback-model';
+FALLBACK_CONFIG.chatApiKeyEnv = ENV_NAME; // 复用同一个 env（测试省事；真实场景是 AGNES_API_KEY）
+FALLBACK_CONFIG.chatApiKey = '';
+
+// 主不可用（400 Model not found）→ 应改打兜底，并在结果上标记 fallback
+calls = mockFetch((url) => {
+  if (url.includes('main.example')) return jsonResponse({ detail: 'Model not found' }, 400);
+  return jsonResponse({ choices: [{ message: { role: 'assistant', content: '兜底回答' }, finish_reason: 'stop' }] });
+});
+const fbR = await chat([{ role: 'user', content: 'hi' }]);
+check(calls.length === 2, '主失败后发起第 2 次请求（共 2 次）', `实际 ${calls.length} 次`);
+check(calls[0].url.includes('main.example'), '第 1 次打主 provider');
+check(calls[1].url.includes('fallback.example'), '第 2 次打兜底 provider', calls[1]?.url);
+check(JSON.parse(calls[1].init.body).model === 'fallback-model', '兜底请求用的是兜底模型名');
+check(fbR.content === '兜底回答', '返回兜底 provider 的内容');
+check(fbR.fallback && fbR.fallback.to === 'fallback-model', '结果上带 fallback 标记，便于日志追溯');
+
+// 鉴权失败不应回退（换 provider 掩盖不了密钥问题）
+calls = mockFetch((url) =>
+  url.includes('main.example')
+    ? jsonResponse({ error: { message: 'Invalid token' } }, 401)
+    : jsonResponse({ choices: [{ message: { content: '不该走到这里' } }] })
+);
+try {
+  await chat([{ role: 'user', content: 'hi' }]);
+  check(false, '401 鉴权失败不回退 → 抛错', '未抛异常');
+} catch (err) {
+  check(calls.length === 1 && /401|API Key 无效/.test(err.message), '401 鉴权失败不回退（只打主 provider 一次）');
+}
+
+// 主备同源时不应回退（白打两遍无意义）
+FALLBACK_CONFIG.chatBaseUrl = CONFIG.chatBaseUrl;
+FALLBACK_CONFIG.chatModel = CONFIG.chatModel;
+calls = mockFetch(() => jsonResponse({ detail: 'Model not found' }, 400));
+try {
+  await chat([{ role: 'user', content: 'hi' }]);
+  check(false, '主备同源不回退 → 抛错', '未抛异常');
+} catch {
+  check(calls.length === 1, '主备同源时不回退（只打一次）');
+}
+
+// noFallback 显式关闭回退（ping / 测试用）
+FALLBACK_CONFIG.chatBaseUrl = 'http://fallback.example/v1';
+FALLBACK_CONFIG.chatModel = 'fallback-model';
+calls = mockFetch(() => jsonResponse({ detail: 'Model not found' }, 400));
+try {
+  await chat([{ role: 'user', content: 'hi' }], { noFallback: true });
+  check(false, 'noFallback → 不回退', '未抛异常');
+} catch {
+  check(calls.length === 1, 'noFallback=true 时不回退');
+}
+
+// 还原
+Object.assign(FALLBACK_CONFIG, fbSaved);
+setCfg('chatBaseUrl', mainSaved.chatBaseUrl);
+setCfg('chatModel', mainSaved.chatModel);
+setCfg('chatApiKeyEnv', mainSaved.chatApiKeyEnv);
+
+/* -------------------------------- 收尾 -------------------------------- */
+
+globalThis.fetch = realFetch;
+process.env[ENV_NAME] = '';
+delete process.env[ENV_NAME];
+setCfg('chatApiKey', '');
+
+console.log(`\n${'='.repeat(50)}`);
+console.log(`通过 ${pass} 项，失败 ${fail} 项`);
+process.exit(fail ? 1 : 0);

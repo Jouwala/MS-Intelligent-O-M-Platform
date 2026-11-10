@@ -1,0 +1,196 @@
+# 03 TODO.md —— 当前任务、优先级和开发进度
+
+> 基准日期：2026-09-22　|　项目根：`D:\01_RPA\liberia-noc_soc-数据看板统一门户`
+> 上级总纲：`D:\01_RPA\TODO.md`（工作区级待办见那里）
+> **本文只留在办项。** 完成记录看 `git log`。
+
+## 一、进度快照
+
+门户处于**活跃开发中**。近期已连续完成：QC 看板改版与指标快照历史、MS KPI/SP 报表与 UME 大屏接口、看板深色改版、静态资源补全（消除 404）、FME 工程师排名、GIS 站点下钻图表拆分、QC 弹窗拖拽、`/v1/olbrportal/` 样式系统字号令牌化与系统主题跟随（详见 `architecture.md` 九之四）。
+
+| 模块 | 状态 |
+| --- | --- |
+| 看板聚合 / 三视图 / 筛选搜索 | 完成 |
+| 环境切换、收藏置顶、热度排序、JSON 导入导出 | 完成 |
+| 深浅双模、中英文国际化 | 完成 |
+| 任务调度部件（60s + 离线降级） | 完成 |
+| 鉴权 / 用户管理 / 改密 | 已验收 |
+| 鉴权开关（`auth-switch.json`） | 完成 |
+| 分组管理、布局编辑拖拽 | 完成 |
+| OLR 静态壳 `/olbrportal/`、`/v1/olbrportal/` 编辑能力 | **2026-09-26 三轮拉齐**：`v1` 的编辑对象是六个 `#views6` 入口卡（未恢复 L1 面板），已支持改名 / **改链接** / 改归属 / 拖排序 / 移出本列 / 删看板 / 新增看板（选模板）/ 改分组名 / 新建分组 / 重置顺序；**仍缺删分组**（见 P1）。`/olbrportal/` 侧不支持改链接与增删看板。见 `architecture.md` 第九节 |
+| QC 质量指标面板 | 已改版，**待验收闭环** |
+| 文档索引页 | **本次新增** |
+| FineBI 占位链接替换 | **未完成** |
+
+## 二、P0 —— 使用者能直接感知
+
+- [ ] **替换 FineBI 目录占位链接。** 部分 FineBI 条目仍是占位（标签含"链接待更新"、状态 beta），用户点了到不了真实报表。需在门户「编辑看板配置」逐条替换。
+      **验收**：门户内不再有"链接待更新"标签的条目，或明确标注为有意保留。
+
+- [ ] **QC 面板改版验收闭环。** 卡片改版已提交（左侧 3px 状态竖条、纯白底、数字居中、标题/副行左对齐、失败不留旧数字）。
+      **验收**：
+      - 两档刷新节奏与后端对齐——全量每小时 `:06:30`、告警每 5 分钟 `:00:30`/`:05:30`；
+      - 取不到数显示 `—` 而非 `0`；
+      - 失败态显示原因且不残留旧值；
+      - 逐条核对 `MsPortal\QC面板展示优化建议_20260922.md`，确认已落地或明确不做。
+
+- [ ] **商用就绪度整改项收口。** 按 `MsPortal 商用就绪度检测 —— 结论与整改方案.md` 逐条确认状态，未闭环的登记到本文。
+      **2026-10-01 进展**：B1（生产入口 `server/index.ts` + `npm start`，不再跑 `npm run dev`）、B2（TLS，80→443）、
+      B3（`/portal-default` GET 加鉴权门）、B4（7090/7038 收回到回环）、B5（备份/归档不可下载）**已实测闭合**；
+      B6 前端已改（仅标签页可见时轮询），后端增量接口待 my_app 侧排期。
+      回归脚本：`npm run verify:readiness -- --host 192.168.100.20`（零依赖，退出码非 0 即代表有项未过）。
+
+- [x] **补最小测试（2026-10-01）。** 此前零测试。现用 Node 内置 `node --test`（零新增依赖）：
+      - `src/utils/groups.test.ts` —— 分组工具；重点锁「重命名/删除分组不产生孤儿卡片」不变量。
+      - `src/utils/format.test.ts` —— 数据口径「取不到显示 `—`、绝不显示 `0`」；把规则收敛到 `src/utils/format.ts` 单一实现。
+      **运行**：`npm test`。**验收**：全绿；新改动若破坏上述不变量会立刻红。
+
+## 三、P1 —— 正确性与稳定性
+
+- [ ] **确认 `/uniplam/api` 前缀已全面收口。** 检查是否还有遗留的绝对路径 `/api/*` 调用（会导致 405）。
+      **查法**：`Select-String -Path src\*.tsx,src\*.ts,src\components\*.tsx -Pattern "'/api/|\"/api/"`
+
+- [ ] **i18n 键完整性抽查。** 确认 `zh` 与 `en` 两份字典**键集一致**，没有只用了一份的键（英文界面会显示 key 原文）。
+      **查法**：比对 `i18n.tsx` 中 `zh`（第 20 行起）与 `en`（第 516 行起）的键集合。
+
+- [ ] **移动端入口复查。** 确认 `Navbar` 的桌面端与移动端两处入口保持同步，没有只在桌面端新增的功能。
+
+- [ ] **`DynamicIcon` 图标名校验。** 该组件传错名字会**静默回退** `LayoutGrid`。抽查现有配置中的图标名是否都真实存在于 lucide-react。
+
+- [ ] **RAG 链接的硬编码 IP 与「只改 config.ts」冲突（2026-10-24 登记）。**
+      本项目 `AGENTS.md` 第二节第 3 条要求"主机/域名只改 `src\config.ts`，其它任何地方不要再出现 IP"，
+      但 RAG 知识问答是 `platform: 'external'` 的外部看板，`resolveUrl()` 对 `external` **直接返回
+      `item.url`、不拼主机**，因此它的地址只能写死在 `item.url` 里，无法走 `rel` 机制。
+      2026-10-24 因 VPN 端口白名单问题，该地址从 `https://192.168.100.27:8443/` 改为
+      `https://192.168.100.20:9443/`（经 `.20` 反代，见 `architecture.md` 九之十三），共改 3 处：
+      `src\components\TaskSyncWidget.tsx`（顶栏按钮）、`src\data\initialDashboards.ts`（初始数据）、
+      `portal-default.json`（服务端默认，**不入库**）。
+      **待办**：二选一 —— ① 在 `config.ts` 的 `EnvConfig` 里加 `ragHost` 字段并让 `resolveUrl()`
+      对 `external` 也支持主机替换；② 在 `AGENTS.md` 为该例外补一条豁免说明（引用本条）。
+      **倾向 ②**：`external` 平台目前只有 RAG 一个条目，为一个用例改 `resolveUrl()` 的通用逻辑
+      收益不足（与工作区总纲第三节第 1 条"抽象延迟到第二个真实用例"一致）。若将来出现第二个
+      `external` 外部看板，则改走 ①。
+
+- [ ] **`logs\nginx.pid` 被清空导致 `-s reload` 失败（2026-10-24 登记）。**
+      2026-10-24 重载 nginx 时发现 `D:\01_RPA\nginx-1.28.0\logs\nginx.pid` 是 **0 字节**，
+      `.\nginx.exe -s reload` 报 `invalid PID number ""`。确认真实 master（worker 17860 的父进程
+      PID 16076）后写回 pid 才成功重载。
+      **为何要紧**：AGENTS.md 第四节第 6b 条已记录"SIG 发到错误目录只留一行 `OpenEvent failed`、
+      命令不报错"，这次是同类问题的另一种表现——**命令报错但服务器看起来还在跑**，容易被误判成
+      "配置没生效"而反复改配置。计划任务 `Nginx_EnsureRunning`（每 5 分钟）拉起的实例若也不写 pid，
+      同样会踩到。
+      **待办**：查明 pid 被清空的触发条件（疑为此前 `-s stop` 后未重启、或被 `nginx_monitor.ps1`
+      以非标准方式拉起）；确认 `nginx_monitor.ps1` 拉起后 pid 文件是否正常写入。
+      **临时应对**：重载前先 `cat logs/nginx.pid`，为空则用
+      `Get-CimInstance Win32_Process -Filter "Name='nginx.exe'"` 找 worker 的父进程作为 master PID 写回。
+
+- [ ] **看板目录加版本号，解决「后写覆盖先写」。** 服务端全局目录（`/api/portal-catalog`）目前
+      **无 ETag、无版本号**，两人同时编辑时后者静默赢；前端只有 `state.saving` 挡本页并发自提交，
+      挡不住跨用户。要真正解决需给目录加版本号 + 前端冲突提示。
+      **背景与影响面**见 `architecture.md` 第九节（2026-09-26 决策）。
+      相关：`PUT` 是**整份替换**，`items`/`subGroups`/`order`/`groups`/`tabLabels` 漏一个键就被抹掉。
+
+- [ ] **把原生 `confirm()` 换成页内确认。** 删分组 / 删子分组 / **删看板**现在走 `window.confirm()`，
+      原生对话框会**阻塞渲染进程**，既是无头验证的坑（见 `development.md` 第五节之三），
+      也不受深浅主题控制。建议换成现有的 `#editPop` 浮层样式。
+      尤其「删看板」是**不可逆**且影响所有人的操作，用页内浮层还能把看板名与影响面排得更清楚。
+
+- [ ] **`/v1/olbrportal/` 补上「删除分组」。** 2026-09-26 两轮改动后，本页的 `#views6` 行条目已能
+      **改名 / 改归属 / 拖排序 / 移出本列 / 彻底删除**，列头也能**改分组名 / 新增分组 / 新增看板 / 重置顺序** ——
+      仍然缺的只有**删除分组**：`delGroup()` 的入口挂在 L1 面板的 `panelHead` 上，本页没有面板。
+      现状可用（到 `/olbrportal/` 或 MsPortal 删），但同一份共享目录在两处能力不一致容易让人困惑。
+      **做法**：在最后一列的列头加一棵「删除本分组」按钮（`data-act="grp-del"`），
+      `onEditClick` 已有 `delGroup` 可接；注意 `delGroup()` 走原生 `confirm()`，
+      若先做了上面那条就一并换掉。
+      另需一并考虑：**跨列拖拽改归属**（现在只能用「分组」浮层），见 `architecture.md` 第九节分歧 2。
+
+## 四、P2 —— 工程与体验
+
+- [ ] **文档索引页接线验证。** 本次新增 `DocsIndexModal`，需确认：`App.tsx` 状态与渲染、`Navbar` 桌面+移动两处入口、`i18n` 两份字典的 `docs.*` 键都到位，且深浅双模正常。
+
+- [ ] **过程产物清理。** 项目根与 `MsPortal\` 下散落大量 `_*.txt`、`_qc*.txt`、`tmp_*.txt`（合计上百个）历史探针与切片文件。
+      **前置**：先确认无脚本引用；清理后跑一次回归。历史教训见工作区 `7b1d33b`。
+
+- [ ] **`MsPortal\` 的 `_bak_*` 备份治理。** 已积累 20+ 个时间戳备份（`index.html_bak_*`、`viewer.html_bak_*` 等）。建议定期归档，避免目录过噪。
+
+- [ ] **三份专项记录归档决策。** `MsPortal\` 下 QC 优化建议、三列对齐、配色对齐三份文档记录的是**已完成**的设计决策，考虑合并结论进 `DESIGN.md` 后归档。
+
+- [ ] **`/v1/olbrportal/` 死规则去留（2026-09-30 登记）。** `v1/olbrportal/assets/olbr.css` 里有一批「v1 无命中、但为与 `/olbrportal/`(v0) 保持类名对照而保留」的规则：等级徽章 `.qc-lv-*`/`.qc-lvchip`、`.qc-ico`、`.qc-card--lg/--sm`、L0/L1 的 `.stage`/`.vcol`/`.l0-col`/`.view-1`/`.tabs-v`/`.tabv`/`.subs-v`/`.subv`、旧抽屉 `.drawer`/`.dr-*`/`.scrim`（完整清单见 `olbr.css` 头部「无命中规则清单」）。
+      **阻塞**：v0 侧仍在用同名类（其 `renderViews()` 会调 `subLocatorHtml`/`subManageHtml` 画 `.subs-v`/`.subv`）。**验收**：先确认两门户**不再需要**类名对照，才整块删除；删除属「改结构」，需单独评审。
+
+- [x] **团队门户的矩阵与上游同步（2026-10-29 登记，2026-10-30 完成）。**
+      五个团队门户（`/v3/{fo,bo,flm,smc,cxo}_portal/`）共用 `v3/team_portal/`。
+      **原问题**：① `assets/olbr.js` 是 `scripts/patch_team_portal.py` 从上游生成，
+      改上游必须重跑；② `assets/olbr-data.js` 等共享资产是上游的**手工拷贝** —— 必然漂移。
+      **已完成（2026-10-30）**：
+      ① 新增 `scripts/sync_team_assets.py`，把共享资产改为**脚本生成**（逐字节复制 /
+      追加式合并 / `olbr.js` 交给 patch 脚本）；
+      ② 新增 `scripts/check_scope_coverage.py` 做**作用域覆盖度对账**（上游新增内容容器
+      必须先登记到 `block-manifest.json`，否则 fail-open 漏给全部团队）；
+      ③ 新增 `scripts/check-team-scope.mjs` 把四项检查串起来，**已挂进 `.git/hooks/pre-commit`**。
+      **验收**：`npm run check:team-scope` 四项全绿（退出码 0）。
+      **实测收获**：对账查出了两个真实的 fail-open（`#aux` 辅助入口、`#arch` 归档区
+      此前对五个团队全都显示），现已纳入矩阵（默认整块隐藏）；
+      共享资产同步则修掉了「团队门户的用户管理面板没有团队归属下拉框」这个功能缺失。
+
+- [x] **团队门户的可见性矩阵真相源在别人的桌面上（2026-10-30 登记并完成）。**
+      原设计的真相源是「某人桌面上的《新看板设计.xlsx》」—— 仓库里没有任何文件能回答
+      「现在 FO 能不能看 PMT」，别人 clone 下来也跑不了。
+      **已完成**：引入 `v3/team_portal/scope-map.json` 作为**仓库内的唯一真相源**；
+      Excel 降级为一个编辑器（`--import-excel` 导回 JSON，`--check-excel` 查孤儿行）；
+      并新增**运行时可编辑**通道 —— 管理员在门户界面直接勾选，落进 `portal-auth.db`
+      的 `team_scope` 表（`scope-map.json` 退化为默认模板）。
+      **验收**：`server/teamScopeDb.test.ts` 19 个用例全绿；
+      `npm run lint` / `npm test`（64 个）/ `npm run build` 全过。
+
+- [ ] **团队门户的 Auto Report 表是门户侧渲染（2026-10-29 登记）。**
+      `v3/team_portal/assets/team-panels.js` 自己拉 `/api/email-reports/latest?limit=1` 并按矩阵过滤，
+      **不是**内嵌 my_app 的 `email_reports` 页（那个页面渲染全部 14 个源，无法按 `source_id` 过滤）。
+      后续若 my_app 侧报告源增减或字段改名，需同步 `team-panels.js` 的字段映射。
+      **验收**：FO/BO/FLM 三门户的报告行数与 Excel 勾选数一致（10 / 3 / 8）。
+- [ ] **团队归属映射有两份字面量（2026-10-29 登记）。** 团队 id → 门户路径的映射在两处：
+      后端 `server/auth/types.ts` 的 `TEAM_PORTAL_PATHS`（唯一真相源）与纯静态脚本
+      `v3/team-gate.js` 的 `TEAM_PORTAL`（该脚本不能 import 后端模块，只能内联一份）。
+      **改一处必须改另一处** —— 否则登录后跳到错误的团队门户（或跳到不存在的路径）。
+      **验收**：两端五个团队的路径逐字相同；端到端脚本覆盖五组「登录 → 302 → 落地路径」。
+
+- [ ] **团队门户的访问控制依赖 nginx 配置，不在版本库里（2026-10-29 登记）。**
+      五个 `location /v3/{fo,bo,flm,smc,cxo}_portal/` 的 `auth_request` 闸门、
+      `/v3/olbrportal/` 的 `sub_filter` 注入、以及 `@team_unauthorized` / `@team_forbidden`
+      两个 named location，**全部只存在于 `D:\01_RPA\nginx-1.28.0\conf\nginx.conf`**
+      （该目录已 `.gitignore`，是运行时依赖不是源码）。故这台机器重建 nginx 时
+      这些闸门会**静默丢失**（团队门户变成任何人都能进的静态页）。
+      **验收**：重装/迁移 nginx 后，按 `docs/architecture.md`「九之十七」节核对
+      `auth_request /uniplam/api/auth/team-gate/<team>` 与 `sub_filter` 两条都在。
+
+
+- [ ] **v1 顶栏 rem 的路线选择（2026-09-30 登记）。** `v1/olbrportal/assets/masthead.css` 全用 `rem`，但 v1 不加载 `portal.js`（根字号缩放逻辑在 `MsPortal/assets/portal.js:1167`），故 rem 在 v1 **等效 px**。两条路二选一：① 在 `olbr.js` 落地字号缩放（照抄 portal.js 系数）让 rem 真正生效；② 把顶栏 rem 全量换算回 px（视觉不变，但放弃缩放可能性）。**当前保持 rem 不动**（文件头已注明真相）。**验收**：选定一条后同步更新 `masthead.css` 头部注释。
+
+## 五、待定 —— 需决策
+
+- [ ] **`docs\*.md` 是否随构建发布。** 目前文档只存在于仓库，门户部署后**没有可访问 URL**。若要索引页支持点击直接打开文档，需把 `docs\` 作为静态资源纳入构建（或由门户后端提供只读接口）。
+      **当前决定**：未发布，索引页条目以「复制路径」方式提供，避免产生死链。
+
+- [ ] **是否合并门户与 my_app 的视觉规范文档。** 目前总则在 `D:\01_RPA\DESIGN.md`，细节各自维护（本项目 `DESIGN.md`）。
+
+## 六、维护本文的约定
+
+1. **只留在办项**，做完移走或删掉——`git log` 已是完整完成记录。
+2. **每条要可执行**：写清改哪里、验收标准是什么。
+3. **待定项写清阻塞原因**（等什么决策）。
+4. **定期与 `git log` 对齐**，避免变成过期许愿池。
+5. **不写敏感值。**
+
+## 七、相关文档
+
+| 内容 | 去哪里 |
+| --- | --- |
+| 提交历史 | `git log --oneline` |
+| QC 面板优化建议 | `MsPortal\QC面板展示优化建议_20260922.md` |
+| 三列对齐方案与实测 | `MsPortal\三列对齐_可行性方案与实测_20260918.md` |
+| 配色对齐记录 | `MsPortal\配色对齐VMAX90天看板_可行性结论与实施记录_20260918.md` |
+| 商用就绪度检测与整改 | `MsPortal 商用就绪度检测 —— 结论与整改方案.md` |
+| 架构与已知风险 | `architecture.md` |
+| 开发与回归清单 | `development.md` |
+
+> **工具负责整理，人与 AI 负责协作执行。**

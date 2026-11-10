@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- lang / title 为首屏兜底值，下面这段在 React 挂载前就按当前语言写好；
+         口径与 src/i18n.tsx 的 detectLocale 一致（localStorage → 浏览器语言），
+         两边不一致会闪一下另一种语言/另一个标题。 -->
+    <title>数据洞察 MVP</title>
+    <!-- 主题首帧防闪烁：在 React 挂载前定好 data-theme，避免首屏闪白/闪黑。
+         ⚠️ 这里的优先级必须与 src/theme.ts 的 detectMode **逐字一致**：
+           URL 的 ?theme= → localStorage（用户选择）→ 系统偏好。
+         URL 排最前是门户内嵌场景的修复（门户只用 ?theme=dark 传达深色，
+         不认它就永远按浅色渲染）；两边若不一致，首帧会先画浅色再被 React 翻成深色，
+         正好把这个补丁的效果抵消成一次可见的闪烁。 -->
+    <script>
+      (function () {
+        try {
+          var q = new URLSearchParams(location.search).get('theme')
+          var fromUrl = (q === 'dark' || q === 'light') ? q : null
+          var saved = localStorage.getItem('myapp-theme')
+          var mode = fromUrl || (saved === 'dark' || saved === 'light' ? saved
+            : (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'))
+          document.documentElement.setAttribute('data-theme', mode)
+        } catch (e) {
+          document.documentElement.setAttribute('data-theme', 'dark')
+        }
+        var lang = 'zh'
+        try {
+          var l = localStorage.getItem('app-locale')
+          if (l === 'en' || l === 'zh') lang = l
+          else {
+            var nav = (navigator.language || navigator.userLanguage || 'zh') + ''
+            lang = nav.toLowerCase().indexOf('zh') === 0 ? 'zh' : 'en'
+          }
+        } catch (e) { /* 读不到就用中文兜底 */ }
+        document.documentElement.setAttribute('lang', lang === 'en' ? 'en' : 'zh-CN')
+        document.title = lang === 'en' ? 'Data Insight MVP' : '数据洞察 MVP'
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

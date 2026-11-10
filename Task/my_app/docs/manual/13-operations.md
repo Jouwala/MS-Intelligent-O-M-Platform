@@ -1,0 +1,2109 @@
+# 13 运维手册
+
+## 进程与端口速查
+
+| 端口 | 进程 | 绑定 | 谁负责活着 |
+| --- | --- | --- | --- |
+| `7038` | uvicorn / FastAPI | `0.0.0.0` | `backend_watchdog.py` |
+| `7090` | vite preview（前端） | `0.0.0.0` | `start_hidden.ps1:244` |
+| `5432` | PostgreSQL 16 | 视 `listen_addresses` | 自启脚本用 `pg_ctl` 拉起 |
+| `8787`/`8790` | 实时代理（FMS / VMAX） | **仅 `127.0.0.1`** | backend 启动线程 |
+| `9269` | 网页问答服务（whatsapp-kb-bot） | **仅 `127.0.0.1`** | backend 按需拉起（`services/portal_qa_ctl.py`） |
+| 无端口 | worker × 10 组（u/n/s/w/v/m/c/x/g/p） | — | `worker_watchdog.py` |
+
+> ⚠️ **7038/7090 与 MTN_Comsal 项目共用**，两套不能同时运行（PROJECT_DOCS.md 局域网章节原文即如此）。端口被占时 `start_hidden.ps1` 会 FAIL 并提示先 `stop.bat` 或加 `-Force`（:166-168）。
+
+### 网页问答助手（`9269`，按需拉起）
+
+门户 `/v3/olbrportal/` 右下角的问答挂件走 `POST /api/portal-qa/ask`（`backend/routers/portal_qa.py`），
+后端再转发到本机 `127.0.0.1:9269` 的 whatsapp-kb-bot 问答服务（`Task/whatsapp-kb-bot/src/http-server.js`）。
+
+- **不常驻**：只有第一次 `GET /api/portal-qa/health` 或 `POST .../ask` 时，`backend/services/portal_qa_ctl.py`
+  才会 `node --env-file-if-exists=.env src/http-server.js` 起它（`CREATE_NO_WINDOW`，不建计划任务）。
+  端口活着但 `/health` 不健康时会先杀掉再重起一次。
+- **改了 bot 源码要重启它**：杀掉占用 9269 的 node 进程即可，下一次提问/健康检查会自动重拉
+  （旧进程不会热加载）。日志：`log/portal_qa_YYYYMMDD_console.log`。
+- **健康自检**：`curl http://127.0.0.1:7038/api/portal-qa/health` —— 返回里 `detail.channel` 是
+  下一次提问会先走的通道（`openwebui` / `ollama`），`detail.indexChunks` 是知识库索引块数。
+- **问答能力与群机器人同源**：查表 / 工单统计 / 单号分析 / 站点告警 / VMAX CCA / 知识库 RAG 全复用
+  `src/answer.js:routeAnswer`，唯一差别是网页侧 `webHint:false`（查不到时不再附带「去网页版问」的尾巴）。
+- **超时**：单次提问后端给 300 秒（`.27` 的 Ollama 只常驻一个模型，7b 与 `bge-m3` 换载一次 7~30 秒，
+  知识库类问题实测 60~90 秒）。`UI` 在等待期间显示计时与「较慢」提示。
+
+## 日常巡检（5 分钟）
+
+1. **任务管理页**：有没有 `failed`、有没有长期 `pending`。失败聚合视图比翻列表快。
+2. **顶栏/页头同步标签**：`最近同步` 是否在预期窗口内（GIS/TTWO/Dashboard 三页有该标签）。
+3. **数据总览页**：表数量与行数是否明显异常。
+4. 命令行看进程与心跳：
+
+```powershell
+# 关键进程是否都在（后端 + worker 看门狗 + 10 组 worker；心跳文件覆盖每个被托管进程）
+Get-CimInstance Win32_Process -Filter "Name='pythonw.exe' OR Name='python.exe'" |
+  Select-Object ProcessId, CommandLine | Format-Table -Wrap
+
+# 心跳是否新鲜（超过 3 分钟未更新会被判定 hung 并强杀重拉）
+Get-ChildItem D:\01_RPA\Task\my_app\log\heartbeat_*.json |
+  Select-Object Name, LastWriteTime
+```
+
+5. 数据库新鲜度巡检由 `db_freshness_check` 每小时 :15 自动做，滞后会在其执行日志里给出调用链与检查方向（`task_registry.py:311-315`）。
+
+## 日志
+
+| 文件（`log/`） | 内容 | 备注（2026-08-27 实测体积） |
+| --- | --- | --- |
+| `backend_runtime.log` | 后端业务日志 | **≈81 MB** |
+| `backend_watchdog.log` | 后端拉起/退避记录 | **≈41 MB** |
+| `worker_runtime*.log` | 任务执行主日志（**排障首选**）；每组 worker 一个文件：`_u`/`_n`/`_s`/`_w`/`_v`/`_m`/`_c`/`_x`/`_g`/`_p` | 合计 ≈28 MB |
+| `worker_watchdog.log` | worker 拉起记录 | |
+| `frontend_runtime.log` | 前端 preview 输出 | |
+| `*_console.log` / `*.log.err` | 各子进程 stdout/stderr（`start_hidden.ps1:80-83`） | |
+| `realtime_proxy_fms_console.log`、`realtime_proxy_vmax_console.log` | 实时代理 | |
+| `cm_data_sync.log` | CM 小区数据同步 | |
+| `heartbeat_backend_watchdog.json`、`heartbeat_worker_watchdog.json` | 心跳时间戳 | |
+| `start_hidden_result.txt` | 上一次启动的逐条结果（`start_hidden.ps1:263-268`） | **启动失败先看这个** |
+| `pg_autostart.log`、`pg_ensure.log` | PG 拉起记录 | 按需生成 |
+
+> 🔴 **没有日志轮转**：全仓库无 `RotatingFileHandler`。日志只会一直涨，需人工定期清理（下面的清理步骤）。
+> ⚠️ 部分日志的报错原文里含账号，打包外发前先扫一遍。
+> `backend/restart_dbg.log`（≈751 KB）是调试残留，可直接删。
+
+### ⚠️ 后端 `logger.info` 此前**一条都没落盘**（2026-10-21 已修）
+
+**现象**：想在 `backend_runtime_<日期>.log` 里搜某条 INFO 日志，搜到 0 条；但同一份
+日志里 `logger.warning` 的行（如 `[SCHEDULE] 任务 … 的生效 cron 来自数据库覆盖`）**有**。
+
+**机制**：`backend/main.py` 此前**从未配置过根 logger**（全仓库无 `basicConfig` /
+`dictConfig` / `FileHandler`）。Python 的 `logging` 在 root 无 handler 时，
+- `WARNING` 及以上 → 走 `logging.lastResort`，输出到 **stderr**（无时间戳、无 logger 名）；
+- `INFO` / `DEBUG` → **静默丢弃**，不留任何痕迹。
+
+实测根因：`root.handlers == []`、`root.level == WARNING`、
+`logging.getLogger("task_runner").isEnabledFor(INFO) == False`。
+于是 `task_runner` 里 14 处 `logger.info`（含「保存调度配置」「任务开始执行」
+「[toggle_all_tasks] 主开关结果」）**全部是死的** —— 写代码的人以为留了痕，实际没有。
+这类"以为有日志、其实没有"最坑：排障时按不存在的日志去查，会得出错误结论。
+
+**修法**：`backend/main.py:25-56` 给 root 挂 `StreamHandler(stdout)`，级别 INFO，
+格式 `%(asctime)s [%(name)s] %(levelname)s: %(message)s`（与 worker 日志口径一致）。
+stdout 会被看门狗的 pipe 泵写进 `log/backend_runtime_<日期>.log`
+（`backend/log_writer.py`），因此**不另开文件句柄、不与轮转打架**。
+级别可用环境变量 `MY_APP_LOG_LEVEL` 覆盖（DEBUG/INFO/WARNING/ERROR）。
+
+**现在可以搜到的关键行**（此前全部搜不到）：
+
+```powershell
+# 主开关一次操作的结果（changed/stopped/skipped 实情）
+Select-String -Path log\backend_runtime_*.log -Pattern 'toggle_all_tasks'
+
+# 任务调度写入（含 manually_stopped 两个字段的实参）
+Select-String -Path log\backend_runtime_*.log -Pattern '保存调度配置'
+
+# 任务生命周期
+Select-String -Path log\backend_runtime_*.log -Pattern '任务开始执行|任务执行完成'
+```
+
+> 排障时注意：日志文件**按天命名且随重启更换**（`backend_watchdog.py:47-49`），
+> 翻错文件会误判成"没报错"。
+
+## 排障 FAQ
+
+| 现象 | 先查什么 | 处置 |
+| --- | --- | --- |
+| 页面打不开 | `start_hidden_result.txt` 里哪一步 FAIL | 按步骤重启；端口被占用 `start_hidden.ps1 -Force` |
+| 启动即 `[FAIL] Python not found` | `start_hidden.ps1:88-103` 的探测顺序 | 装 Python 3.12 或让 `pythonw.exe` 进 PATH |
+| 某类数据全停更 | 任务管理里对应任务是否 pending；`db/app.db` 里 `select * from task_queue where status='pending'` 是否只有那一条、且 `task_execution_log` 里该任务 0 条记录 | pending 且从不执行 → **该 task_id 不在 `GROUP_TASK_MAP` 任何组**（已踩四次，`04-task-system.md`）。补登记分组后需 `python restart_workers.py --mode watchdog --force`（**要管理员权限**：分组清单在 watchdog 进程内存里，只重启子 worker 不生效；无权限时 taskkill 会 Access denied 而静默失败，必须回查 `log/worker_restart_marker.log` 确认 pids 真的变了）；陈旧 pending 占住的单飞名额会在 6h 后被 `_expire_orphan_pending` 自动释放 |
+| 任务漏跑但没人发现 | `db_freshness_check` 执行历史里搜 `[TASK-HEALTH]`；告警去重状态 `TMP/task_health_alert_state.json` | 2026-09-18 起漏跑（无执行记录/队列滞留/成功逾期/未归组）会微信+邮件主动通知，新异常与恢复各通知一次、持续超 24h 重提；维护窗口静音用 `TASK_HEALTH_ALERT_ENABLED=0` |
+| **WhatsApp 告警静默发不出去**（任务却报成功） | ① `whatsapp-kb-bot\data\notify_heartbeat.json` 的 `at` 是否超过 5 分钟或 `connected=false`；②（发图）`backend\services\data\ext_liveness.json` 的 `last_seen_at` 是否超过 5 分钟 | 见下方专节「P1 告警推送通道」与「扩展在线检查」 |
+| 任务反复 failed | `worker_runtime*.log` 找该 task_id 堆栈（分组日志，可按任务所属组直接定位） | 上游不可达→先跑"系统设置→凭据→测试连接"；口令变了→更新凭据 |
+| 任务失败了但**没收到**失败告警 | `worker_runtime*.log` 搜 `failure_alert_deferred`；`task_execution_log` 里该任务自上次成功以来是不是首次失败 | 2026-11-07 起这是**设计行为**：可被 auto_retry 重投的任务首次失败只记日志，5 分钟后重投成功就完全不告警；连续 2 次失败（`FAILURE_ALERT_DEFER_STREAK`）、不可重投任务（邮件类等）、或失败记录落库异常时才立即告警。真停摆另有 `task_health_alert` 巡检兜底。要恢复旧的「失败即告警」设 `FAILURE_ALERT_DEFER=0`。背景：`.19` DbWriter watchdog 强杀重启窗口内（约 40s~2min）写库任务必失败但 auto_retry 均能自愈，旧逻辑每天为此发 1~3 封无效告警 |
+| 任务卡在"执行中"很久 | 是否真在跑：看 worker 进程 PID 是否存活 | 无需手工干预：`STALE_RUNNING_SECONDS=30min` + PID 核对会自动回收僵尸（`worker.py:78,82,302`） |
+| 邮件没发出去 | `email_recovery`（每 20 分钟）日志 | EWS 恢复后会自动补发；确认收件人配置未被重置 |
+| PG 连不上 / 启动 WARN | `start_hidden.ps1:137` 的 PG 探活结果 | 管理员运行 `stop.bat all` 再 `start.bat`；仍不行手工 `pg_ctl start` |
+| 只有某个看板数字不对 | 该看板的数据源任务与新鲜度开关 | 例：电池看板默认只统计 ≤24h 新鲜数据（`11-feature-guide.md` 第 13 节），不是 bug |
+| 反复被重启 | `backend_watchdog.log` 连崩计数 | 2026-10-06 起连崩 10 次**降级为每 5 分钟慢速重试、不再放弃**（`backend_watchdog.py:55-57`、`_enter_slow_retry()` `:212-240`）；改之前是"连崩 10 次永久退出"，即下方专节「后端静默停摆」。无论如何都要看崩溃原因，重启不解决问题 |
+| 界面英文环境出现中文 | 该文案是否 zh/en 两处都加（`i18n.tsx`） | 补 en 侧同名 key。历史上出现过两次同类缺陷 |
+| 启动报"已有实例" | `db/instance.lock` 是否残留（上次异常退出） | 确认无 backend 进程后删除该锁文件再启 |
+| 中文注释变成乱码（`?`/`\ufffd`） | 是否用过 PowerShell `Get-Content -Raw \| Set-Content` 往返改写源文件 | **这是已知会毁 UTF-8 中文的操作，禁止用它改本仓源码**（`write`/`edit` 工具或 Python 均可）。自检：`python TMP\_check_encoding_clean.py`，会列出含替换字符与可疑 `??` 的行；恢复手段是 `git checkout -- <文件>` 取回干净版本后重施改动 |
+| 某看板**单个指标**从某天起没了（其它指标正常） | `daily_kpi` 里那天的 `blocks_ok` 是否小于块总数 | 见下条「KPI 残缺日」 |
+| VMAX 90 天看板某指标断档 / 页面 Build 时间不动 | `data/olib_soc_report/olib_soc_report.sqlite3` 的 `daily_kpi` 表 | 见下方专节 |
+| 门户点开看板看到「需要登录：请先通过统一门户登录后再访问看板数据」 | 该浏览器的门户登录态是否有效（`localStorage` 的 `liberia_noc_auth_v1`） | **不一定是看板坏了**。my_app 认可三种身份来源：URL 深链 `?t=`、门户登录态、myapp 自身会话。目录里那串 `&t=` 是**门户会话 token**，而门户会话是**纯内存 + 12h 滑动过期、服务重启即清空**（门户 `server/auth/store.ts:32`），所以它**会过期**，目录里 21 条共用同一串、过期后一起失效 —— 这是常态而非本次改动引入。本机自测常看不出来，因为门户后端对 `localhost`/`127.0.0.1` 自动放行（`api.ts:474-485` 的换会话逻辑）。判据：让该用户重新登录门户再点。端到端回归：`python TMP\_verify_portal_card_click.py` |
+| 门户里少了 / 多了某张看板卡 | `backend\data\portal_catalog.json`（服务端全局目录，**53~54 条**） | 门户的看板清单**不在静态 assets 里**，而在服务端目录：`GET/PUT /api/portal-catalog`（`backend\routers\portal_catalog.py`，落盘 `backend\data\portal_catalog.json`，整体原子替换写）。改它请走接口而不是手改 JSON —— `_normalize_item`（`:205-257`）会校验 `titleZh/titleEn` 至少一个非空、`url` 必须以 `http(s)://` 开头，手改漏字段会让整份目录被丢掉。`no` 是分组成员覆盖与卡片锚点的键，**取当前最大号 +1，不复用已删编号**。回归：`python TMP\_verify_portal_ttwo_split.py` |
+| 门户登录**成功**、跳进 my_app 却**反复要求登录**，且 `portal-login` 返回 **503** | 启动日志里的「门户回调地址」自检行；`UNIPLAM_ME_URL` 是否指向**门户所在机器** | 见下方专节「门户回调用错地址：登录成功却进不去」 |
+| `/api/gis/sites` 间歇 500（`服务器内部错误，请稍后重试` + `request_id`） | 拿 `request_id` 去 `backend_runtime_<日期>.log` 搜 `[unhandled] rid=<id>`（**必须用当天那个日志文件**，后端每次重启会换文件，见 `backend_watchdog.py:47`） | 见下方专节「GIS 500：整表重建空窗」 |
+| `ImportError: DLL load failed ... An Application Control policy has blocked this file` | 报错里是否有这句 policy 文案（有即为本问题） | **不是缺依赖、不是版本问题、不是 PATH**：本机 Smart App Control **间歇**拦截未签名 `.pyd`，**会自行恢复**。稍等重试即可，**不要**换版本/删文件。见下方专节「App Control 拦截编译扩展」 |
+
+### 门户回调用错地址：登录成功却进不去（2026-10-06 修复）
+
+**现象**：用户在门户里正常登录成功，点开 my_app 看板却一直停在"需要登录"；
+反复重新登录门户也没用。my_app 日志里 `POST /api/auth/portal-login` 返回 **503**。
+
+**机制**：my_app 自身没有账号体系，登录链路是
+「门户签发 token → 深链 `?t=` 带进 my_app → my_app **回调门户 `/me`** 校验 → 换 myapp 会话 Cookie」
+（`backend/services/portal_auth.py` 的 `verify_portal_token()`，被 `portal-login` 调用）。
+
+这条链的最后一跳要访问门户，地址由 **`UNIPLAM_ME_URL`** 决定，默认值是
+`http://127.0.0.1:9267/uniplam/api/auth/me`（`portal_auth.py:77`）——
+**它假定 my_app 与门户同机部署**。一旦分机部署而没人设过这个变量，
+my_app 会去连**它自己那台机器**的 9267，而那里根本没有门户。
+
+**修复前为什么难查**：`verify_portal_token()` 把两类失败收敛成同一个返回值 `None`：
+
+| 实际原因 | 修复前 | 修复后 |
+|---|---|---|
+| 门户明确回 401 → token 真的过期 | 返回 `None` → 端点回 **401**「请先在门户登录后重试」 | 不变（401，正确） |
+| 连接被拒 / DNS 失败 / 超时 → **地址配错** | 也返回 `None` → 端点回 **401**，用户被引导去反复登录 | 抛 `PortalUnreachable` → 端点回 **503** 并说明是服务端配置问题 |
+
+于是真正的病因（地址不对）只留在日志里一行 `warning`，前端表现却是"再登录一次试试"。
+
+**现在怎么定位**（三步，都不用猜）：
+
+```bash
+# ① 启动日志自检：后端每次启动都会探一次门户回调地址
+#    可达   -> [startup] 门户回调地址可达: http://127.0.0.1:9267/uniplam/api/auth/me
+#    不可达 -> [startup] ⚠ 门户回调地址不可达: ... (All connection attempts failed)
+#              若门户不在本机，请设置 UNIPLAM_ME_URL 指向门户所在机器
+Get-ChildItem log\backend_runtime_*.log | Select-String -Pattern '门户回调地址'
+
+# ② 直接确认那台机器上有没有门户（把 <门户主机> 换成实际值）
+curl -s -o NUL -w "%{http_code}\n" http://<门户主机>:9267/uniplam/api/auth/mode
+#    200 = 门户在；连接失败 = 地址配错了
+
+# ③ 看 portal-login 到底回的是 401 还是 503（这是两类问题的分水岭）
+Select-String -Path log\backend_runtime_*.log -Pattern 'portal-login'
+```
+
+**修法**：在 my_app 的 `backend/.env` 里把 `UNIPLAM_ME_URL` 指向门户所在机器，然后重启后端。
+同机部署无需设置（默认值即正确）。
+
+> **为什么用 503 而不是 401**：401 的语义是"你的凭据不对"，会把用户和排障者都引向
+> "重新登录"这个无效方向；503 的语义是"服务端暂时不可用"，配合响应体里那句
+> 「这是服务端配置问题，请联系管理员检查 UNIPLAM_ME_URL」才指向正确方向。
+
+回归：`python -m pytest tests/test_portal_callback_reachable.py -q`（8 项，无网络；
+断言"不可达抛 PortalUnreachable"与"被拒绝返回 None"两条路径不混淆）。
+
+
+### GIS 500：整表重建空窗（2026-09-29 修复）
+
+**现象**：`?page=gis` 偶发 `GET /api/gis/sites?time_start=…&time_end=… 500`，刷新多半又好了；
+同一天里同一 URL 可能先 200、再 500。`request_id` 是唯一能定位的线索。
+
+**定位手法**（本次就是这么找到的）：
+
+```powershell
+# 拿前端报错里的 request_id 去当天日志里搜，会带出完整堆栈与真正的那一行
+Select-String -Path log\backend_runtime_20260929.log -Pattern 'rid=<你的 request_id>'
+```
+
+实测堆栈顶部落在 `gis.py` 的 `_collect_rt_alarm_stats` → `UndefinedTable: 关系 "realtime_alarm" 不存在`。
+
+**根因**：写端把整表**先删后建**，中间有一个「表不存在」的真实窗口，恰好落进去的读请求就 500。
+历史上两处都有这个问题：
+
+- `eflow_alarm_service.py` 的 `write_alarm_sqlite` / `write_history_alarm_sqlite`：显式 `DROP TABLE` + `CREATE TABLE`；
+- `_write_alarm_to_appdb`：对 `realtime_alarm` 走 `write_df(..., if_exists="replace")` ——
+  pandas 的 `replace` 同样是 `drop_table()` 后再建表并逐行插入（见 `pandas.io.sql.SQLTable.create`），
+  **这才是 `app.realtime_alarm` 消失的真正来源**（`gis.py` 读的正是这张表）。
+
+触发者是定时任务：`eflow_active_alarm` **每 1 分钟**（2026-10-15 起；`task_registry.py` 注册表默认值，
+生产实际值另见 `task_schedule_config`）、`eflow_history_alarm` **每 3 小时**各重建一次，
+所以故障是周期性的、且极易被当成"偶发抖动"。
+
+**修复**（两条一起才够）：
+
+1. **写端消除空窗**：改为「影子表灌满数据 → 原子顶替」。
+   ⚠️ **关键点：顶替必须是单条语句**。`_PsycopgRaw` 是 `autocommit=True`（`database.py:324`），
+   若拆成 `DROP` + `RENAME` 两次 `execute`，两次独立提交之间**仍有空窗** ——
+   实测并发读方仍能观测到 78~91 次 `UndefinedTable`，等于没修。
+   把两条 DDL 放进一个 `DO $$ … $$` 块后 PG 按单事务执行，实测 missing = 0。
+   SQLite 无 DO 块，但同连接内两条 DDL 处于同一隐式事务，不会中途提交。
+2. **读端降级**：`_collect_tt_stats` / `_collect_wo_stats` / `_collect_rt_alarm_stats` /
+   `_collect_his_alarm_stats` 统一走 `_run_stats_query()`，表瞬时不可用时**降级为空（计数显示 0）
+   而不是整页 500** —— GIS 地图是站点底图，不该因一张统计表抖动而打不开。
+   降级会打 `[gis/sites] <表名> 统计不可用，降级为 0` 的 WARNING，可据此判断是否又撞上了。
+
+**顺带修掉的隐患**：`_detect_gis_schema()` 原为**进程级永久缓存**，表一旦被判定存在就永不复核，
+`has_realtime_alarm` 恒为 `True`，兜底判断形同虚设；现改为 `_SCHEMA_TTL=300s` 的 TTL 缓存。
+
+**回归验证**（改这片前先跑）：
+
+```powershell
+# 端点正常性
+(Invoke-WebRequest 'http://127.0.0.1:7038/api/gis/sites?time_start=2026-09-22&time_end=2026-09-29' -UseBasicParsing).StatusCode
+# 全套后端测试（本次改动后 174 passed）
+python -m pytest tests\ --ignore=tests\test_frontend_deep.py --ignore=tests\test_frontend_e2e.py -q
+```
+
+> **改完必须重启后端才生效**（`pythonw.exe` 常驻，不会热加载）。
+> 可执行入口：`powershell -NoProfile -ExecutionPolicy Bypass -File TMP/_restart_backend.ps1`
+> —— 它只杀 **7038 的端口持有进程**且先校验命令行含 `uvicorn`（防止把
+> `backend_watchdog` 本身杀掉，看门狗被杀后不会再复活 uvicorn），随后轮询等新 pid、
+> 回报 watchdog 与 7090 状态。实测 2026-10-15 23:56:58 触发、23:57:16 新 pid 38916 接手（16s）。
+> ⚠️ **重启窗口内 APScheduler 不在，正好到点的那一轮任务不会被投递**（实测丢了
+> 23:57 一轮 `eflow_active_alarm` 与 `tt_alarm_whatsapp_alert`，23:58 起自行恢复，
+> 队列不积压、无需补投）。所以挑分钟边界之外的时候重启，并预期漏跑巡检可能报一次。
+> 排障时留意：**日志文件按天命名且随重启更换**，翻错文件会误判成"没报错"。
+
+### 触发扫描报「realtime_alarm 表不存在」（2026-10-15 事故）
+
+**现象**：`tt_alarm_whatsapp_alert` 偶发失败，错误恒为
+`RuntimeError: realtime_alarm 表不存在或缺少 tt_id/alarmraisedtime 列（eflow_active_alarm 未同步？）`，
+并且下一轮（5 分钟后）自己就 `success=True` —— 看着像抖动。
+
+**别信括号里那句提示**。先去 `task_execution_log` 看同一分钟的 `eflow_active_alarm`：
+事故当时它是 `success=True`、耗时 0.3s，同步根本没挂。真正要判的是
+**那一瞬间表还在不在**，用只读探针（20ms 采样，`app` / `eflow` 两份分别看）：
+
+```powershell
+cd D:\01_RPA\Task\my_app
+python TMP/_observe_schema.py 130
+```
+
+- 修复前的形态：每分钟出现一对 `app.realtime_alarm: 不存在` +
+  `eflow.realtime_alarm: 存在 36 列 缺 ['alarmraisedtime','tt_id']`。
+- 修复后的形态：`app` 那份**全程存在**，只可能看到一次影子表建立
+  （`eflow` 副本被创建出来）与列数随 eFlow 字段漂移的变化。
+
+**根因与修复口径**见 `04-task-system.md` 的「2026-10-15 事故」框：换表 DDL 写裸表名，
+而 PG 的 `DROP` 会顺 `search_path` 跨 schema 解析，导致 `app` / `eflow` 两份同名
+`realtime_alarm` 每分钟互删对方的正式表（`eflow_active_alarm` 每轮先写 eflow 副本、
+再写 app 主库，两条换名语句正好互为对方）。
+
+**同类风险（排障时优先怀疑这一类）**：库里任何「多 schema 同名表 + 裸名 DDL」
+都有同样问题；读端用 `ANY(current_schemas(false))` 判存在性或列集，
+同样会被另一份 schema 的副本污染。2026-09-29 `/api/gis/sites` 间歇 500 的
+「影子表 + 单条 `DO` 块原子换表」修复当时并没有真正消除空窗，直到本次
+schema 限定后才闭合 —— 再遇到「表偶发不存在」不要去查同步任务，先跑上面的探针。
+
+### 僵尸作业堵死推送通道（2026-10-01 事故）
+
+**现象**：`tt_alarm_whatsapp_alert` 在任务管理页**显示成功**，但值班群**收不到 P1 告警**。
+最迷惑的一点是它「自己好了」—— 失效几小时后任务恢复 `success=True`，
+其实只是**候选单变成了 0**（同期的单已过 3 小时窗口，或已清除），并不是推送恢复。
+
+**先看这一处**（一行定位）：
+
+```powershell
+# 作业文件是不是长期停在 running？
+Get-Content D:\01_RPA\Task\my_app\backend\services\data\tt_alert_job.json -Encoding UTF8 |
+  ConvertFrom-Json | Select-Object job_id, status, created_at, claimed_at
+# 或者直接问扩展轮询端点：正常空闲应返回 {"pending":false}
+(Invoke-WebRequest http://127.0.0.1:7038/api/whatsapp/ext/job -UseBasicParsing).Content
+```
+
+**根因**：作业文件是**后端 ↔ Chrome 扩展**之间的邮箱（`tt_alarm_job.py`）。
+扩展认领即把状态置 `running`（乐观锁，防多实例重复发送），但**认领后可能永不回报**
+—— 浏览器被关掉、扩展崩了、或机器上根本没开 Chrome。此时：
+
+- 作业永远停在 `running`，而认领逻辑**只认领 `pending`** → **整个邮箱被永久堵死**；
+- 任务侧因为「本轮候选 0 单」提前 `return success=True` → **监控全绿**；
+- 期间所有 P1 告警全部发不出去，**群里静默**。
+
+2026-10-01 实测：04:15 起连续 4 轮告警未达（每轮干等 600s），04:55 那单被 09:11
+认领后再无回报，直到人工清理。当时机器上只有 msedge、**没有 Chrome 在跑**。
+
+**判定与处置**：
+
+| 判据 | 含义 | 处置 |
+| --- | --- | --- |
+| `status=pending` 且 `claimed_at=null` | **没有扩展在轮询** | 打开 Chrome 并登录 WhatsApp Web、确认扩展已启用 |
+| `status=running` 且 `claimed_at` 很旧 | **僵尸作业**，邮箱已堵 | 该单若已过 SLA 就直接置 `failed`（别补发过期告警）；未过期可等自动回收 |
+| `/api/whatsapp/ext/job` 返回非 `pending:false` | 有作业卡着 | 同上 |
+
+手工清理（把 `status` 改成 `failed` 即可放行，**不必重启**）：
+
+```powershell
+$p = "D:\01_RPA\Task\my_app\backend\services\data\tt_alert_job.json"
+$j = Get-Content $p -Raw -Encoding UTF8 | ConvertFrom-Json
+$j.status = "failed"; $j.completed_at = (Get-Date).ToString("s"); $j.result = @{ ok=$false; sent=@(); errors=@("人工清理僵尸作业") }
+$j | ConvertTo-Json -Depth 6 | Set-Content $p -Encoding UTF8
+```
+
+**已做的修复**（2026-10-01）：
+
+1. **僵尸自动回收** —— `running` 超过 `STALE_RUNNING_SECONDS`（默认 3600s）未回报的作业
+   允许重新认领；判定口径收敛在 `backend/services/job_staleness.py`，
+   **发图源与告警文本源共用**（两者状态机同构，必须同改）。
+   阈值必须**远大于**正常发送耗时，否则多实例会重复发同一批告警。
+2. **告警没发出去就吵** —— 有 due 单却一条都没确认发送时，任务产出 `warnings`，
+   走 `task_runner.py:545-565` 的**降级告警**通道主动通知（微信+邮件）。
+   否则「扩展恢复 → 下轮候选 0 → 立刻 success=True」，这段故障会被彻底埋掉。
+3. **投递前先查扩展在线** —— 见下节。把「10 分钟后超时才知道」压成「这一轮就知道」。
+
+> ⚠️ 改了这两处**必须重启后端与 worker 才生效**（`pythonw.exe` 常驻，不热加载）。
+> 回归：`python -m pytest tests\test_job_zombie_and_month_start.py tests\test_ext_liveness.py -q`
+
+### P1 告警推送通道（2026-10-01 由扩展切换为 Baileys）
+
+**通道现状**：P1 告警**不再走 Chrome 扩展**，改由
+`whatsapp-kb-bot` 的 **`src/notify.js`**（Baileys，WhatsApp WebSocket 协议）发送。
+
+**为什么换**：扩展通道的**全部复杂度都来自「操作网页」** —— 要浏览器常开、要页面聚焦
+（粘贴依赖焦点）、每 2~3 周人工扫码，且发送确认只能靠数 DOM 气泡去猜
+（WhatsApp 是虚拟列表，气泡会被回收，实测把「已发出」判成失败并重发，
+2026-09-29 出过重复告警事故）。Baileys 不碰页面，这些复杂度全部消失，
+且发送确认是 `sendMessage()` 返回的**服务端 message id**，不是猜的。
+
+> 发图任务（`whatsapp_send_ext` / `whatsapp_send`）**仍走原通道**，本次只改了 P1 文本告警。
+
+**投递前在线检查**：投递前读推送进程的心跳，离线立刻产出 `warnings`
+（把「几分钟后才知道」压成「这一轮就知道」）：
+
+| 状态 | 判据 | 行为 |
+| --- | --- | --- |
+| `online` | 阈值（默认 300s）内有心跳且 `connected=true` | 静默，正常发送 |
+| `offline` | 心跳过期、`connected=false`，**或心跳里的 pid 已不存在** | **立刻**产出 `warnings` 走微信+邮件喊人 |
+| `unknown` | 从无心跳（进程刚起/从未启动） | **不告警**，仅记日志 |
+
+> `unknown` 不告警是**刻意的**：进程每次重启都没有心跳，若判离线则每次重启都误报，
+> 会让人对告警脱敏。判离线必须**有明确证据**。
+>
+> **为什么还要查 pid**：心跳文件是进程被强杀时**来不及更新的**。实测
+> `Stop-Process -Force` 之后文件里仍是 `connected:true` + 旧时间戳，
+> 只看时间戳会有最长 300s 的「假健康」窗口 —— 而这段时间告警投出去其实没人消费。
+> 故心跳里带了 `pid`，判活时顺手核对进程是否存在，把窗口压到一次轮询。
+
+**手工排查**：
+
+```powershell
+# 1) 状态总览（进程 / 心跳 / 健康判定一句话给全）
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\01_RPA\Task\whatsapp-kb-bot\autostart-notify.ps1 -Status
+
+# 2) 直接看心跳
+Get-Content D:\01_RPA\Task\whatsapp-kb-bot\data\notify_heartbeat.json -Raw -Encoding UTF8
+# 文件不存在 = 推送进程还没起过（unknown）
+
+# 3) 只连不发，自检凭据与连接（不会打扰任何群）
+cd D:\01_RPA\Task\whatsapp-kb-bot
+node --env-file-if-exists=.env src/notify.js --check
+
+# 4) 群名 → JID（配置里写的是群名，发送要 JID）
+node --env-file-if-exists=.env src/notify.js --groups
+```
+
+**常驻与看门狗**（2026-10-01 新增，2026-10-06 扩展到机器人）：四个计划任务，注册脚本
+`whatsapp-kb-bot\register_whatsapp_tasks.ps1`：
+
+| 任务 | 频率 | 作用 |
+| --- | --- | --- |
+| `WhatsAppKB_Notify_Autostart` | 登录时 | 推送进程开机自启 |
+| `WhatsAppKB_Notify_EnsureRunning` | 每 5 分钟 | 推送进程不在 / 心跳不健康就重启 |
+| `WhatsAppKB_Bot_Autostart` | 登录时 | **问答机器人**开机自启 |
+| `WhatsAppKB_Bot_EnsureRunning` | 每 5 分钟 | **问答机器人**不在 / 心跳不健康就重启 |
+
+> 两个都要：只做自启的话，进程中途死掉**没人知道**，值班群会静默收不到 P1 告警
+> —— 这正是 2026-10-01 事故的形态（监控全绿、业务已坏）。
+>
+> 巡检脚本判「不健康」包含**活着但未连接**（如凭据失效），此时重启是正确动作。
+
+> **机器人也必须看门狗**（2026-10-06 补）：`src/index.js`（问答机器人）与
+> `src/notify.js`（告警推送）是**两个互相独立**的常驻进程，凭据目录不同
+> （`data/auth` vs `data/auth-notify`），**应当同时在跑**。
+> 此前只给推送建了任务，机器人**既无自启也无看门狗** ——
+> 2026-10-06 15:15 重启后机器人再没起来，直到人工发现。
+> 两者各自写心跳：`data/bot_heartbeat.json` 与 `data/notify_heartbeat.json`。
+> 桌面快捷方式 `10-start_bot` / `11-stop_bot` 可手动启停机器人，
+> 且 `8-start_all` / `9-stop_all` 已把它并入流程。
+
+**单实例保护**：`notify.js` 启动时写 `data\notify.lock`（含 pid）。
+已有存活实例时**拒绝启动并说明原因** —— 否则两个实例会各自轮询同一个信箱，
+同一作业被消费两次、告警发两遍。锁里的 pid 已死（上次被强杀）会自动回收，不会永久卡死。
+
+**凭据失效怎么办**：推送进程是隐藏运行的，二维码打出来也没人看得见。
+心跳会显示 `connected: false`，此时执行 `cd whatsapp-kb-bot` → `npm run relogin` 重新扫码，
+再 `autostart-notify.ps1 -Stop` 后重新拉起（或等 5 分钟看门狗）。
+
+**网页扫码登录（2026-10-12 新增，替代上面的手工 relogin）**：
+
+设置页 `?page=settings` 的 **「WhatsApp 登录」** 页签提供可视化扫码，无需去 bot 目录敲命令。
+两个通道各一张卡片（**同一个号码的两个「已关联设备」**，必须各扫各的）：
+
+| 卡片 | 设备标识 | 进程 / 凭据 |
+| --- | --- | --- |
+| P1 告警推送 | `notify` | `src/notify.js` / `data/auth-notify`（设备槽 :2） |
+| 知识库问答机器人 | `bot` | `src/index.js` / `data/auth`（设备槽 :1） |
+
+点「扫码登录」会：后端写 `whatsapp-kb-bot/data/qr_request.json` 的对应键 →
+Node 侧 watcher（`src/qrLogin.js`）读到后**把旧凭据整体改名备份**（`data/auth.bak-<时间戳>`，
+只改名不删除）→ 触发该进程重连出码 → 把二维码原始字符串写进 `data/qr_status.json` →
+前端每 2s 轮询 `/api/whatsapp/login/status` 并用 `qrcode` 渲染成图片（二维码约 20s 自动轮换）。
+
+- 接口：`GET /api/whatsapp/login/status?device=notify|bot`、`POST /api/whatsapp/login/qr`（服务见
+  `backend/services/whatsapp_login_service.py`、路由 `backend/routers/whatsapp_login.py`）。
+- 出码通道文件与 `notify_job.json` 同目录、同条约定；`qr_status.json` 里两个设备各占一个键，互不覆盖。
+- `notify.js` 原先把「隐藏运行时出码」直接 `exit(1)`，现**当本次出码由网页请求触发时不退出**，
+  否则计划任务隐藏窗口场景下网页扫码永远走不通。
+- 换号失败想改回原号码：把 `data/auth.bak-*` 改名回原目录即可（先停对应进程）。
+
+### 扩展在线检查（2026-10-01 新增，仅发图通道仍适用）
+
+> ⚠️ **P1 文本告警已不走扩展**（见上一节）。本节只对**发图任务**有效：
+> 浏览器没开时图片发不出去，任务会干等 `WAIT_SECONDS` 才发现。
+
+**机制**：扩展每 ~17 秒轮询一次 `/api/whatsapp/ext/job`，后端在认领入口
+（`whatsapp_job_claim.claim_next_job()`）把时刻记进
+`backend/services/data/ext_liveness.json`；三态判定与上表同构
+（`online` 静默 / `offline` 立刻告警 / `unknown` 不告警）。
+
+**为什么不直接自动拉起浏览器**：扩展与发图任务（`whatsapp_service`）**共用同一个
+profile**，而后者的 `_kill_stale_chrome()`（`whatsapp_service.py:188`）会按命令行里的
+profile 路径**强杀**占用进程 —— 两者共存必然互相残杀。
+要自动化须先给扩展配**独立 profile**（需重新扫码登录一次），属独立议题。
+
+**手工排查**：
+
+```powershell
+# 扩展最近一次认领是什么时候？超过 5 分钟即视为离线
+Get-Content D:\01_RPA\Task\my_app\backend\services\data\ext_liveness.json -Raw -Encoding UTF8
+# 文件不存在 = 服务重启后扩展还没来认领过（unknown，属正常冷启动）
+```
+
+### `cells_kpi_sync` 每月 1 号报失败（2026-10-01，属预期而非故障）
+
+**现象**：每月 1 号 04:50 报 `2026-10 无有效小区数据，物化 0 行`，
+连自动重试也失败，并触发微信+邮件告警；但**次日照常成功**。
+
+**这不是 bug，是月初的正常空窗** —— 但要理解它必须先纠正两个直觉：
+
+**直觉一：「按 `Begin Time` 归属月份是错的」—— 错，口径是对的。**
+`Begin Time` **就是**数据覆盖的自然日，不是"窗口起点"。实测 360 万行
+`End Time - 1day == Begin Time` 全等。所以 `Begin Time = 2026-09-30` 表示
+"这是 9/30 这一天的数据"，**这个取值是对的、也是唯一可能的**。
+
+**直觉二：「数据延迟了，等等/重试就好」—— 错，重试没有用。**
+小区可用率是**按天**统计的：一行 = 某小区在某自然日的表现。
+**一天没过完，就算不出这一天的数据**，所以任何时刻能取到的最新一天必然是**昨天**。
+这不是上游发布慢，而是「今天」这个数据点**此刻根本不存在**。
+
+于是 10/1 04:50 跑、物化 `current_month()=2026-10` 时，窗口要找的是
+「10/1 这一天」，而 10/1 还没过完 → 本月窗口内**必然一行都没有**。
+加长重试、改窗口都无济于事，必须靠**判据识别**而不是靠等待。
+
+> 用「T+1 发布 / 数据未发布」描述这件事会把人带偏（听起来像上游的问题）。
+> 准确的表述是：**天粒度数据在当天结束时才成立**。
+
+**判定**：看是不是「当前月 + 1 号」这一种组合。
+
+```sql
+-- 确认任务是否已被标记为预期空窗（PG 主库；SQLite 模式下换 db/app.db）
+SELECT started_at, success, error FROM task_execution_log
+WHERE task_id='cells_kpi_sync' ORDER BY started_at DESC LIMIT 5;
+```
+
+**已做的修复**：`ran_cells_kpi_sync._is_month_start_pending()` 把
+「当前自然月 **且** 今天 1 号」的空窗判为**预期**（`month_pending=True`、`success=True`、
+`errors` 为空），不再误报。**只豁免这一种组合** —— 历史月为空、或当月 2 号起仍为空，
+照旧按真故障处理（那时每一天都已过完，空就是漏采）。
+
+> ⚠️ **月初这天看板是空白的，这是预期**：1 号当天物化库为 0 行，
+> **从 2 号凌晨起自动产出**，无需人工干预。若有人问"Cells KPI 怎么是空的"，
+> 答案就是「本月数据自 2 号起可用」。**不要**为了"别空着"去填上月的数 ——
+> 那会让人误读成这是本月数据。
+
+> 该任务 2026-09-25 才上线，**10/1 是它第一次遇到月份边界**，故此前从未暴露。
+> 回归：`python -m pytest tests\test_job_zombie_and_month_start.py -q`
+
+### eFlow 登录风暴：前端打不开 + 上游用户数暴涨（2026-10-04 事故）
+
+**症状**（两个表象，两组独立缺陷）：`?page=portalLogin` 等页面**打不开**（7090 未监听）；
+同时 eFlow 上**用户数持续增长**、"几秒一次登录"。
+
+#### 缺陷一：前端路径未随脚本搬迁更新（页面打不开）
+
+提交 `0e6071ed`（2026-10-03 21:58「代理脚本迁出被忽略的 scripts/ 并入 tools/」）
+把 `start-app.mjs` 移到 `tools/`，但**没有同步修改 `frontend/package.json`**
+（已核对：该提交的文件列表里根本没有它）：
+
+```
+frontend/package.json:9,12   "node ../scripts/start-app.mjs"   ← 文件已不在
+→ Error: Cannot find module '...\scripts\start-app.mjs'
+→ 7090 未监听 → nginx /myapp/ 502 → 页面打不开
+```
+
+> **为什么当时没暴露**：该提交自己写明"线上两个代理 ensure_proxy 返回 reuse，
+> **未重启**" —— 当时跑的还是搬迁前启动的旧进程，路径错误**只在下次冷启动时**
+> 才暴露，而那个时刻落在了 2026-10-04。
+
+**修复**：`frontend/package.json:9,12` 改指 `../tools/start-app.mjs`。
+
+#### 缺陷二：`do_login()` 的两个判据同时错了（登录风暴）
+
+**这是风暴的核心。** `tools/realtime_proxy.py` 的 `do_login()` 有**两个独立错误**，
+任一存在都会让"登录明明成功却判定失败"，进而永不写会话、每个请求 403 并再次登录。
+
+**错误 A：csrf 取不到（`c.name == "forgerydefense"` 精确匹配）**
+
+eFlow 的 cookie 名**带端口后缀**，实测为 `forgerydefense-28001`，不是裸名。
+原实现用精确相等匹配，**永远匹配不上**，于是 `csrf` 恒为空：
+
+```python
+for c in _COOKIE_JAR:
+    if c.name == "forgerydefense":     # ← 实际叫 forgerydefense-28001，永不命中
+        csrf = c.value
+```
+
+现场实测 jar 内容（`forgerydefense-28001` 明明有 64 字节）：
+```
+Z-AUTH-CODE-28001 = <非空 len=41>
+x-dexmesh-user-28001 = <非空 len=64>
+forgerydefense-28001 = <非空 len=64>     ← csrf 就在这，但取不到
+```
+
+**错误 B：成功判据要求 `"result":"1"`，而 eFlow 恒返回 `"result":"0"`**
+
+```python
+result_ok = '"result":"1"' in raw2.decode(...)   # ← eFlow 从来不发这个值
+```
+
+实测：**全部历史日志里 `"result":"1"` 出现 0 次，`"result":"0"` 出现 2422 次。**
+而同一时刻 `backend.services.auth_manager`（判据只看是否拿到 `Z-AUTH-CODE`）
+登录**成功**（cookie 350 字节、forgery_token 64 字节）。
+**证明登录一直是成功的，是代理自己判错了。**
+
+> ⚠ **`result:"0"` 不是"被拒绝"语义**，这版 `login_rsa` 恒回 `0`，
+> 同时正常签发 `Z-AUTH-CODE` / `forgerydefense` / `x-dexmesh-user`。
+> 用 `result` 判断登录成败是本事故最大的认知陷阱 —— 排障时别再把 `result:0`
+> 读成"上游拒绝登录"。**判定登录是否成功，看是否拿到会话 Cookie。**
+
+**正反馈如何放大**（`refresh_session` 修复前无任何退避）：
+
+```
+冷启动读不到会话 → do_login() 登录成功但判失败 → 返回 ("", "")
+  → 会话没写进 _SESSION、没 save_session()
+    → 下个请求仍无有效会话 → 403 → 又登录 → 又"失败" → …
+      → 实测 10-03 单日 3822 次；上游侧堆 3822 个永不释放的会话
+        → 「用户数一直在增加」（my_app 全程没有任何 eFlow 登出逻辑）
+```
+
+实测每日 `[auth] login start`：**09-27~10-02 全部 0 次**，**10-03 骤增至 3822 次**。
+
+> **为什么"之前运行的好好的"**：会话文件原先有效时，`do_login()` **从不被执行**
+> ——两个判据错误**潜伏已久但从未被触发**。是缺陷一（冷启动丢会话）第一次让它
+> 执行到，`refresh_session` 的无退避再把它放大成灾难。
+> **不是代码变坏了，是一个一直存在的 bug 终于被执行到了。**
+
+#### 判定（三条命令）
+
+```powershell
+# ① 页面打不开：7090 是否在监听
+Get-NetTCPConnection -LocalPort 7090 -State Listen
+# ② 登录风暴：当天日志首行是 "no valid session file" 而非 "session loaded"
+Select-String -Path log\realtime_proxy_fms_*_console.log -Pattern "session loaded|no valid session" | Select-Object -First 5
+# ③ 登录次数；正常为个位数，异常时可达数千
+(Select-String -Path log\realtime_proxy_fms_*_console.log -Pattern "\[auth\] login start").Count
+```
+
+#### 已做的修复
+
+1. `frontend/package.json:9,12` 改指 `../tools/start-app.mjs` —— 恢复 7090。
+2. `tools/realtime_proxy.py` 的 `do_login()`：
+   **csrf 改用前缀匹配**（兼容裸名与 `-<port>` 后缀）；
+   **成功判据改为"拿到 cookie + csrf 即成功"**，与 `auth_manager` 对齐。
+3. `tools/realtime_proxy.py` 的 `refresh_session()` **新增三道闸门**：
+   成功冷却 `_LOGIN_MIN_INTERVAL`（默认 30s）、失败退避 `_LOGIN_BACKOFF`
+   指数增长至 `_LOGIN_BACKOFF_MAX`（默认 600s）、`_LOCK` 串行化。
+   均可用环境变量 `PROXY_LOGIN_MIN_INTERVAL` / `PROXY_LOGIN_BACKOFF` /
+   `PROXY_LOGIN_BACKOFF_MAX` 现场调参。**被拦下时返回 `("", "")`**，
+   避免调用方拿着同一失效会话 `continue` 重试（那会白打一次上游）。
+4. `tools/realtime_proxy_vmax.py`：
+   - `ensure_login()` 施加同样三道闸门；
+   - `forgerydefense` 同样改用前缀匹配；
+   - 修掉一个**既存** `UnboundLocalError`：`_proxy()` 的 `except Exception`
+     分支从不给 `status` 赋值，上游不可达时抛异常，把本该 502 变成 500 堆栈；
+   - `/health` 的 `auth` 判据原先要求 `bool(CSRF)`，但该门户（`10.123.255.12:26180`）
+     **只签发 JSESSIONID、从不签发 forgerydefense**，导致登录成功后
+     `auth` 仍永久显示 `false`（误导排障）；改为按会话 Cookie 判定。
+     `csrf` 单独作为字段暴露。
+
+**验证结果**（2026-10-04 网线恢复后实测）：
+
+```
+8787 {"status":"ok","proxy":"ready","target":"https://10.100.20.8:28001","auth":true,"user":"admin"}
+8790 {"status":"ok","proxy":"ready","auth":true,"csrf":false,"user":"ZeeshanM"}
+tools/fms_session.json 已重建（cookie 有 / csrf 有）
+/proxy?url=...getSitedomain?type=RAN → HTTP 200，返回真实站点数据
+60 秒内新增 [auth] login start：0 次（修复前为 10~20 次）
+```
+
+> **教训一：搬迁脚本时，"按脚本位置推导"的资源路径必须一起搬。**
+> 本次受害点是 `dirname(__file__)` 型路径（`realtime_proxy.py:91-92`）。
+> 搬迁前应 `git grep` 该文件名找出**所有**引用点 —— `package.json` 就是这样被漏掉的。
+>
+> **教训二：判定上游成败，要以上游真正给的东西为准，不要臆断字段语义。**
+> `result:"0"` 被当成"拒绝"读了很久；真正的成功凭据（会话 Cookie）一直就在响应里。
+> **交叉验证手段**：拿同仓库另一条已工作的路径（这里是 `auth_manager`）做对照 ——
+> 它成功而这边失败，就说明问题在本侧，不在上游。
+
+> 回归：`python TMP\_verify_proxy_throttle.py`（13 项断言，不触网；
+> 覆盖冷却、退避、指数增长封顶、成功后清零）。
+
+> **登录频率治理的回归脚本**（2026-10-04 起，都留在 `TMP/`）：
+> - `python TMP/_verify_login_frequency.py` —— **离线**断言（4 项，含"5 次调用 0 次登录"），
+>   不触网、不污染上游，**改完鉴权相关代码优先跑这个**。
+> - `python TMP/_verify_mw_shared_auth.py` —— **离线**断言（25 项），MW UME 共享鉴权
+>   专项：无缓存回退、有效缓存复用、探活失败弃用、损坏 `created_at` 回退、
+>   回写正确性、回写→复用闭环。**全程拦截真实登录，绝不触网**。
+>   ⚠ 写这类脚本时要**挡对函数**：MW 的 `login()` 走自己的 `_http_request`，
+>   **不经过** `auth_manager._do_login`；首版挡错对象，"离线验证"意外登录了上游。
+> - `python TMP/_measure_login_rate.py [秒]` —— **在线**实测真实登录次数，
+>   判据是 `auth_cache` 的 `created_at` 变化 + 代理日志 `[auth] login start` 增量。
+>   它会真的触发上游登录（若缓存确实失效），**跑之前先确认可以接受**。
+> - `python TMP/_verify_export_poll_storm.py` —— **离线**断言（10 项），eFlow 导出轮询
+>   的请求量放大核算：轮询次数、间隔下限、轮询不叠加重试、三处重试分支都走 `limit`、
+>   401 分支透传 `max_retries`、并发上限，以及改前/改后请求量对比。改 `eflow_api_client`
+>   的轮询或重试逻辑后跑这个。
+> - `python TMP/_verify_schedule_override_warn.py` —— **离线**断言（6 项），校验
+>   "代码 `default_cron` ≠ 数据库生效值"的 WARNING 真会打出来，并列出当前**全部**
+>   错配任务（2026-10-04 实测 19 条）。怀疑"改了 cron 却没生效"时先跑这个。
+> - `python TMP/_verify_eflow_pagination_guard.py` —— **离线**断言（10 项），
+>   `ticket_export_rpa/get_eflow_table.py` 的分页风暴防护：硬上限、页间间隔、
+>   CR 页大小、原退出条件未被破坏，并模拟 total 异常时的请求数。改分页逻辑后跑。
+> - `python TMP/_probe_login_race.py` —— 扫全部日志找「并发登录同一上游」的证据
+>   （8s 窗口、跨文件判定）。用于复查上面那条**已知竞态**是否真的触发了。
+> - `python TMP/_probe_watchdog_restart_storm.py` —— 统计 worker 看门狗的
+>   崩溃/重启次数，判断有无"崩溃↔重启"循环。**2026-10-04 实测 16 天 0 次崩溃。**
+> - `python TMP/_verify_site_outage_session.py` —— **离线**断言（21 项），
+>   site_outage 会话持久化的结构 + 往返 + 反例检查（含"`_save_state` 必须在
+>   `browser.close()` 之前"这一关键顺序）。改会话逻辑后跑。
+> - `python TMP/_verify_session_reuse_live.py` —— **真实**连跑两轮 site_outage，
+>   验证第 2 轮确实复用会话、**0 次登录**。⚠ 会真实登录并覆盖截图，手动按需跑。
+> - `python TMP/_verify_proxy_setcookie.py` —— **离线**断言（15 项），
+>   用实测的 4 条 `Set-Cookie` 复现"`.get()` 丢 `forgerydefense`"并验证修复。
+> - `python TMP/_probe_profile_cookies.py` —— 只读 profile 的 Cookies 库，
+>   看会话是否落盘。怀疑"每次都在重新登录"时先跑它。
+>   ⚠ 注意 profile 在 `Task\Site_outage\`，不是根目录那个同名旧目录。
+>
+> **明文口令清理相关（2026-10-04）**：
+> - `python TMP/_audit_credential_groups.py` —— 列出 17 个凭据组各自
+>   **是否已在 credentials 表**。判据是"能否安全删除代码默认值"：
+>   有 DB 值的组删了无影响；没有的组删了会登录失败。**改凭据前先跑它。**
+> - `python TMP/_migrate_credentials_to_db.py [--apply]` —— 把尚未在设置页配置的
+>   凭据组从代码默认值迁进 `credentials` 表（不带 `--apply` 只预览）。
+>   因 `get_credential` 优先级是 `env > DB > 代码默认`，**先写 DB 不改变行为**。
+> - `python TMP/_strip_credential_defaults.py` —— 把 `credential_store.py` 里
+>   17 处 `default_secret` 置空。**必须在迁移脚本之后跑**，否则会断凭据。
+> - `python TMP/_audit_plaintext_secrets.py` —— 扫全库明文口令并汇总到文件级。
+> - `python TMP/_classify_secret_leaks.py` —— 把命中**分为"已入库"与"仅本机"**；
+>   只有已入库的才会随克隆分发出去。这份清单是 `_PENDING_*` 的收尾依据。
+> - `python TMP/_audit_guard_gaps.py` —— 检查守卫自身的盲区（扫描范围、黑名单缺项）。
+>   **守卫有盲区时它自己是发现不了的**，需要这个脚本从外部对照。
+> - `python TMP/_verify_guard_catches_secrets.py` —— **反证**：临时把口令写回源码，
+>   确认守卫**确实失败**，再还原。**改了守卫一定要跑它** —— 永远通过的守卫没有价值。
+> - `python TMP/_verify_guard_workspace_scope.py` —— 同上，但专测 **my_app 之外**
+>   的 6 个位置（`Task/sp/`、`Site_outage/`、`ticket_export_rpa/`、
+>   `WareHouseDashBoard/`、`report/`、`Task/ccn_ume/`）。
+>   2026-10-04 之前守卫只扫 my_app，这些位置**写回密码也不会失败**；本脚本钉住这个盲区。
+> - `python TMP/_scrub_workspace_secrets.py [--apply]` —— 把工作区脚本里的
+>   明文口令批量改为走共享凭据入口（`Unified_Tools/shared/credentials.py`）。
+>   逐处列出"原文→新文"并校验唯一命中，**不做正则批量替换**。
+> - `python TMP/_scrub_workspace_docs.py [--apply]` —— 文档类文件的口令改为
+>   **凭据组名**（AGENTS.md 四.2：文档只写配置项名，不写口令本体）。
+> - `python TMP/_verify_scrubbed_scripts.py` —— **按文件逐个**执行改写后的
+>   引导段，确认真能取到口令（32 个文件）。
+>   ⚠ 编译通过**不等于**取得到口令 —— 引导段若找不到 `credentials.py` 会被
+>   `except` 吞掉、静默降级为空，而 `py_compile` 全绿。**改完必须跑它。**
+> - `python TMP/_fix_boot_block.py` —— 修正已插入的引导段判据
+>   （`credentials.py` 文件 vs `shared/` 目录）。**幂等**，可重复跑。
+> - `python TMP/_verify_shared_credentials.py` —— 验证共享凭据入口在 7 种真实
+>   cwd（仓库根、各脚本目录、my_app）下都能找到凭据库。
+> - `python TMP/_verify_goal_objective.py` —— 逐条核对"明文口令清零"这个目标的
+>   五项是否达成（凭据组可解析 / 已入库文件无明文 / 文档无明文 / 回归通过 /
+>   已推送）。**用实测而非记忆**，适合作为本专题的收尾验收。
+> - `python TMP/_verify_logout.py list` —— **只读**列出 eFlow 在线会话
+>   （按账户分布、`admin` 僵尸概览、完整 authCode 落 `_eflow_online_sessions.json`）。
+> - `python TMP/_verify_logout.py kill <authCode>` —— 登出指定会话并复查列表。
+>   **可复用运维工具**，清僵尸会话直接用它；批量清理建议**每 100 条暂停几秒**
+>   （上游会话库对连续删除有瞬时抖动，见 13-operations 的登出小节）。
+> - `python TMP/_verify_logout_authcode.py` —— **反证**：登录后按 username+loginTime
+>   与「登录前后差集」两种方式定位自己那一行，并用受控实验证明**列表行 authCode
+>   (len=121) 有效、loginParameters (len=225) 无效**。改登出逻辑前先跑它。
+> - `python TMP/_verify_logout_e2e.py` —— 端到端闭环：登录 → `logout()` → 用三
+>   个独立证据交叉验证会话真的被释放（返回值 / 会话自探活 401 / 列表行消失）。
+>   会**真实登录一次**并在结束时尽力释放，不留僵尸。
+>
+> 📌 **统计口径提醒**：worker 日志按 GBK 落盘，用 `Select-String` 匹配**中文**特征串
+> （如"复用共享会话"）会**静默匹配不到**，统计结果假性为 0。做登录计数时
+> **一律用 ASCII 特征串**（`LOGIN] Starting authentication` / `LOGIN] SUCCESS`），
+> 否则会得出"没有复用"的错误结论。
+
+### 上游会话数控制：TTL 调长 + 登出（2026-10-04）
+
+**背景**：登录风暴的另一半原因是**只登录、从不登出**。eFlow 每次登录都新建一个
+服务端会话，而本项目没有任何释放它的代码，于是登录次数直接等于会话堆积量。
+
+#### 1) TTL 调长（已生效）
+
+`backend\.env` 新增 `AUTH_TOKEN_TTL=86400`（1440 分钟 = 24 小时）。
+`auth_manager.py` 的 `DEFAULT_TTL` 读取它（当前在 `:112`；本小节写下时是 `:87`，
+行号会随改动漂移，**按符号名找而不是按行号找**）。
+
+**为什么**：`sp_online_sync` 的 cron 是 `35 * * * *`（每小时一次），原默认 TTL
+1800 秒（30 分钟）**每次运行前必然过期** → 每小时真实登录一次 ≈ **24 次/天**。
+TTL 改为 24 小时后，一天只有第 1 次真实登录，其余命中缓存。
+
+> ⚠ 2026-10-04 写下这段时，`DEFAULT_TTL` 还依赖 `backend/database.py` 的
+> `load_dotenv` 副作用，所以「单独 import `auth_manager` 会读到旧默认值」。
+> 该缺陷同日已修（见下方「缺陷 1」）：`auth_manager.py:93-99` 现在**自己**加载
+> `backend/.env`（`override=False`），无论谁先导入结果都一致。
+> **仍然成立的只有一条**：`DEFAULT_TTL` 与 `AUTH_TTL_OVERRIDES` 都在**模块导入时
+> 求值**，改 `.env` 后必须重启后端与 worker 才生效。
+> ⚠ 另：`AUTH_TOKEN_TTL` 是**全域回退值**，只对实测寿命够长的 eFlow / MW UME 合适；
+> 其余主机由下一小节的 `AUTH_TTL_OVERRIDES` 按实测压短。
+
+**验证**：`python TMP\_verify_auth_ttl.py` → `ALL_TTL_CHECKS_PASSED`
+（断言 `DEFAULT_TTL==86400`、缓存文件 `expires_in==86400`、二次读取 `from_cache=True`）。
+（2026-10-06 注：`_verify_auth_ttl.py` 与 `TMP/_probe_eflow_session_lifetime.py` 都是
+当时的一次性探针，按「探针只能落 TMP 且用完自清」的约定已删除；现在的等价校验
+见下一小节，脚本 `TMP/_verify_ttl_overrides.py` **保留**可复用。）
+
+#### 1b) 按主机分别设 TTL（2026-10-06 新增，`AUTH_TTL_OVERRIDES`）
+
+**为什么 86400 不能是全域唯一值**：2026-10-06 的任务管理有 6 条失败，根因是一条 ——
+RAN UME（`10.100.28.27:28001`，NOC 账号）的共享缓存会话**服务端早已死亡**，而
+`AUTH_TOKEN_TTL=86400` 让 `auth_manager` 的快路径继续把它发出去（8 天内发出 76 次，
+其中 30 条落在 401 上）。`get_auth()` 的缓存快路径**不做任何探活**，只有
+`eflow_api_client._reauthenticate_on_401()`（`eflow_api_client.py:230`）和
+`ran_ume_service.py:727-765` 有 401 自愈；`packet_loss_sync` / `bp_report_sync` /
+`main_kpi_sync` / `ms_sla_sync` 以及门户一键登录（`portal_login_service.py:983`）
+都没有，于是它们只能整批失败，等 `ran_ume_service` 的 PM 循环把会话救活。
+
+**机制**：`backend/services/auth_manager.py` 新增
+
+| 符号 | 作用 |
+| --- | --- |
+| `AUTH_TTL_OVERRIDES` | 由 `backend/.env` 的 `AUTH_TTL_OVERRIDES=host:port=秒,…` 解析；坏条目只跳过并告警 |
+| `_resolve_ttl(host, port)` | 覆盖表优先，未列出的主机回退 `DEFAULT_TTL`（即 `AUTH_TOKEN_TTL`） |
+| `_write_cache(..., ttl=None)` | 默认按主机口径写入 `expires_in`；**不再**把导入时刻的全局值钉进文件 |
+| `get_auth(..., ttl=None)` | 默认值同样从 `DEFAULT_TTL` 改为 `None`，写入按主机口径；`force_refresh=True` 的 401 恢复语义不变 |
+| `_read_cache` 夹紧 | 过期判断用 `min(文件里的 expires_in, 现口径)` —— 只收紧不放宽 |
+
+**夹紧这一条是关键**：存量缓存文件里写的是**写入当时**的 86400，只改 `.env` 不会让它们
+改口。夹紧之后，下调 TTL 不必手工删 `auth_cache/`、也不必等一个完整周期，下一轮调度
+就判过期并真实重登；反向调长仍以文件旧值为准（保守）。
+
+**实测寿命 → 取值**（口径：会话诞生 = `auth_manager` 落盘或服务回写；证死 = 剥掉
+时间戳与 logger 字段后的消息体里出现严格 `HTTP/1.1 401` / `401 Unauthorized` /
+`hasLogged":true` / 「会话已失效」。⚠ 直接对整行搜 `401` 会被时间戳毫秒位 `,401`
+和 `"401 rows, 157 columns"` 这类正常 INFO 行污染，2026-10-06 第一版就因此误报；
+统计脚本 `TMP/_audit_ttl_v3.py` **保留**可复用）：
+
+| 主机 | 最近 8 天实测 | 取值 | 理由 |
+| --- | --- | --- | --- |
+| RAN UME `10.100.28.27:28001` | 30 条证死，最早出现在登录后 **113 分钟** | `1800` | 全域 86400 期间缓存被信任到 1452 分钟 |
+| iPRAN `10.100.2.99:28001` | 23 次诞生 22 次证死，年龄 **55~65 分钟** | `1800` | 消费方每小时都要重登，压短只是省掉一次注定 401 的探活 |
+| Battery `192.168.170.2:443` | 21 次诞生 20 次证死，年龄 **58~60 分钟** | `1800` | 同上；本模块原先显式写 8 小时（已删，见下） |
+| CNN `10.121.1.2:28808` | 8 天仅 1 次登录、**0 次复用**，测不出寿命 | `1800` | 同族 ZTE UME 三台实测空闲超时都 ≤ 2 小时；该任务本来每天重新登录，压短零成本 |
+| eFlow `10.100.20.8:28001` | 服务端 Max Idle Time 1440 分钟，**0 条证死** | 不列 = `86400` | 调短会退回本节上方 2026-10-04 的登录风暴 |
+| MW UME `192.168.169.247:28001` | `*/15` 实时任务复用共享会话 197 次，两次回写之间被信任最长 **1455 分钟**且无失效证据 | 不列 = `86400` | 15 分钟的活动一直顶住空闲计时器；压到 1800 会变成 48 次/天的登录风暴 |
+
+> ⚠ **MW 的 86400 有前提**：它靠 `mw_ume_kpi_sync_rt`（`*/15 * * * *`）不停活动把会话
+> 顶活。一旦该任务被停用，缓存就会发出死 cookie（该主机的消费方有探活，能自愈，
+> 但门户一键登录没有）。
+
+**门户目录里那三台主机为什么不进覆盖表（2026-10-06 核查，结论与原先的假设相反）**：
+
+门户目录里出现过 `10.123.255.12:26180`（VMAX CXO）、`172.17.208.1:28808`（UME
+iMonitor）、`10.100.20.9:8766`（RAIS），原先记为「一律回退 86400，没有实测依据，
+落回登录页就按同样方法统计再加表」。**逐文件核查后发现这个处置方向是错的**：
+`AUTH_TTL_OVERRIDES` 只在 `auth_manager` 内部生效，而这三台里有两台**根本不经过
+`auth_manager`** —— 给它们加覆盖表条目是**空操作**。
+
+| 门户 | 地址 | `kind` | 登录路径 | 经 `auth_manager`？ |
+| --- | --- | --- | --- | --- |
+| `vmax_cxo` | `10.123.255.12:26180` | `vmax` | `launch_and_login`（浏览器填表） | **否** |
+| `rais` | `10.100.20.9:8766` | `rais` | `launch_and_login`（浏览器填表，`captcha: true` 需人工补验证码。2026-10-26 前是 `launch_and_login_rais_direct`，上游改版后已删） | **否** |
+| `ume_in` | `172.17.208.1:28808` | `oauth2` | 通用分支 `_oauth2_direct_auth` | **是** |
+
+判定依据：`routers/portals.py:_spawn` 只对 `eflow` 分流到专用登录函数，
+其余走 `launch_and_login`；而客户端模式的 `build_client_login_plan` 里，只有
+`kind == "oauth2"` 的通用分支才调 `_oauth2_direct_auth`（`portal_login_service.py`）。
+`grep auth_manager` 在 VMAX（`vmax_report_client.py` 自有 `JSESSIONID` 单会话 +
+内部 re-login）与 RAIS（登录页填表）中**零命中**。
+
+所以：
+
+- **`vmax_cxo` / `rais`**：不受 TTL 与探活管辖。它们的「落回登录页」若有，
+  根因在各自实现（VMAX 是 `JSESSIONID` 单会话互相踢 + `captcha: true` 需人工输
+  验证码；RAIS 同样是 `captcha: true`，且 2026-10-26 起网关强制同源 `Referer`），
+  **不是 TTL 覆盖表能解决的**，`_audit_ttl_v3.py`
+  也量不到它们（它只统计 `auth_manager` 写的 `auth_cache/*.json`）。
+- **`ume_in`**：**确实**经 `auth_manager`，此前既没进覆盖表也没接探活 ——
+  这台才是「一键登录落回登录页」在 TTL 侧的真正嫌疑对象。已按实测处理：
+  探活端点登记为 `/api/pm-analysis/v2/history`（见下），覆盖表取值见下。
+  实测依据：该端点对垃圾/空 cookie 返回 **401 + `{"hasLogged":true,"source":"smagent"}`**
+  （正是 MW UME 2026-10-04 记录的死会话签名），且 TCP 可达 —— 端点有效、确会拒绝。
+
+- **`battery_ume`**（Battery UME `192.168.170.2:443`）：**确实**经 `auth_manager`
+  （门户侧走通用分支 `_oauth2_direct_auth`），且它**不是** UME PM-analysis 协议，
+  所以**不能**共用上面那个 history 端点 —— 它用电池自己的业务接口
+  `/api/monitor-manager/v1/realtime-data/get-by-condition`（2026-10-06 已登记）。
+  实测依据（用原样多段 cookie 串）：垃圾 cookie → `401 {"source":"smagent",...}`、
+  无 cookie → `401`、真实会话 + 空 body → `200 {"code":0,...}`，与生产同路径
+  `_post_json` 结果一致（`total=1532`），不误杀。
+  **该 UME 的会话寿命同样是实测的**（见 `auth_manager.AUTH_TTL_OVERRIDES`）。
+  回退文件的新鲜度窗口 `battary_kpi_fetch_socket.auth_info_is_fresh()` **不再自己
+  写死数字**，而是实时取 `auth_manager._resolve_ttl()`（2026-10-06 收敛，
+  见下方「第二真相源」条）。
+
+`ume_in` / `battery_ume` / `eflow` 的探活端点登记在
+`portal_login_service.PORTAL_PROBE_PATHS`（未登记的门户返回 `None`＝不探活，
+退回「只信 TTL」）。**登记前必须实测该端点确实要求鉴权**（探登录首页会得到
+假绿 200），否则会把好会话判死、无谓增加登录。
+
+> ✅ **eflow 已登记（2026-10-06 实测）**：`/api/fm-active/v1/activealarms/table`
+> （取自 `eflow_api_client.py:122` 的 `ALARM_API_PATH`，生产真在用的活动告警接口）。
+> 三态实测：无 cookie → `401 {"source":"smagent",...}`、垃圾 cookie →
+> `401 {"hasLogged":true,...}`、真实会话 → `200`（真实告警 JSON）。三项全对。
+>
+> ⚠️ **探测 eFlow 必须复用生产请求路径**（含 `forgerydefense` 头）。自己用
+> urllib 拼请求会得到 `403 code=3329008 "prohibited for cross-site access"`
+> —— 那是**探测脚本的 bug**，不是会话死了；照它下结论会把好会话判死。
+>
+> 🔧 **生效范围：只重启 worker 不够。** `portal_login_service` 只被后端
+> （`routers/portals.py`、`routers/credentials.py`）导入，**worker 不加载它**，
+> 所以 eflow 探活要**重启后端 7038** 才生效（`stop.bat` + `start.bat`，
+> 或杀掉 7038 由 `backend_watchdog.py` 拉起）。只重启 worker 组是无效动作。
+
+> 🚫 **rais / vmax_cxo / fw_kpi 不登记探针，这是有意的、不是遗漏**：
+> 它们**根本不走 `auth_manager.get_auth`**（`kind` 分别是 `rais` / `vmax` /
+> `umc`，各有自己的登录流程：RAIS 与 VMAX 走登录页填表且**都有服务端强制的图形验证码**，
+> FW 是 UMC 的 DES/SM3 页面加密）。
+> 它们的会话「当场登录、当场用在同一个浏览器窗口里」，**没有可复用的共享缓存**，
+> 所以「缓存快路径把死会话发出去」这个失效模式在它们身上**不存在**。
+> 给它们登记探针是**死代码没人调用**，只会让人误以为已经覆盖了。
+>
+> 结论：这三台若出现「落回登录页」，**不是 TTL/探活能修的**（那是 eFlow/RAN
+> 那类「吃缓存」门户的病）。排查方向应转向：VMAX / RAIS 的验证码是否人工通过、
+> 上游是否在建新会话时踢掉旧会话（mutual-kick）。
+> ⚠️ RAIS 特别说明（2026-10-26）：上游改版后它**不再是「直接鉴权」门户**，
+> 详见 `11-feature-guide.md` 第 24 节；若又看到 `HTTP 445`，那是请求缺同源 `Referer`
+> 被网关挡在业务逻辑之外，不是口令错误。
+> 判定脚本：`TMP/_which_portals_can_probe.py`（列出每个门户的鉴权路径与
+> 能否受益于探活）。
+
+> ⚠️ **Battery 全链路已闭合（2026-10-06 补最后一处裸露点）**，四层逐一核对：
+> 1. 门户一键登录 → `_oauth2_direct_auth` → `get_auth(probe=_portal_probe(spec))` ✅
+> 2. `battery_kpi_service._acquire_auth` 第一层 → `get_auth(probe=...)` ✅
+> 3. 第二、三层回退（`fetcher.login_rsa()` / `auth_info.json`）→
+>    `_acquire_auth` 返回前**补探一次** ✅（此前是裸露的）
+> 4. 拉取中途 401 → 作废共享缓存 + `_acquire_auth(allow_shared=False)` 重登一次 ✅
+>
+> 邮件任务（`run_battery_email`）**不取会话** —— 它只基于已同步的数据重建报表
+> 并发送，故无鉴权缺口。`battary_kpi_fetch_socket.main()` 是独立调试入口，
+> 无任何 `.bat` / 计划任务调用它，不在生产路径上。
+
+**同时修掉的两个"配置项与事实不符"**：
+
+1. `backend/.env` 原注释写「401 由 `auth_manager._reauthenticate_on_401()` 兜底」——
+   `auth_manager` 里**没有这个函数**，自愈只在 `eflow_api_client`（见上）。
+2. `battery_kpi_service.py` 原 `_SHARED_AUTH_TTL_SEC = 8 * 3600`，注释理由是
+   「`backend/.env` 未配置 `AUTH_TOKEN_TTL`」—— 前半句错（10-04 就配了 86400），
+   后半句被实测推翻（8 小时窗口 100% 是空头信任）。现在该常量已删，回写走
+   `_resolve_ttl`。
+3. **`auth_info.json` 的新鲜度窗口曾是"第二个真相源"（2026-10-06 收敛）**：
+   `battary_kpi_fetch_socket.auth_info_is_fresh()` / `ensure_auth_info()` 原先各自
+   硬编码 `max_age_hours = 1.0`，与 `AUTH_TTL_OVERRIDES` 是两个独立数字 ——
+   该文件注释自己都写着"改一处要改两处"。实测这个分叉**每一台都对不上**：
+   - eFlow / MW UME（覆盖表 86400）：窗口只有 1h，**比口径紧 24 倍**，
+     把本可信任 24 小时的会话反复重登；
+   - Battery / RAN / iPRAN / CNN（覆盖表 1800）：窗口 1h，**比口径松 2 倍**，
+     正好是"死 cookie 被发出去"的失效模式。
+   现在两个参数默认 `None`，由 `_fresh_window_hours()` 实时问
+   `auth_manager._resolve_ttl()`，覆盖表改了它自动跟着变。
+   回归：`tests/test_auth_probe_policy.py::test_auth_info_fresh_window_has_single_source_of_truth`。
+   （注意：该函数**只按时间判**，不探活；窗口内但已被上游作废的会话它仍返回 True，
+   所以 `_acquire_auth` 返回前的那次补探不能省。）
+
+**验证**：`python TMP/_verify_ttl_overrides.py` → 末行 `结论：全部通过`，退出码 0。
+它只用**临时目录**当缓存、`_do_login` 打桩，**不碰** `backend/services/auth_cache/`、
+**不发真实登录**；断言覆盖：`.env` 解析出 4 条、按主机取值正确、旧 `expires_in=86400`
+的 4 小时存量文件在被压短的主机判过期而在 eFlow/MW 仍判有效、`get_auth` 默认落盘 1800、
+显式 `ttl=` 仍优先、坏配置容错。
+
+**生效方式**：`AUTH_TTL_OVERRIDES` 与 `DEFAULT_TTL` 一样在**模块导入时求值** ——
+改 `.env` 后必须**后端与全部 worker 组都重启**才生效（重启动作由运维执行，
+时机不当会打断正在看看板的人，所以这里只指路）：worker 侧
+`python restart_workers.py --mode worker --reason "AUTH_TTL_OVERRIDES 生效"`
+（`--mode watchdog` 只在改分组清单时才需要，见本文开头排查表）；后端侧
+`stop.bat` + `start.bat`，或杀掉 7038 的进程由 `backend_watchdog.py` 拉起
+（注意后端每次重启会换 `backend_runtime_<日期>.log`）。
+重启后自查一行：
+`python -c "import sys;sys.path.insert(0,'.');import backend.services.auth_manager as m;print(m.DEFAULT_TTL, m.AUTH_TTL_OVERRIDES)"`
+→ 应打出 `86400 {'10.100.28.27:28001': 1800, '10.100.2.99:28001': 1800, '192.168.170.2:443': 1800, '10.121.1.2:28808': 1800}`。
+**不必删 `auth_cache/`**：`_read_cache` 的夹紧逻辑下一轮调度就会把压短主机的旧缓存判过期。
+
+**可复用脚本**：`TMP/_check_item1_impact.py` 逐台列出「覆盖表口径 / 旧硬编码 1h /
+当前窗口」三者对比，用来确认新鲜度窗口确实跟着覆盖表走（改动覆盖表后可重跑核对）。
+
+> 📌 **顺带纠正本节上方（:544）的口径**：worker/backend 运行时日志实际是 **UTF-8**
+> 落盘（2026-10-06 用 UTF-8 读同一批文件，中文特征串「共享会话已失效」「复用共享会话」
+> 都能命中）。原文「按 GBK 落盘、匹配中文会静默为 0」不再成立；但**用 ASCII 特征串
+> 统计**这条建议仍然有效，因为最可靠的坑是日志里带逗号的毫秒时间戳（见上面的证死口径）。
+
+#### 2) 登出接口：契约与 authCode 取值**均已解决**（2026-10-04 闭环验证）
+
+**接口契约**：
+
+```
+POST /api/oauth2/v1/delete/login/remove
+Body: {"authCode":["<值>"]}
+必需请求头: forgerydefense: <会话 forgerydefense cookie 的值>
+```
+
+- 缺 `forgerydefense` 头**一律 403**：`{"code":3329008,"message":"This request
+  is prohibited for cross-site access"}`。实测 Referer/Origin 的 7 种组合全部 403，
+  **只有**加上该头才返回 204。头名必须是**不带端口后缀的裸 `forgerydefense`**
+  —— 用 `forgerydefense-28001` 同样 403（cookie 名带后缀，头名不带）。
+- 业务接口同样需要这个头：不带它请求业务 API 也是 403。
+
+**authCode 的正确来源（本节的关键结论）**：
+
+`authCode` 来自「**在线用户列表**」接口的行字段，**不是** authorize 页面的
+`loginParameters`：
+
+```
+POST /api/oauth2/v1/login/users          ← 只读，返回 data[] 行数组
+Body: {"pageNo":1,"pageSize":500,"searchName":"","searchIp":"","sort":{"key":"","type":""}}
+行字段: username / loginIp / loginTime / authCode(=登出要的值, len≈121) / idleTime
+```
+
+两者形状极像（都以 `$10` 结尾），**必须靠长度区分**：
+
+| 来源 | 长度 | 登出效果（受控实验） |
+| --- | --- | --- |
+| authorize 页 `loginParameters` | **225** | 返回 204，但会话**仍能 200** —— **无效** |
+| **在线用户列表行 `authCode`** | **121** | 会话随即 **401**，并从列表消失 —— **有效** |
+
+> ⚠ **`204` 不是成功判据**：上游对**无效/陈旧**的 authCode 也**无条件返回 204**。
+> 2026-10-04 之前正是被这一点误导，得出了"接口调不通"的错误结论。
+> 真正的判据只有一条：**登出后该会话再请求应变 401**。
+
+> ⚠ **关闭 `AUTH_LOGOUT_ENABLED` 时，缓存里落盘的仍是 225 那个错值。**
+> 因为 `_do_login` 把"取列表行 authCode"这一步放在 `if LOGOUT_ENABLED:` 之内
+> （`auth_manager.py:705-712`）—— 关闭时该分支不执行，`auth_code` 保持
+> `loginParameters`（225）。实测确认：关闭时缓存 `auth_code` len=225；
+> 置 1 后同一路径返回 len=121、登出后会话 401。
+>
+> **这个组合当前是安全的**（登出关着，错值不会被用），但它是**隐式耦合**：
+> 谁若绕过 `AUTH_LOGOUT_ENABLED` 直接调 `logout()`（例如运维脚本、
+> 或把 `eflow_api_client.logout()` 接进任务收尾的 `finally`），
+> 就会拿 225 去登出 → **204 但会话不死，且看起来"成功"**。
+> 所以：**要用登出，必须先置 `AUTH_LOGOUT_ENABLED=1` 并让进程重新登录一次**
+> （旧缓存里是错值），不要只接调用点。
+
+**「取最新一行」有竞态，必须用差集定位自己的会话**：
+
+`admin` 名下实测有 8 条会话，登录时刻彼此只差 **18s / 81s / 116s** —— 多个 worker
+的登录是交错的。若等到**登出时**才"取最新一行"，那一刻的最新行很可能是**别的
+worker 刚建的会话**，登出就会**误杀别人的会话**。
+
+所以 `_record_own_auth_code` 的做法是：登录**前**拍该账户 authCode 快照，
+登录**成功那一刻**立刻查列表、取差集定位自己那一行（此时竞态窗口最小）。
+定位不到就**返回空、登出时跳过** —— 宁可不登出，也不误删别人的会话。
+
+**上游对连续批量登出有短暂抖动**：实测批量删到第 139 条时，调用方会话瞬时 401
+（`hasLogged:true`），几秒后自愈 200。程序化清理建议**每 100 条暂停几秒**。
+
+**验证**：`python TMP\_verify_logout_e2e.py` —— 三个独立证据交叉验证
+（`logout()` 返回值 / 会话自探活应变 401 / 在线列表中该行消失），全部通过。
+另有 `python TMP\_verify_logout.py list|kill <authCode>` 作为可复用运维工具。
+
+**`AUTH_LOGOUT_ENABLED` 默认仍为 False** —— 这不再是"因为没通"，而是**有意不开启**：
+
+**决策（2026-10-04）：先不全局开，问题发生再打开。**
+理由是收益与成本不对称 —— 上游 1440 分钟会自动回收（见下条第 1 点），
+僵尸**自限**；而开启的代价是**每次登录**多两次上游请求（快照 + 定位），
+这笔开销在常态下白付，收益只在僵尸堆积时才体现。
+
+真遇到堆积（如代理风暴）时的两条处置路径，**都不需要重启**：
+
+| 手段 | 用法 | 适用 |
+| --- | --- | --- |
+| 临时开启代码登出 | 处理完置 `AUTH_LOGOUT_ENABLED=1` 重启 worker | 想让它边跑边释放 |
+| 直接清僵尸 | `python TMP/_verify_logout.py kill <authCode>` | 一次性清理，**首选** |
+
+> 目前**未开启**已验证为"零开销"：`logout()` 直接返回 False，
+> **不发任何上游请求**（`auth_manager.py` 的 `LOGOUT_ENABLED` 判断在最前面）。
+
+> **判据教训（两次）**：① 早先版本把 `ok = "5" not in status[:1]`（只排 5xx）
+> 当成功，于是 **403 被误判为"已登出"**；已改为**只认 2xx**，并对非 2xx 记
+> `[AUTH] 登出未生效`。② 但只认 2xx **仍然不够** —— 上游对无效 authCode 也回 204。
+> 两个错误都是靠**受控对照实验**（同会话、同请求头，唯一变量是"authCode 取值"
+> 或"是否登出"）才发现的：**单看"请求返回成功"会一直以为它是好的。**
+
+**141 条 admin 僵尸会话清理（2026-10-04）**：代理风暴期间代理自登录后丢弃会话，
+累积成批量僵尸。用 `TMP/_verify_logout.py kill` 清理：
+
+- 批量登出 **146 条**，138 条一次成功；8 条因批量删除期间上游会话库瞬时抖动报 401，
+  调用方会话随即自愈（探活 200）后**补清 8/8 成功**；
+- 在线会话数 **168 → 22**，`admin` 名下只剩 6 条近期活跃会话；
+- 清理期间保留最近 2 小时的 5 条活跃会话不动（含操作者当时的浏览器会话），
+  `ZTE_NOC_EFLOW` 的 worker 会话**全程未碰**；
+- 清理后复查 backend、7 个 worker、代理日志：**零新增真实登录**，代理持续全 200。
+
+#### 3) eFlow 侧会话会自动过期（登出功能**仍然值得做**，但不是唯一手段）
+
+2026-10-04 从 eFlow 的**用户连接数页面**实测到一条关键事实：
+
+| 列 | 值 | 含义 |
+| --- | --- | --- |
+| **Max Idle Time (Minutes)** | **1440** | 上游自身对会话的**空闲上限就是 1440 分钟 = 24 小时** |
+| Idled Time (Minutes) | 0 | 该会话当前空闲时长 |
+| Login Time | — | **可用于将列表条目与某次登录对应起来**（见第 2 条的差集定位） |
+| Operation | Force Logout | 上游提供**手动强制登出**按钮 |
+
+**两个结论**：
+
+1. **堆积的会话会自行回收** —— 空闲满 1440 分钟后消失。所以会话堆积
+   **不会永久占用**，不清理也不会把系统压垮。
+2. **`AUTH_TOKEN_TTL=86400`（= 1440 分钟）与上游上限完全吻合**，是最优取值：
+   本地缓存不会晚于上游失效，也不会无谓地触发重新登录。
+   **⚠ 这只对 eFlow 成立**（本节的实测对象就是 eFlow）。2026-10-06 逐台实测发现
+   其余 ZTE UME 的空闲超时只有 1~2 小时，把 86400 当**全域**值用会让缓存长期发出
+   死 cookie（当天 6 条任务失败就是这么来的），已改为
+   「`AUTH_TOKEN_TTL` 作回退 + `AUTH_TTL_OVERRIDES` 按主机压短」，
+   见上面「1b) 按主机分别设 TTL」。
+
+> **但"会自动回收"不等于"不必管"**：2026-10-04 的代理风暴一次堆了 146 条僵尸，
+> 在 24 小时的回收窗口内会持续占用上游连接数、并把真实活跃会话淹没在列表里，
+> 排障时极难分辨。所以**程序化登出仍有价值**（第 2 条已闭环可用），
+> 只是它从"必须的手段"降级为"更干净的手段"。
+
+> ✅ **清理**现有堆积会话有两条路：上游页面的 `Force Logout` 按钮（直接、可见），
+> 或 `TMP/_verify_logout.py kill <authCode>`（可批量、可脚本化）。
+
+> ⚠ **排障时务必先确认流量的真实来源。** 2026-10-04 排查中一度把
+> 「eFlow 连接数持续增长」归因为 my_app 仍在登录，实测发现当时 my_app
+> **一个进程都没跑**，与 eFlow 保持连接的是**本机浏览器**（用户在查看该会话
+> 列表页，页面轮询产生大量连接）。
+> 判定方法：`Get-NetTCPConnection -RemoteAddress 10.100.20.8` 看 `OwningProcess`，
+> 再用 `Get-CimInstance Win32_Process -Filter "ProcessId=<pid>"` 看进程名，
+> **不要**只凭"连接数是 my_app 的目标 IP"就下结论。
+
+> **操作纪律**：不要在生产 eFlow 上做密集的登录实验。每次 `get_auth(force_refresh=True)`
+> 都会在上游**真实新建一个会话**并出现在用户连接数列表里，直到 1440 分钟后才回收。
+> 2026-10-04 的验证过程中因此产生了 11 个测试会话（04:20~04:22）。
+> 验证登出这类"会改变上游状态"的功能前，先想清楚**是否会污染生产**，
+> 并优先用上游现成的可观测手段（如该列表页）做判定，而非反复打接口。
+
+### 登录频率治理：三道防线（2026-10-04，已实测生效）
+
+**症状**：`AUTH_TOKEN_TTL` 已配 86400（1440 分钟），但登录依然频繁。
+
+**排查结论：TTL 本身是对的，问题是它"管不到"另外两条路径。**
+共三个独立缺陷，任一都会导致重复登录：
+
+#### 缺陷 1：`DEFAULT_TTL` 的求值依赖导入顺序（已修）
+
+`DEFAULT_TTL` 在**模块导入时**求值，而 `auth_manager.py` 此前**自己不加载 `.env`**
+—— 只在 `backend.database` 被先导入时才"顺带"读到。实测两种结果：
+
+```
+先 import backend.database → DEFAULT_TTL = 86400  ✓
+直接 import auth_manager    → DEFAULT_TTL = 1800   ✗
+```
+
+worker 是多进程（u/n/v/m/c），**导入顺序不受控**，于是"配了 1440 分钟却仍按
+30 分钟过期"，且**静默无提示**。
+
+**修复**：`auth_manager.py:81-105` 自己调 `load_dotenv(..., override=False)`，
+不依赖任何导入副作用。验证：直接 import 也得到 86400。
+
+#### 缺陷 2：`realtime_proxy` 有**独立**的会话存储，TTL 对它无效（已修）
+
+项目里有**两套 eFlow 会话存储**：
+
+| 存储 | 文件 | 判过期依据 |
+| --- | --- | --- |
+| `auth_manager` | `backend/services/auth_cache/<host>_<port>.json` | **`expires_in`（TTL）** |
+| `realtime_proxy` | `tools/fms_session.json` | 不看 TTL，只看会话是否被拒 |
+
+`realtime_proxy.py` 里对 `AUTH_TOKEN_TTL` 的引用是**零** —— 它自持一份会话，
+403 就自己登录。这正是用户最初抱怨的"每个任务申请一次 token"的最后一块拼图。
+
+**修复**：新增 `adopt_shared_session()`（`tools/realtime_proxy.py:178`），
+启动时与 403 恢复时都**优先复用 `auth_manager` 的跨进程缓存**，让全项目只有一个 token 来源。
+
+> ⚠ **踩坑记录一（只信 TTL 就采纳 → 502）**：第一版实现**只信 TTL 就直接采纳**缓存会话，
+> 结果把一个"看着有效其实已死"的会话当成刷新成功还给调用方 → 重试仍 401 → **502**，
+> 比不接共享还糟。日志特征：
+> ```
+> auth error 401 → shared session adopted (from_cache=True) → attempt=2 → auth error 401
+> ```
+> **根因**：`auth_manager` 只按 `expires_in` 判过期，而 eFlow 可能**提前**作废会话
+> （实测：缓存 `created_at` 才 10 分钟、TTL 86400，请求却返回
+> `401 {"hasLogged":true,"source":"smagent",...}`）。
+> **修正**：采纳前必须 `_probe_session_alive()` **探活**（打一个轻量只读 API，
+> 判据是 HTTP 200）。探活不过就**不采纳**，回退自己的登录流程。
+> 同时"会话失效"**不得**被记成"共享永久不可用" —— 那是可恢复的正常状态，
+> 缓存在别的进程登录后会变新；只有 import/路径这类结构性错误才永久关闭。
+
+> ⚠ **踩坑记录二（探活函数自己坏了，且静默失败）**：加完探活后，**所有**采纳请求都返回
+> "会话已失效"，而同一个会话直接打接口明明是 200 —— 即**探活函数恒 False**，
+> 于是共享会话**从未真正生效**，每个请求都退化成自己登录（反而更糟）。
+> **根因**：探活函数里写了 `request.Request(...)`（`request` 未绑定）和
+> `urllib.error.HTTPError`（该模块只 `from urllib.error import ...`），
+> 抛 `NameError`，却被 `except Exception: return False` **静默吞掉**。
+> **两条教训**：
+> 1. **兜底 `except` 必须打印异常**。`return False` 不写日志，让"探活永远失败"
+>    看起来和"会话确实失效"一模一样，排查时极易误判为上游问题。
+> 2. **判断"某功能是否生效"要看正向证据**（日志里出现 `probe=ok`、真实取数返回 200），
+>    不能只看"没有报错"。本 bug 的离线断言最初还报 PASS —— 因为断言写的是
+>    "采纳必须成功"这一**假设**，而不是"会话真的可用"。修完断言与探活才一致。
+
+> 🔎 **附带发现（重要，但不改变本轮结论）**：eFlow 会话可能**提前**失效，
+> 与 TTL 无关。实测同一个 `admin` 会话：
+> - `04:22` 建的缓存在 `04:39` 前后开始返回 `401 {"hasLogged":true,...}`；
+> - 而新登录的会话**立刻可用**，且连续 3 次请求稳定 200；
+> - 同时验证：**新登录不会踢掉旧会话**（A 登录 → B 登录 → A 仍 200），
+>   即上游**允许多会话并存**，不是"单会话互踢"。
+>
+> 含义：`AUTH_TOKEN_TTL=86400` 是**上限**，不是保证 —— 会话可能因上游策略
+> （空闲回收、重启、安全策略）提前失效。**因此探活是必需的**，
+> 只靠 TTL 会在"缓存说有效、实际已失效"时整片 502。
+> 上游用户连接页的 `Max Idle Time = 1440` 分钟与此吻合。
+
+#### 缺陷 3：`sp_online_sync` 的触发间隔 > 原 TTL（已修）
+
+`sp_online_sync` 旧 cron 是 `35 * * * *`（每小时），而旧 `AUTH_TOKEN_TTL=1800`（30 分钟）
+—— **每轮运行前缓存必然已过期**，于是每小时真实登录一次 = **24 次/天**。
+
+日志完全吻合（修前）：`09-26`~`10-03` 每天 **15/22/23/21/24/21/23/26** 次登录。
+
+**修复**：cron 改为 `35 */6 * * *`（4 次/天，`backend/task_registry.py:665`）。
+即使 TTL 配置失效或缓存被清，登录次数也**封顶 4 次/天**，不会退化成 24 次/天。
+
+> ⚠️ **这条修复当时并未真正生效（2026-10-04 晚发现并修正认知）**：
+> 生效 cron 的真相源有**两个**，数据库 `task_schedule_config.cron` **永远优先**于
+> 代码 `default_cron`（`backend/services/task_runner.py:327` 的三目运算）。
+> 当时数据库里 `sp_online_sync` 仍是旧的 `35 * * * *`，所以**实际仍按小时跑**，
+> 登录频率并没有降下来。详见下面的「调度覆盖」小节。
+> 现在的防线只剩一条真的：`AUTH_TOKEN_TTL=86400`（24 小时）。
+
+> 为什么"每小时"本来就不必要：本任务拉的是全量在线工单（非增量流水），
+> 看板呈现"当前工单状态"，6 小时粒度对工单场景足够。
+
+#### 验证方法与实测结果
+
+**离线断言**（不触网）：`python TMP/_verify_login_frequency.py`
+→ `ALL_LOGIN_FREQUENCY_CHECKS_PASSED`（4/4，含"5 次 get_auth 触发 0 次登录"）。
+
+**在线实测**：`python TMP/_measure_login_rate.py 300`
+判据是 `auth_cache` 的 `created_at` 是否变化 + 代理日志 `[auth] login start` 增量
+—— **不问代码看起来对不对，只数真实登录次数**。
+
+修复后 5 分钟窗口结果：
+
+| 指标 | 结果 |
+| --- | --- |
+| 代理 200 响应 | **165 次**（确在满负荷服务） |
+| 代理 502 响应 | **0** |
+| `auth error 401` | **0** |
+| `[auth] login start` | **0** |
+| **真实登录次数** | **0** |
+
+即"**165 次成功取数、0 次登录**"。修复前同样流量会触发多次登录。
+`/health` 返回 `{"status":"ok","proxy":"ready","auth":true}`，业务取数 200。
+
+#### eFlow 任务全景（改后已全部落在 24h TTL 内）
+
+| 任务 | cron | 间隔 | 说明 |
+| --- | --- | --- | --- |
+| `eflow_active_alarm` | `*/30 * * * *` | 0.5h | 靠缓存命中 |
+| `eflow_sync` | `22 * * * *` | 1h | 靠缓存命中 |
+| `eflow_history_alarm` | `0 */3 * * *` | 3h | 靠缓存命中 |
+| `sp_online_sync` | `35 */6 * * *` | 6h | **本轮已放宽** |
+| `eflow_sync_full` | `0 1 * * *` | 24h | 一天一次，正常 |
+| `eflow_tt_rules_check` | `20 4 * * *` | 24h | 正常 |
+| `eflow_alarm_rules_collect` / `eflow_push_rules_collect` | `59 23 */3 * *` | 3 天 | 正常 |
+
+**结论**：所有 eFlow 任务的触发间隔都 ≤ 24h，因此**全部命中缓存**，
+正常情况下**每天只会有 1 次真实登录**（TTL 到期那次）。
+
+### 登录频率治理（续）：全上游普查与 MW UME 修复（2026-10-04）
+
+eFlow 修完后对**全部上游**做了一次同类缺陷普查（VMAX / MW / IPRAN / CCN /
+RAN UME / UME IN / FW / CM / Battery），结论是 **MW UME 比 eFlow 更严重**，
+CCN 次之，其余健康。
+
+#### 普查实测：MW 每天 94 次真实登录
+
+按 worker 日志统计**真实登录**次数（10 天）：
+
+| 上游 | 登录次数 | 判定 |
+| --- | --- | --- |
+| **MW UME** | **935 次**（日均 94） | ⚠ 最严重 |
+| UME/RAN | 330 次 | 每天 1~3 次，正常 |
+| CNN/CCN | 13 次 | 每天 1 次，正常 |
+| IPRAN / eFlow | 0 次 | 正常 |
+
+MW 的时间戳分布是铁证：登录发生在每小时第 **00/15/30/45** 分钟各一次，
+与 `mw_ume_kpi_sync_rt` 的 `*/15 * * * *` 完全吻合。
+
+> **为什么长期没被发现**：`backend/worker_watchdog.py:159` 早已写着
+> "`mw_ume_kpi_sync_rt` 是 */15 高频任务，实测 **153 次/天**" —— 团队**知道**
+> 这个数字，但把它当作**队列调度频率**看（当时是为解决排队 964s 的看板滞后），
+> **没人换算成"上游会话数"**。每一次运行 = 一次真实登录 = 上游多一个会话，
+> 而 MW 侧从不主动释放。**代价被记在了"调度"账上，没记在"上游会话"账上** ——
+> 这是本轮最值得记住的一条：统计口径错了，数字再准也发现不了问题。
+
+#### 根因：与 eFlow 同源的三个缺陷
+
+| 缺陷 | 位置 | 说明 |
+| --- | --- | --- |
+| 无缓存 | `mw_ume/mw_ume_kpi_service.py:522` `login()` | 每次调都完整走 4 步 OAuth2，函数内无缓存检查 |
+| 无失败恢复 | 全文检索 `401\|403\|relogin` **零命中** | 会话中途失效只能整轮失败 |
+| 判定过松 | 同文件 `:596-604` | `len(cookies) > 3`、`"portal" in resp_text` 这类猜测式判定 |
+
+#### 修复：接入 `auth_manager` 共享缓存（三件套缺一不可）
+
+> ⚠ **2026-10-06 晚更新 —— 本节的"三件套"已被收敛，不再是当前写法。**
+> 下面记述的是当天上午的**历史实现**（保留作为事故复盘，机制与教训仍然成立）。
+> 当天晚些时候已把「何时探活 / 缓存作废 / 单次重登」三段策略**下沉进
+> `auth_manager.get_auth(probe=...)`**，MW 与 CNN 的 `_try_shared_auth()` /
+> `_probe_session_alive()` / `_write_shared_auth()` **均已删除**，本模块自带的
+> 4 步 OAuth2 登录实现也一并删除（与 `auth_manager._do_login` 是同一协议的
+> 重复实现）。现在各服务**只保留探活函数**（`probe_mw_session` / `probe_cnn_session`
+> 等），由调用方注入，见 `05-security-and-credentials.md` 的
+> 「读缓存的采信边界」小节。
+>
+> 第 1 条里"必须用 `_read_cache()` 而不是 `get_auth()`"的顾虑**已不成立** ——
+> 它成立的前提是"自有登录还留在本模块里"，而那个重复实现已经删掉了。
+> iPRAN 与 Battery **保留**了自有登录分支作为 auth_manager 不可用时的兜底，
+> 因此这两家仍保留 `_write_shared_auth()`；CCN / MW 无此分支，回写已成死代码，
+> 故删除。**不要为了"统一形状"把 iPRAN / Battery 的兜底删掉。**
+
+MW 的门户路径 `/uportal/framework/default.html` 与 `auth_manager` 内置的
+**完全一致**，协议同为 ZTE `login_rsa`，因此可直接接入，无需新写鉴权。
+
+但只"接入"是不够的 —— **实测中发现只做前两步反而更糟**，必须三件套齐备
+（以下函数名与行号为**历史**位置，均已不存在）：
+
+1. **`_try_shared_auth()`**（`:461`）—— 复用前先读缓存。
+   ⚠ **必须用 `_read_cache()` 而不是 `get_auth()`**：`get_auth()` 不是只读的，
+   缓存未命中时它会**直接走到 `_do_login()` 真实登录**（`auth_manager.py:634-646`），
+   于是变成"共享没命中 → auth_manager 登录一次 → 本模块又登录一次"的**双重登录**，
+   比不接共享更糟。
+2. **`_probe_session_alive()`**（`:423`）—— 采纳前探测。
+   必须探**业务端点** `HISTORY_PATH`：实测探 `LOGIN_PORTAL` 首页返回 **200**
+   （误导性的"看起来正常"），而业务端点返回 **401**。探首页会得到假绿。
+3. **`_write_shared_auth()`**（`:496`）—— 登录成功后**回写**缓存。
+   这是共享的**另一半**。只读不写时，本模块每轮登录产生的新会话永远进不了
+   共享缓存，下一轮探活拿到的仍是旧会话、必然 401 → **每轮白探一遍照样登录**。
+
+#### 实测验证（真机，w 组 worker）
+
+修复过程分三次重启，日志完整记录了三个阶段：
+
+| 时间 | 行为 | 说明 |
+| --- | --- | --- |
+| 03:35–05:00 | 每轮真实登录 | 修复前 |
+| 05:15 | "复用"但**随后 401 失败** | 只做第 1 步：死会话被放行，两个 MW 任务全挂 |
+| 05:20 / 05:30 / 05:45 | 探活失败 → 真实登录 | 加了第 2 步：不再挂，但**每轮仍登录**（缓存从不回写） |
+| **06:00 / 06:15** | **复用成功、0 登录、200 OK** | 补上第 3 步后闭环 ✅ |
+
+`06:00` 与 `06:15` 两轮日志均为「复用共享会话（auth_manager 跨进程缓存），
+跳过登录」，查询 `HTTP/1.1 200 OK`，分别取回 5530 / 4740 行。
+
+> **离线回归**：`python TMP/_verify_mw_shared_auth.py`（25 项断言，**全程拦截真实登录、
+> 绝不触网**）。覆盖：无缓存回退、有效缓存复用、探活失败弃用、探活成功复用、
+> 损坏 `created_at` 回退、回写正确性、回写→复用闭环。
+
+#### 其余上游评估（2026-10-04 晚已全部整改，见表后说明）
+
+| 上游 | 鉴权方式 | 评价 |
+| --- | --- | --- |
+| IPRAN | 自实现 `login()` + `ensure_session_fresh()` + `_login_lock` + 401 重登（`ipran_ume_kpi_service.py:459-482`） | ⚠→✅ 旧评价"进程内复用最完善"漏算了跨进程：cron 每小时，session 年龄必超 1500s，实测 **17 次/天 churn**（单账号单会话互踢）。已接三件套，见下节 |
+| VMAX | `_ensure_session()` 带 `if not self._logged_in` 守卫；代理模式由 8790 代理持会话（`vmax_report_client.py:451`） | ✅ 健康 |
+| CM data | 每轮登录一次 + 401 重登（`cm_data_export.py:2088-2096`），cron 每天 | ⚠→✅ 存有 FALLBACK_COOKIE 死会话回退，已删除（见下节） |
+| RAN UME | 走 `auth_manager`，`force_refresh=True` 仅用于 401 恢复（`ran_ume_service.py:745`） | ✅ 用法正确；实测 ~2 次/天 |
+| CNN/CCN | 每轮登录，cron 每天；判定偏松但频率无害 | ⚠→✅ 已接三件套 + 判定收紧 + 401 处理，见下节 |
+| FW / UME IN / Battery | 各自 login，均为日级任务 | ❌→✅ **旧评价错误**：Battery 实际 cron `5 * * * *`（每小时），实测 **15+ 次/天真实登录**（堆积型）。已接三件套，见下节 |
+
+> **一处易错点**：`ipran_ume_kpi_service.py` **并不使用** `auth_manager`，
+> 它有自己的 `UmeSessionClient`。用 `grep auth_manager` 判断"是否已接入共享"
+> 会把 `ran_ume_*` 与 `ipran_ume_*` 混为一谈 —— 按文件名前缀匹配会漏判，
+> 应逐个文件读实现。
+
+### 登录频率治理（三）：第二轮整改 —— 登录锁、auth_code 同源、三服务接入（2026-10-04 晚）
+
+eFlow 闭环（c931101c）当晚的交叉核查与全量普查发现了四类残余缺陷，一并处理：
+
+1. **auth_manager 跨进程登录锁**（`_login_lock`，`auth_manager.py`）。
+   worker 是 u/n/v/m/c 多进程，TTL 到期或上游互踢时多进程会**各自真实登录**
+   —— eflow_api_client 的锁只合并本进程线程，管不到进程间，一次会话失效
+   最多放大成 7 个僵尸会话。现在登录段在 `auth_cache/.login_<host>_<port>.lock`
+   排他文件锁内执行，拿锁后**复查缓存**（double-checked）：等锁期间别人
+   刚登录写入的会话直接复用。锁获取失败退化为无锁登录（记 warning），
+   锁随进程退出自动释放，无死锁面。
+   回归：`python TMP/_verify_login_lock.py`（9 进程冷启动并发，断言真实登录
+   恰 1 次；无锁时为 9 次）。
+2. **auth_code 与 cookie 同源绑定**。`get_auth()` 现在把 `auth_code`
+   （在线列表行值）随结果带出；`eflow_api_client.login()` 存入
+   `_session_auth_code`，`logout()` **显式传它** —— 不再让 auth_manager
+   从共享缓存回读。旧路径的隐患：缓存文件按 host:port 命名、全 worker 共用，
+   A 登录后 B 重登覆盖缓存，A 登出时回读到的是 B 的 authCode → 误杀 B 的会话。
+3. **FALLBACK_COOKIE 死会话字面量全部清除**（6 个文件）：
+   `ran_ume_service.py`、`ms_sla_sync.py`、`ran_ume_network_kpi.py`、
+   `ran_ume_main_kpi.py`、`cm_data/cm_data_export.py`。旧实现曾在
+   auth_manager 失败时回退到硬编码的陈旧会话 —— 违反「绝不写敏感值」，
+   且静默拿死会话打出一片 401 掩盖故障。现在登录失败明确抛出，交给
+   auto_retry。 `_do_login` 快照注释同时修正：TTL 过期重登（主路径）时
+   登录前快照拍不到，差集退化为"该账户最新一行"，存在同账户并发登录窗口
+   内取错行的残余风险 —— 这是已知局限（上游列表行无会话 cookie 关联字段），
+   不是已消除项。
+4. **Battery / iPRAN / CNN 三个上游按 MW 三件套接入共享缓存**（此前普查表
+   低估了 Battery 与 IPRAN 的频率，实测分别为 15+/天堆积型、17/天互踢型）：
+   - `battery_kpi_service.py`：`fetch_battery_records` 先共享后登录；
+     401 恢复（invalidate + force 重登 + 整体重试一次）；socket 版补
+     `AuthExpiredError` 防 401 半截数据静默落库；回写 ttl=8h（与自有
+     auth_info.json 信任窗口一致）。回归：`TMP/_verify_battery_shared_auth.py`
+   - `ipran_ume_kpi_service.py`：`UmeSessionClient.login()` 先共享后登录；
+     采纳时回填 `logged_in_at` 防止 1500s 规则立刻又重登；401 自动重登
+     原样保留并获得共享闭环。回归：`TMP/_verify_ipran_shared_auth.py`
+   - `ccn_ume_kpi_service.py`：三件套 + 成功判定收紧为「拿到 Z-AUTH-CODE」
+     （旧 302/em-portal/len(cookies)>3 猜测式判定降级为观测日志）+
+     401 恢复（锁内双检复用）。回归：`TMP/_verify_ccn_shared_auth.py`
+
+   三个上游均核实登录响应带 forgerydefense（可带端口后缀），回写路径完整；
+   `_write_shared_auth` 保留"cookie 或 forgery_token 为空不回写"的守卫，
+   上游行为变化时共享自动退化为 miss（行为与修复前一致 + warning 留痕）。
+   **首次上线各有一次真实登录**（共享缓存尚无该 host 的文件），之后收敛到
+   每日 1~3 次；上线后观察 `auth_cache/192.168.170.2_443.json`、
+   `10.100.2.99_28001.json`、`10.121.1.2_28808.json` 是否生成。
+
+### KPI 残缺日的识别与修复（2026-09-24 事故）
+
+现象：`?page=vmaxCxoDashboard_90Days` 的「Active Users」停在某天之前，之后全是空，
+但流量/视频等其它指标正常。**页面上的 `Build MM-DD HH:MM` 是页面文件自身的修改时间，
+不是数据时间**，所以它不动是正常的 —— 数据时间看左侧「数据截至」与状态栏。
+
+根因：单日取数时某个块临时失败，那一行仍被写入（其余块有值），只是该块对应的列为 NULL。
+这种「行在但格子空」的天既不算任务失败、也不算缺天，于是**永久残留**。
+
+```sql
+-- 一行定位：blocks_ok 小于 7 的日期就是残缺日（看板共 7 个块）
+SELECT day, blocks_ok, traffic_tb, active_user, video_tb
+FROM daily_kpi ORDER BY day DESC LIMIT 15;
+```
+
+修复（幂等，重取即自愈；2026-09-24 起每日任务已自动覆盖这类天；2026-10-11 起还能覆盖窗口外的历史残留）：
+
+```bash
+python -m backend.services.olib_soc_report.olib_soc_report_service --sync-kpi --days-back 30
+```
+
+> 判定逻辑在 `olib_soc_kpi_store.incomplete_days()`（窗口内）与 `all_incomplete_days()`（全表，
+> 补滑出窗口的历史残留），列白名单 `REQUIRED_COLUMNS`（全部主数值列），
+> 与 `gap_days()` 一起决定每天要补哪些天。改库前先备份该 sqlite 文件。
+>
+> **2026-10-11 起还多了两层可见性**：① `run_block()` 的 `days_empty` 让「分区缺失/查出空」的块
+> 降级 `partial`（任务不再静默成功）；② 看板页面顶部与明细表会直接标出残缺日，
+> 巡检也可 `curl /api/olib-soc-dashboard/status` 看 `incomplete_days` 计数。
+
+> **下钻明细表（2026-10-30 起 `daily_app_offload` / `daily_video_app` / `daily_game_app`，
+> 层在 `olib_soc_app_detail.py`；2026-10-31 起再加 `daily_tcp_target`，层在
+> `olib_soc_ne_detail.py`）不在 `REQUIRED_COLUMNS` 自愈范围内**，残缺判定按明细表自己
+> 「有没有这天」。**2026-10-31 起已自动续写**：每日任务 `olib_soc_kpi_daily_sync`
+> 改走完整落库路径（不再 `kpi_only=True`），并按 `olib_soc_app_detail.gap_days()` 单独算
+> 「明细缺口」—— 窗口内 video/game/tcp 三表任一缺天后，下次调度自动补，不必人工干预
+> （逐网元 TCP 数据来自伪块 `tcp_ne` 的一条按 targetid 分组的只读 SELECT，生产数仓纪律见
+> 总纲四.8；数仓侧若有异议，配置 `blocks.tcp_ne=false` 即整体关停，其余下钻不受影响）。
+> 任务历史的摘要里看两个字段即可确认：`detail_requested_days`（本次要补的明细天）与
+> `app_detail`（video/game/tcp 各写入多少行）；`app_detail` 里出现 `error` 才是真失败。
+> 仍需手工回补时（历史缺口、或明细写入连续失败）**不要**跑 `--sync-kpi --force`
+> （会重写 `daily_kpi` 既有日值），用只回填明细的命令：
+> `python backend/services/olib_soc_report/olib_soc_report_service.py --details-only --mode last_n_days --days 90`
+> （默认跑 video/game + tcp_ne 三个明细来源块并落对应明细表，不碰 `daily_kpi`/Excel/邮件；
+> 只补某一张表时显式 `--blocks tcp_ne`，新表接入时的 90 天回补即此形态；
+> offload 明细的回补方式见服务 README「分业务本地/海外」一节）。
+> 看板侧验证：点对应卡片，弹窗「数据截至」与卡片一致、合计与卡片数值对得上账
+> （TCP 三卡为构造性成立：明细存原始分子/分母计数，合计=同式重聚合，2026-10-30 实测全等）。
+> ⚠️ **例外**：缓存占比那张卡的「本地占」与卡片「缓存占比」**不是同一个指标**
+> （前者按服务器所在国家、覆盖两套缓存集群，实测高约 8 个百分点），不要拿它俩互相对账。
+
+### 后端静默停摆：连崩 10 次永久退出（2026-10-05 事故，2026-10-06 修复）
+
+**现象**：`https://localhost/myapp/` 打得开（SPA 外壳 200、2866B），但页面全是空数据；
+`nginx\logs\error.log` 每 10 秒刷一轮
+`connect() failed (10061: ...refused) ... upstream: "http://127.0.0.1:7038"`。
+查进程：**一个 python 进程都没有** —— 后端、两组 watchdog、全部 worker 一起消失。
+
+**根因是三层叠加，缺一层都不会停 12 小时**：
+
+1. **触发** —— Smart App Control 处于强制模式
+   （`HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy`：`VerifiedAndReputablePolicyState=1`，
+   `SAC_PreviousState=2` 表明它由"评估"转为"强制"），**间歇性**拦截未签名的 Python 扩展模块：
+
+   ```
+   ImportError: DLL load failed while importing _collections_cy:
+   An Application Control policy has blocked this file.
+   ```
+
+   **这不是某个依赖的问题，而是"任意未签名 `.pyd`"**：10-05 拦的是
+   `sqlalchemy\util\_collections_cy.cp312-win_amd64.pyd`；
+   **10-06 09:48 拦的是 `scipy\linalg\_linalg_pythran`**（当天连崩 4 次、
+   退避 2/4/8/16s 后才侥幸起来，pid=23180 那次成功）。`Get-AuthenticodeSignature`
+   显示这些 PyPI 二进制全是 `NotSigned`。被拦模块的导入点往往**没有 try/except 回退**
+   （如 `sqlalchemy\util\_collections.py:41-46` 直接 `from ._collections_cy import ...`），
+   SQLAlchemy 该版本也**不存在** `DISABLE_SQLALCHEMY_CEXT` 一类开关 ——
+   即**没有干净的绕过办法**。这类拦截会自行消失（同日复测 `import sqlalchemy` 已恢复正常），
+   属瞬时故障。实测规模：`log\backend_runtime_20261005.log` 20 次、
+   `backend_runtime_20261006.log` 5 次。
+
+   > 顺带校正：`start.bat:20` 记着"vbs 被本机安全策略拦截"，但 2026-10-06 实测
+   > `wscript` 可正常执行 `.vbs`，该注释已过时；保活任务因此仍按原设计走
+   > `start_ensure_hidden.vbs`（无黑窗）。
+2. **放大** —— `backend_watchdog.py` 原实现在连续 10 次快速崩溃后 `return False`
+   **永久退出**：`log\backend_watchdog_20261005.log` 里 21:24 起每 30s 试一次，
+   21:27 留下"连续崩溃 10 次，停止自动拉起"后退出。
+3. **无人兜底** —— 本机**没有** `MyApp_EnsureRunning` 计划任务
+   （`schtasks /query /tn MyApp_EnsureRunning` → "系统找不到指定的文件"；
+   `start_ensure.bat:6-7` 提到的安装器 `install_ensure_task.bat` 在本机也不存在），
+   `Nginx_EnsureRunning` 同样不存在。于是"每 5 分钟保活"这条链整体空缺，无人自动恢复。
+
+**处置**：
+
+- 立即恢复：`cd /d D:\01_RPA\Task\my_app` 后 `start.bat`（内部重启 watchdog，`_crashes` 计数归零）。
+- 2026-10-06 起**不再永久放弃**：连崩 10 次降级为 `SLOW_RETRY_INTERVAL = 300s` 慢速重试
+  （`backend_watchdog.py:55-57`、`_enter_slow_retry()` `:212-240`），降级只播报一次、
+  恢复健康后标记自动重置（`:277`、`:304`）。瞬时故障因此可自愈，不必人工重跑 `start.bat`。
+- **刻意的副作用**：watchdog 不再退出 → `backend_watchdog.pid` 与心跳持续存在 →
+  `start_hidden.ps1:241` 永远判为 ok 而不再介入。自愈责任转移到 watchdog 自身，
+  保活任务降为第二道保险。
+
+> ⚠ **同一缺陷类在 `worker_watchdog.py` 仍未修**：`STARTUP_FAIL_LIMIT=10`（`:86`）、
+> 连崩 10 次主动摘除该组 worker（`:560-562`）。SAC 拦 `.pyd` 时 worker 进程同样起不来，
+> 症状是任务全部 `pending` 堆积（页面不报错、数据不更新），比后端停摆更隐蔽。
+
+### RAN UME 日报失败：账号被锁却被报成「未获取到 cookie」（2026-10-12 事故，同日修复）
+
+**现象**：`ran_ume_daily`（RAN UME 日报，生效 cron `35 4 * * *`，由 Task Manager
+覆盖代码默认的 `0 2 * * *`）在 2026-10-12 05:45 触发告警，邮件正文只有一句：
+
+```
+[AUTH] 登录最终失败 (10.100.28.27:28001): 登录失败 - 未获取到 Z-AUTH-CODE cookie
+```
+
+**极易误判为「密码到期」**，但两者处置方式完全不同（到期要改密码，锁要管理员解锁）。
+
+**根因**：上游 `/api/oauth2/v1/login_rsa` 实际返回的是 **HTTP 401 + 账号被锁**：
+
+```json
+{"result":"1","detail":{"code":"4","message":"User has been locked"}}
+```
+
+而 `auth_manager._do_login()` 只判断「有没有 `Z-AUTH-CODE` cookie」，拿不到就抛出
+笼统的 `登录失败 - 未获取到 Z-AUTH-CODE cookie`（原 `:770-771`），
+**把服务端明确给出的原因整个丢掉了**，排查方向因此被误导。
+
+> ⚠ **鉴别的关键**：账号锁定时，**无论密码是否正确，上游都返回同一个
+> `User has been locked`**。因此"用当前密码试一次登录" **不能**证明密码是否到期 ——
+> 这一点 2026-10-12 实测确认（正确密码与故意写错的密码返回完全一致）。
+> 判断密码是否到期，必须在账号解锁之后再试，或直接问管理员。
+
+**判定（三条命令）**：
+
+```powershell
+# ① 上游到底为什么拒绝（拿到 detail.message，别停在"未获取到 cookie"）
+cd D:\01_RPA\Task\my_app
+.\.venv\Scripts\python.exe tools\backfill_ran_ume.py --check   # 退出码 2 = 账号不可用
+
+# ② 是不是只有这一个账号挂（旁证：同期的其他账号应能正常登录）
+Get-ChildItem backend\services\auth_cache\*.json |
+  ForEach-Object { $j = Get-Content $_ -Raw | ConvertFrom-Json
+                   "{0,-30} {1,-16} {2}" -f $_.Name, $j.username, $j.created_at }
+
+# ③ 数据实际停在哪一天（文件时间戳新 ≠ 数据新鲜！）
+.\.venv\Scripts\python.exe -c "import sqlite3;c=sqlite3.connect(r'data\ran_ume\ran_kpi_daily.sqlite3');print(list(c.execute('select max(\"Begin Time\") from \"2G_OLIB_Network_KPIs\"')))"
+```
+
+**本次实测证据**（说明"不是密码到期、也不是网络或全局问题"）：
+
+| 账号 | 主机 | 最近成功登录 | 结果 |
+| --- | --- | --- | --- |
+| `noc1` | 10.100.2.99 | 2026-10-12 06:00 | ✅ 正常 |
+| `zeeshan mazhar` | 192.168.170.2 | 2026-10-12 06:05 | ✅ 正常 |
+| **`NOC`** | **10.100.28.27** | **2026-10-11 06:20** | ❌ **被锁** |
+
+端口连通性正常（`Test-NetConnection 10.100.28.27 -Port 28001` → `True`），
+排除网络因素；只有 `NOC` 一个账号失败，排除全局策略/密码轮换。
+
+**数据影响**：`data\ran_ume\ran_kpi_daily.sqlite3` 各制式表最新日期停在
+**2026-10-10**，即 10-11、10-12 两天日报缺失。注意 05:45 生成的
+xlsx/png **文件时间戳是新的，但内容是停在 10-10 的旧数据** ——
+"文件生成成功"不等于数据新鲜。
+
+**修复**（2026-10-12）：
+
+1. `auth_manager.py` 新增 `_describe_login_failure()`：解析上游响应体的
+   `detail.message`，把真实原因（`User has been locked` / 密码到期 / 密码错 /
+   账号禁用）连同 HTTP 状态与错误码一起透传，并附中文处置建议。
+   `_do_login()` 改用该函数生成异常信息。
+2. `auto_retry.py` 的 `NON_RETRYABLE_KEYS` 增加账号锁定关键字：
+   锁定属永久性错误，重试不会成功。修复前每 10 分钟被 `auto_retry` 无谓重投一次、
+   每次都失败并**重复触发告警**，持续消耗 worker 与上游登录额度。
+3. 新增 `tools/backfill_ran_ume.py`：**补跑前先探测账号是否可用**，
+   锁没解就拒绝运行（退出码 2），避免"再失败一次 + 再发一封告警"。
+4. 回归测试 `tests/test_login_failure_diagnostics.py`（12 项）。
+
+**补跑方式**：`ran_ume_service` 的 PM 查询用的是**滚动窗口**
+（`_build_pm_payload`：`start = now - days_back`，config 中 `days_back=7`），
+所以**不需要按日期补**——账号解锁后跑一次即可自动覆盖 10-11、10-12：
+
+```powershell
+cd D:\01_RPA\Task\my_app
+.\.venv\Scripts\python.exe tools\backfill_ran_ume.py          # 探测通过才跑
+.\.venv\Scripts\python.exe tools\backfill_ran_ume.py --check  # 只看账号状态
+```
+
+**遗留待办**：`NOC` 账号需由 UME 管理员解锁（本机无法自助解锁）。
+解锁后若要确认密码是否同期被改，需**在解锁之后**再试登录 ——
+`CREDENTIALS_LOCAL_REFERENCE.txt` 记录同一套 UME 散落着三个不同密码
+（`zte_ume` / `ccn_ume` / `ipran_ume` 三组在 `credential_store` 里登记值不同），
+若密码有变需同步 `credential_store` 的 `zte_ume`。
+
+### 后续机制补强：鉴权类失败额度用尽后的一次性宽限重投（2026-10-12 同日新增）
+
+当天 8 个任务（04:01–09:40 锁定期内失败，每任务 scheduled 1 次 + auto_retry
+2 次额度全部烧光）在 09:51 账号解锁后**没有任何机制会自动补跑**，只能人工通过
+`POST /api/tasks/{id}/run` 逐个重投。复盘发现根因是 auto_retry 的额度按**次数**
+计、不按**时间**计：跨调度周期的持续故障会烧光额度，故障解除后任务停在失败状态
+等人工介入 —— 而鉴权恢复后第一次重试大概率成功，恰是最该自动兜底的场景。
+
+修复（`backend/services/auto_retry.py`）：
+
+1. **判定链重排**：永久性错误检查（原 `:634`）上移到额度判定**之前** ——
+   锁定类错误即便额度恰好用尽，也应报「永久性错误」而非「已达上限」，否则
+   会落进宽限分支（锁定必须等管理员解锁，宽限重投只会重新引入当天那种
+   每 30 分钟一次的空跑告警）。
+2. **宽限分支**（`_evaluate_candidate` 额度判定内）：`retry_attempts == MAX_ATTEMPTS`
+   （恰好用尽，刻意不用 `>=`）且失败属鉴权类（`APP_ERROR_KEYS`：登录失败 /
+   Unauthorized / 未获取到 / `no auth cookie` 等）且不含 `NON_RETRYABLE_KEYS`
+   永久标记时，按 `AUTH_GRACE_COOLDOWN_MIN`（默认 30 分钟，环境变量
+   `AUTO_RETRY_AUTH_GRACE_COOLDOWN_MIN`）的慢冷却宽限重投**一次**。
+   宽限投递计入 `retry_attempts`，之后 `attempts = MAX+1 > MAX`，天然不会
+   二次宽限；宽限仍受 24h `SCAN_WINDOW_HOURS` 硬上限约束。
+3. **状态可读**：宽限后再失败报「宽限重试仍失败（共投 N 次）」而非笼统的
+   「已达上限」；扫描日志里宽限投递标记为「鉴权宽限投递」，与常规
+   「第 x/2 次」区分。
+4. `APP_ERROR_KEYS` 补 `no auth cookie`：`cm_data_export.py` 等旧式任务自抛的
+   登录错误不带「登录失败」字样（错误透传修复需重启后端才生效），不加这条
+   宽限判定会漏掉它们。
+5. 总开关 `AUTO_RETRY_AUTH_GRACE_ENABLED=1`（默认开），出问题可一行关闭。
+6. 回归测试 12→19 项（`tests/test_login_failure_diagnostics.py` 第 3 组）：
+   宽限命中 / 一次性不无限 / 慢冷却生效 / 锁定不配宽限 / 非鉴权不扩散 /
+   环境开关回退 / 宽限后失败文案，全绿；相关 46 项全部通过。
+
+生效条件：auto_retry 判定运行在 **worker 进程**，需重启后端/worker
+（`start.bat`）后生效 —— 与同日上线的错误透传修复同一批。
+
+### 本机验证改动：证书信任、构建产物与两个易踩开关（2026-10-06 新增）
+
+**① 证书信任（一次即可）** 本机 80 端口被 `nginx.conf:113` 强制 301 到 443，
+443 用自签证书 `certs\portal.crt`（SAN 含 `localhost`/`127.0.0.1`/`.19`/`.20`，有效期至 2036-09-28）。
+它**默认不在信任库**，所以除浏览器警告外，`curl` 与 `Invoke-WebRequest`
+（本机是 PowerShell 5.1，**没有** `-SkipCertificateCheck`）会直接报信任错误，脚本与探针全不可用：
+
+```powershell
+certutil -user -addstore root 'D:\01_RPA\nginx-1.28.0\certs\portal.crt'   # 当前用户存储，不需管理员
+curl.exe -s -o NUL -w "status=%{http_code} verify=%{ssl_verify_result}`n" https://localhost/myapp/
+# 期望 status=200 verify=0；回滚：
+certutil -user -delstore root 1943AA243FBFA70FAFBA2A23457265078C0369CC
+```
+
+> `http://localhost/myapp` 打不开是**设计如此**（B2 强制跳 HTTPS），不是故障。
+
+**② 7090 是 `vite preview`，没有热更新** —— 进程实参就是 `vite ... preview`。
+改前端源码后必须重新构建，否则页面永远停在旧产物（`vite.config.ts:23-26`）。
+三步确认"是否真的上线"：
+
+```powershell
+cd D:\01_RPA\Task\my_app\frontend; npm run build
+# ① 产物 index.html 引用的入口 hash
+Get-Content D:\01_RPA\Task\_fe_dist\index.html | Select-String 'index-.*\.js'
+# ② 7090 返回的是不是同一份（绕开浏览器缓存）
+(Invoke-WebRequest https://localhost/myapp/ -UseBasicParsing).Content | Select-String 'index-.*\.js'
+# ③ 改动的特征串是否真在那个 chunk 里
+Select-String -Path D:\01_RPA\Task\_fe_dist\assets\*.js -Pattern '<新增的文案 key 或端点>'
+```
+
+① ② 一致 + ③ 命中 = 已上线；此时界面没变就一定是**浏览器缓存**，Ctrl+F5。
+注意 `emptyOutDir: false`（`vite.config.ts:54`）使旧 chunk 不被删除，
+**不要**拿"存在旧文件名"当构建失败 —— 只认 `index.html` 引用的那个 hash。
+
+**③ 两个会让人误判的开关/告警**（2026-10-06 实测本机 `backend\.env`）：
+
+| 项 | 当前值 | 影响 |
+| --- | --- | --- |
+| `MY_APP_DB_MODE` | `sqlite` | 走 `db\app.db`。本机**根本没装 PostgreSQL**（无 `C:\Program Files\PostgreSQL`、无 `pg_ctl.exe`、无服务，且 `.env` 无 `DATABASE_URL`）→ `start_hidden_result.txt` 里的 `[WARN] PostgreSQL (5432) NOT LISTENING` 在本机是**预期噪声**，不是故障 |
+| `MY_APP_DISABLE_SCHEDULER` | `1` | 按 `main.py:107-109,538` **整个 APScheduler 不启动**（`12-configuration.md:33` 定位为"调试/维护窗口"用）→ 定时任务不会自动投递、数据不会自己刷新；验证任务类改动只能在任务管理页**手工点执行**（走队列 → worker 认领） |
+
+**④ 一条命令体检**：
+
+```powershell
+curl.exe -s -o NUL -w "fe=%{http_code} " https://localhost/myapp/; curl.exe -s -o NUL -w "api=%{http_code}`n" https://localhost/api/health
+```
+
+期望 `fe=200 api=200`；`api=502` 即后端没起，先看 `log\backend_runtime_<日期>.log` 尾部。
+
+### App Control 拦截编译扩展：`DLL load failed` / `An Application Control policy has blocked this file`（2026-10-09 复现）
+
+**现象**：`import` 带 C 扩展的包失败，报
+`ImportError: DLL load failed while importing <模块>: An Application Control policy has blocked this file.`
+2026-10-09 建新 venv 装依赖时一次踩到三个包：`psycopg2._psycopg`、`sqlalchemy.engine._result_cy`（`sqlalchemy>=2.1`）、
+`pandas` 相关扩展。**与代码无关、与 `.env` 无关**。
+
+**根因就是上面「后端静默停摆」那条的同一策略**（Smart App Control 强制模式，
+`HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy` 的 `VerifiedAndReputablePolicyState=1`），
+**不是版本问题**：
+
+> ⚠️ **不要把它当成"新装依赖版本不对"**。2026-10-09 实测反证：
+> 被拦的 `SQLAlchemy==2.1.4` 隔约 40 分钟**原样重装即可正常 import**；被拦与被放行的 `.pyd`
+> **签名状态都是 `NotSigned`**（`Get-AuthenticodeSignature` 实测），即**版本与签名都不是判据**。
+> 拦截是**间歇且会自行消失**的（与该节结论一致：「同日复测已恢复正常，属瞬时故障」）。
+> 因此**处置办法不是降版本，而是稍后重试**：
+
+```powershell
+# 被拦时先做这个（通常几十秒~几分钟后自然恢复）：
+.\.venv\Scripts\python.exe -c "import psycopg2, sqlalchemy, pandas, dotenv; print('OK')"
+# 仍失败就重试；不要 --force-reinstall、不要删 .pyd、不要来回换版本
+```
+
+**判据**：文案含 `An Application Control policy has blocked this file` 即本问题，
+不是缺依赖、不是 PATH、不是版本 —— 该 `.pyd` **在**（`ls .venv\Lib\site-packages\<包>\*.pyd` 能看到），是加载时被系统拦下。
+**对脚本/一次性任务的意义**：这类拦截会让一次性的数据导入任务**偶发失败**，重跑即可；
+判断"是真故障还是被拦"只需看报错里有没有这句 policy 文案。
+
+**⚠️ 另一个会伪装成"连不上 PG"的真缺包 —— `python-dotenv`**（这条与 App Control 无关，但同时在 2026-10-09 踩到）：
+`backend\database.py:10` 靠 `load_dotenv` 读 `backend\.env`；没装它时会打印 `load_dotenv 不可用，已跳过` 并继续，
+随后 `MY_APP_DB_MODE=pg` 因 `DATABASE_URL` 未注入而在 `:51` 抛 `DB_MODE=pg 但环境变量 DATABASE_URL 未设置`
+—— **看起来像数据库故障，实为缺包**。补装 `python-dotenv==1.2.2` 即好（`requirements.lock.txt:11` 亦已说明）。
+**新 venv 请一律用 `pip install -r requirements.lock.txt` 建，不要按包名单独装**（会漏 `python-dotenv`/`alembic`/`playwright` 这类）。
+
+### 重复 worker 栈：满屏「Worker 进程已失效」的假失败（2026-10-16 事故，同日修复）
+
+**现象**：任务管理页（`?page=sync`）某一时点起集中报失败，`error` **全是同一句**
+`Worker 进程已失效（PID 已退出或被重复占用），任务未完成（启动/周期自动回收）`，
+而被点名的任务在同一分钟里其实**执行成功了**。本次 12:00–16:30 共 128 条，无一例外是这一句
+（`/api/tasks/failures?days=1` 里这一类占 138/158）。
+
+**根因有两层，缺一个都不会刷出这个量**：
+
+1. **同一台机器上叠了 5 套 worker 栈。** 当天 `worker_watchdog` 起了 7 次
+   （09:17 / 10:57 / 11:04 / 11:13 / 11:16 / 11:25 / 11:33，见
+   `log/worker_restart_marker.log` 的 `watchdog_start` 行），其中 **5 个看门狗进程始终存活**，
+   各带 8 个组 worker = **40 个 worker 在轮询同一张 `task_queue`**。
+   直接触发点：11:33 那个修后端的路由脚本在"清理陈旧状态"一步**删了
+   `backend/worker_watchdog.pid` 等 PID 文件却没有杀进程**（`log/fix_backend_result.txt`
+   有 `removed worker_watchdog.pid` 而无 kill 记录），而 `start_hidden.ps1` 判定"是否已有
+   看门狗"只看 PID 文件 + heartbeat（`start_hidden.ps1` 的 `Ensure-WorkerWatchdog`），
+   文件没了就认为没人 → 再起一套。旧的从此 `stop.bat` 也找不到了。
+2. **回收逻辑把活着的 worker 判成死的。** `task_runner._is_known_worker_pid()` 只读
+   `backend/worker*.pid` —— **读文件，不核验进程**。最后一套栈覆写了全部 8 个组 PID 文件，
+   于是另外 4 套那 32 个正在正常干活的 worker 全部"不在已知列表"，
+   `worker.py::_recover_stale_running`（每 300s 一轮）把它们的 `running` 行写成 `failed`
+   并补一条失败执行日志。日志侧对应 `worker_runtime_*` 里的
+   `已回收 N 条上次 Worker 残留的 running 记录（其中 N 条确为失败）`。
+
+**顺带查出的第二个真故障：同一个任务被执行了两遍。** `_claim_next()` 旧写法
+`UPDATE ... WHERE id = (SELECT id ... WHERE status='pending' LIMIT 1) RETURNING` 的注释写着
+"原子"，但那只对 SQLite 成立：PG 里子查询是 InitPlan，**在拿到行锁之前就把 id 取好了**，
+拿到锁后按 READ COMMITTED 复查的条件只有 `id = 那个 id`，照样成立 → 两个 worker 都更新成功。
+实测证据 `worker_runtime_x_20261016.log`：`16:31:00,645` 与 `16:31:00,650` 连续两次
+`认领任务 queue_id=83151`。当天 12:00 后"同任务同分钟重复成功"18 次，含
+`tt_alarm_whatsapp_alert`（**WhatsApp 告警重发**）与 `email_recovery`（邮件重发）；
+11:26 的 `关系 "eflow.realtime_alarm__staging" 不存在` 和
+`重复键违反唯一约束 "pg_type_typname_nsp_index"` 也是两个 worker 同时建同一张 staging 表互踩。
+
+**已做的修复（2026-10-16）**：
+
+| 改动 | 位置 | 作用 |
+| --- | --- | --- |
+| 看门狗**命名互斥量单例锁**，不看 PID 文件；已有实例存活则直接拒启 | `backend/worker_watchdog.py`（`_acquire_singleton_lock`） | 根治重复栈。内核按句柄计数，持有者一退出（含 `taskkill /F`）对象即消失，不会出现"僵尸锁挡住启动"（区别于 2026-09-20 那次 PID 文件死锁） |
+| `--probe` 探测模式，退出码 `0=已有 / 3=没有 / 4=判不了` | `python -m backend.worker_watchdog --probe` | 让脚本能跨完整性级别问一次（Medium 会话打不开 High 建的对象时**保守判"已有"**，而不是当作没有） |
+| 拉起看门狗前先问锁 | `start_hidden.ps1` 的 `Ensure-WorkerWatchdog`、`restart_workers.py` 的 `start_watchdog()` | 删了 PID 文件也不会叠第二套 |
+| 认领 SQL 分方言：PG 走 CTE + `FOR UPDATE SKIP LOCKED` + 外层 `status='pending'` 复查；SQLite 保持原形态并补同一复查 | `backend/worker.py::_claim_next` | 杜绝双认领。两分支均已实测（旧 SQL 复现双认领、新 SQL 只一个） |
+| `_finish()` 回写终态时校验 `status='running' AND worker_pid=自己` | `backend/worker.py::_finish` | 迟到的执行者不能把终态盖在别人认领的行上 |
+| 回收前向操作系统核实：进程存活且镜像是 `python/pythonw` → **不判失败**；但归属无法证明时也不强杀，仅在超过 4h 上限时回收队列行 | `task_runner._looks_like_live_worker()` + `worker.py::_recover_stale_running` | 消除假失败横幅，同时保留"真挂死也要释放单飞名额"的兜底 |
+
+**排查速查（下次看到满屏同一句失败，直接照做）**：
+
+```powershell
+# 1) 现在有几套看门狗？只看进程，不看 PID 文件
+Get-CimInstance Win32_Process -Filter "Name='pythonw.exe' or Name='python.exe'" |
+  Where-Object { $_.CommandLine -match 'backend\.worker_watchdog' } |
+  Select-Object ProcessId, CreationDate, CommandLine
+#    ⚠ 提权启动的实例命令行可能读不到（WMI 回空）；这时改看"谁的子进程正好 8 个"：
+Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'python' } |
+  Group-Object ParentProcessId | Where-Object Count -ge 8 |
+  Select-Object Name, Count
+# 2) 单例锁探测（不受命令行可见性影响）
+cd D:\01_RPA\Task\my_app; python -m backend.worker_watchdog --probe
+# 3) 失败是不是都同一句？（是 → 基本就是重复栈，不是任务本身的问题）
+curl.exe -s "http://127.0.0.1:7038/api/tasks/failures?days=1"
+# 4) 有没有双认领？（同一 queue_id 出现两行即为中过）
+Select-String -Path log\worker_runtime_*20261016.log -Pattern '认领任务 queue_id' |
+  ForEach-Object { ($_ -split 'queue_id=')[1] -split ' ' | Select-Object -First 1 } |
+  Group-Object | Where-Object Count -gt 1
+```
+
+清场只做一件事：`stop.bat`（**必须以管理员运行**，否则杀不掉提权启动的栈，
+`stop.bat:81-85` 的命令行清扫会漏）→ 确认进程为 0 → `start.bat`。
+`stop.bat` 会写 `worker_stopping.flag`，被打断的任务重新入队而不是判失败。
+
+**硬性规矩**：**禁止只删 `backend/*.pid` 就当"已经停了"**。PID 文件是 `stop.bat` 定位进程用的
+索引，不是存活判据 —— 删文件等于把索引撕掉而进程照跑，这正是本次叠出 5 套栈的原因。
+重启一律走 `stop.bat` → `start.bat`，或 `restart_workers.py --mode watchdog`。
+（`backend/WORKER.md` 的「人为停机」一节 2026-10-06 就记载过同族的坑，当时只补了
+`worker_stopping.flag`，没堵"文件被删但进程还活着"这条路。）
+
+## VMAX 门户并发会话被占满（2026-10-27 事故）
+
+**现象**：`/api/vmax-cca-query` 与 `/api/vmax-xdr-query`、`/api/vmax-xdr-records`
+同时返回 502，detail 里是
+
+```
+VMAX 门户登录失败: {"result":0,"errors":{"4":"The maximum number of connections for the user is reached."}}
+```
+
+**成因**：VMAX 门户按**账号**限制并发会话。集成侧每次新建 `VmaxCcaClient` 并登录都会占一个
+会话位；旧进程退出**不会**立刻释放，要等门户侧会话超时。2026-10-27 摸 XDR 分表协议时
+连开 5 个探针进程各自登录，直接把 vmax_cca 的位占满，后端重启后也登不上。
+
+**处置**：
+
+1. **停止一切重试**（每次失败登录都可能续期/新建会话，越试越久）；
+2. 等待门户会话超时（实测 ≥30 分钟）后首个请求即恢复，无需重启后端；
+3. 期间**不要**改用 `vmax_cxo` 账号去救急 —— 那是 CXO 看板代理的会话，挤掉会更难查。
+
+**纪律**（写进 `services/vmax_cca/README.md`，新接接口前先看）：
+
+- 探测新接口一律**单进程、单次登录**，脚本内复用同一个 `VmaxCcaClient`；
+- 需要真机验证又不确定配额时，用 `VmaxCcaClient(credential_key="vmax_cxo")`
+  单独跑（与线上 CCA 会话隔离），跑完即退出；
+- 断言类验证优先写离线守卫（如 `tests/test_vmax_xdr_records.py` 用 monkeypatch
+  断言报文字段），不要靠反复真机试错。
+
+### 2026-10-30 复现与新绕法
+
+接「按分类流量」（由 XDR 用户面话单算出）时，为摸清用户面表的可查性，
+连开 8 个探针脚本各登录一次，**再次**把 vmax_cca 的并发位占满，
+所有新登录都返回同样的限流错误，CCA 页与 XDR 页一起不可用。
+
+**新绕法（比等超时快得多）**：**借用运行中后端的会话**取数 ——
+后端持有单例会话，调它的 `/api/vmax-xdr-records` 即可，既不占新连接，
+也不用改后端。探测脚本改成「HTTP 调本地后端」而不是「自己 new 一个 client」。
+本次即用此法在限流状态下完成了全部取数验证。
+
+**另外**：排查「同样参数有时有数据有时没有」时，先怀疑上游的**坏分区边界**，
+再怀疑会话。实测 `end` 落在某些刻钟上（如 `:45`）会让整个分区查不到，
+且上游**不报错**（status=0、records=0）——
+`end=17:44` 有 785 条、`17:45` 变 0 条、`17:46` 又回到 785 条。
+
+
+## 备份与恢复
+
+**三处都要备，缺一不完整**（原因见 `03-data-layer.md`、`05-security-and-credentials.md`）：
+
+| 对象 | 内容 | 方式 |
+| --- | --- | --- |
+| 远程 PostgreSQL | 主业务库 + `task_queue`/`task_execution_log`/`task_schedule_config` | `pg_dump`；`pg_to_sqlite_sync` 每小时 :45 已提供一份镜像到 `db/app.db` |
+| `db/app.db` | **凭据表 `credentials`（明文）** + PG 快照镜像 | 直接复制文件（含口令，按敏感介质保管） |
+| `data/` + `backend/data/` | 各任务报表产物、`settings.json` | 复制目录。丢 `settings.json` 会退回内置默认远程主机 |
+| `backend/services/*.json` | 上游连接参数与 TT 规则表 | 这些属于代码资产，随仓库走 |
+
+恢复顺序：起 PG → 还原库 → 放回 `db/app.db` → 放回 `data/` → `start.bat` → 任务管理手动跑一个轻任务验证。
+
+## 局域网访问
+
+其他电脑访问本机部署，需要放行三组端口：`7090`（前端）、`7038`（后端）、`5432`（PG，仅当别人的 my_app 要连你的库）。
+
+1. **确认本机 IP**：`ipconfig | findstr /i "IPv4"`。DHCP 下 IP 会变，变了要同步改各电脑 `.env`。
+2. **访问地址**：`http://<本机IP>:7090/myapp/`。后端与 preview 都已绑 `0.0.0.0`（`backend_watchdog.py:149`、`vite.config.ts:9-10`）。
+3. **让别人的 my_app 连你的 PG**：需改 `pg_hba.conf` 加 `scram-sha-256` 规则 + 重载配置 + 防火墙放行 TCP 5432；对方 `backend/.env` 里 `DATABASE_URL` 指向你的 IP，`MY_APP_DB_MODE=pg`。
+4. **CORS**：非同源访问需把来源加进 `MY_APP_CORS_ORIGINS`。
+
+> ⚠️ **文档与现实不符之处（已实测）**：PROJECT_DOCS.md 原文提到用 `firewall_setup.bat`、`setup_pg_lan_access.bat`、`install_ensure_task.bat` 三个脚本自动完成上述步骤，但：
+> - `firewall_setup.bat` — **本项目内不存在**；同机 `D:\01_RPA\Task\MTN_Comsal\my_app\firewall_setup.bat` 有一份同名脚本，可参考，但端口与路径按那个项目写的，**不能直接拿来跑**。
+> - `setup_pg_lan_access.bat`、`install_ensure_task.bat` — **`D:\01_RPA` 全树均未找到**。
+>
+> 结论：第 3 步（PG 局域网放行）与防火墙规则都得手工做。这是待补的脚本缺口，不是手册写错。补脚本时请遵守本文末尾的 bat 规范（CRLF + 英文 `REM`）。
+>
+> 另：暴露到局域网即等于把系统交给全网（**没有账号体系**，且反向代理下 Token 校验失效）。放开前读 `05-security-and-credentials.md`。
+
+## 开机自启
+
+```
+计划任务(每5分钟) → start_ensure.bat → start_hidden.ps1 -Quiet -Force
+HKCU\...\Run      → start_hidden.vbs → start_hidden.ps1 -Quiet
+```
+
+- `-Quiet` 会**尊重 `stopped.flag`**：手工 `stop.bat` 后不会被自启拉起（`start_hidden.ps1:125`）。想恢复自动启动就跑 `start.bat`（开头清标记，`start.bat:13`）。
+- 自启脚本硬编码了 `C:\Program Files\PostgreSQL\16\*` 与当前用户目录下的 Python 路径（`start_autostart.bat:14,25`、`start_ensure.bat:15,20`、`stop.bat:25,100`）。换用户/换机必须改。
+- **改 `.bat` 后必须实跑一次并用 PID 前后对比验证**——本项目吃过亏：cmd 把 UTF-8 无 BOM 的中文注释按 ANSI 解析会吞掉后续行，脚本照样显示成功但 `taskkill` 根本没执行。所有 bat 保持 CRLF + 英文 `REM`（`start.bat:21-22`）。
+
+## 网络风暴专项审计（请求量放大，2026-10-04）
+
+**背景**：eFlow 曾因"每任务登录一次"被打崩（3822 次登录）。登录频率治住之后，
+把审视范围扩到**所有会造成上游请求量放大的结构** —— 重试、轮询、并发扇出、
+超时缺失、看门狗重启循环、失败重投、cron 密度。方法是**只读审计 + 逐个核对
+真实参数值**，不接受"看名字像是有防护"。
+
+### 结论：未发现正在发生的风暴，但有一处真实的放大结构（已修）
+
+#### 🔴 `_wait_export_ready` 轮询 × 重试 × 并发（已修）
+
+`backend/services/eflow_api_client.py:739` 是"等 eFlow 生成导出文件"的轮询。
+改前参数 `max_wait=300, interval=10` → **每条管道轮询 30 次**；TT/WO/CR/PM
+**四条管道全部用默认值**（`eflow_data_mapper.py:276,447,484,522`），并且
+`_http_request` 自身还带 `HTTP_MAX_RETRIES=3` 的指数退避重试
+（`eflow_api_client.py:50`）。上游一旦变慢：
+
+```
+4 条管道 × 30 次轮询 × 4 次重试（1 次原始 + 3 次重试）≈ 480 次请求
+```
+
+全部集中打在 eFlow **同一个导出 list 端点**上，且 `fetch_all_data` 由
+`eflow_sync` 驱动，**每轮都来一次**。
+
+**改法（三处同时生效才真正降下来）**：
+
+| # | 改动 | 位置 |
+| --- | --- | --- |
+| 1 | 轮询间隔 10s→15s、总轮询次数 30→8（窗口 120s） | `eflow_api_client.py:62-63,739` |
+| 2 | **轮询不叠加重试**（`max_retries=0`） | `eflow_api_client.py:774` |
+| 3 | 并发 6→3 | `eflow_api_client.py:47` |
+
+结果：`4 × 8 × 1 = 32` 次，约为改前的 **1/15**。
+
+> **为什么必须给 `_http_request` 加 `max_retries` 形参**：改前它只有内部
+> `retry` 计数，上限硬编码取模块级 `HTTP_MAX_RETRIES`，**调用方无法按场景
+> 覆盖**。"轮询要少重试"这个诉求根本无法表达，所以才只能靠调大 interval
+> 硬扛。现在三处重试分支统一走 `limit`（`eflow_api_client.py:298,329,396`）。
+>
+> ⚠️ **401 重登录分支必须透传 `max_retries`**（`eflow_api_client.py:428-431`）。
+> 漏了它，会话过期时重试次数会**悄悄恢复成默认上限** —— 而那正是负载最糟的
+> 时机。第一版就漏了，靠离线断言 `[4] 401 分支透传 max_retries` 抓出来。
+
+**离线验证**：`python TMP/_verify_export_poll_storm.py`
+→ `ALL_EXPORT_POLL_STORM_CHECKS_PASSED`（10/10，含改前后请求量核算）。
+
+#### 🟡 调度覆盖：改了代码默认值却不生效（已加告警）
+
+**生效 cron 的真相源有两个，数据库永远优先**：
+
+```python
+# backend/services/task_runner.py:327
+saved_cron, saved_enabled = _load_schedule_config(task_id)
+current_cron = saved_cron if saved_cron else default_cron   # ← 数据库赢
+```
+
+`task_schedule_config` 有 **73 条**记录，其中 **20 条与代码 `default_cron`
+不同**（2026-11-06 实测，在任务管理页改过）。这意味着**改 `task_registry.py`
+的默认值对已存在的任务完全无效，且不留任何痕迹**。
+
+实测踩到的坑：`sp_online_sync` 代码已改为 `35 */6 * * *`，但数据库仍是
+`35 * * * *`，**实际仍按小时跑**（见上文"缺陷 3"的更正）。
+
+覆盖与对齐情况（2026-11-06 实测；复核命令见本节末）：
+
+| 任务 | 代码默认 | **实际生效** | 状态 |
+| --- | --- | --- | --- |
+| `sp_online_sync` | `35 */6 * * *` | `35 * * * *` | **错配**，库里压着代码，实际每小时 |
+| `ipran_kpi_sync` | `0 * * * *` | `0 * * * *` | 已对齐：每小时全量拉取是本意（2026-11-06 与用户确认），默认值此前写着每天 08:00 属于反向坑，新部署会静默日更 |
+| `eflow_active_alarm` | `*/1 * * * *` | `*/1 * * * *` | 已对齐（2026-10-04 那版记录写的是默认 `*/30` / 生效 `*/5`，两边都已变） |
+
+> ⚠ 本节的条数与示例值都是**从库里读出来的快照**，任务管理页每改一次就会变。
+> 引用前先跑一次下面的复核命令，不要拿本文的数字当现状。
+
+**复核命令**：`cd Task\my_app ; python tools\check_schedule_override.py`（**已入库**，只读，打印上表三行 + 全部错配 task_id 与条数）。
+2026-10-31 那次审计用的 `TMP/_verify_schedule_override_warn.py` 是一次性探针、本机已不存在，它报的「6/6、19 条错配」也随之过期 —— 现在以 `tools/check_schedule_override.py` 的读数为准。**不要**把手册里这些数字当现状，它们是某次读数。
+
+**处置**：① **不改用户已配置的值**（`eflow_active_alarm` 2026-10-04 那轮读到的生效值是 `*/5`、经确认保留；现在库里与代码默认都是 `*/1 * * * *`，即每分钟一次 —— 实时告警看板需要该粒度，且它走 `ensure_login()` 共享会话，当时**实测当日 eFlow 真实登录 0 次**，不构成登录风暴）；② 在注册期对"代码默认值 ≠ 生效值"打
+**WARNING**（`task_runner.py:330-346`），让"以为改了其实没生效"当场可见。
+
+> **想改生效 cron 的正确做法**：用任务管理页（`PUT /api/tasks/{id}/schedule`，
+> `backend/routers/tasks.py:175`），或删掉该任务的 `task_schedule_config` 行
+> 让它回落到代码默认。**不要**只改 `task_registry.py` 就以为生效了。
+
+#### ⚪ 已确认安全（不必重复审计）
+
+| 模块 | 核对到的参数 |
+| --- | --- |
+| `worker_watchdog.py` | `POLL_INTERVAL=2.0`、`MAX_BACKOFF=30.0`、`STARTUP_FAIL_LIMIT=10`（`:83-86`）；退避 `2**crashes`（`:550`）；连续 10 次崩溃**主动摘除不再拉起**（`:555-560`）→ 无"崩溃↔重启"快速循环。⚠ 与 backend_watchdog **不同**：至今仍是"放弃"语义，本次未改（同一缺陷类，见下方专节） |
+| `backend_watchdog.py` | `POLL_INTERVAL=2.0`、`MAX_BACKOFF=30.0`、`STARTUP_FAIL_LIMIT=10`、`SLOW_RETRY_INTERVAL=300.0`（`:52-57`）；退避 `2**crashes`（`:265`）；2026-10-06 起连崩 10 次**降级为 300s 慢速重试且永不退出**（`_enter_slow_retry()` `:212-240`）→ 最坏 300s 重拉一次，**仍无"崩溃↔重启"快速循环**，本节结论不受影响 |
+| `auto_retry.py` | `MAX_ATTEMPTS=2`、`COOLDOWN_MIN=15`、`SCAN_WINDOW_HOURS=24`（`:93-95`）；永久错误不重试（`:558`） |
+| `auth_manager.py` | `MAX_RETRIES=2`（`:114`）、退避 `2**(attempt-1)`（`:506`）。⚠ **`_do_login()` 未加锁**（`:646`）—— 见下方"已知竞态" |
+| `eflow_api_client.py` | `HTTP_READ_TIMEOUT=90`、socket 显式 `settimeout`（`:171,174`）→ 无超时挂死 |
+| 6 份 `_http_request_with_retry` | 全为 `for attempt in range(max_retries+1)` + `2**attempt` 指数退避，**上限 1~3、无递归** |
+| 并发参数 | 全部有界且 ≤8（`eflow_api_client.py:47`=3、`ipran_ume_kpi_service.py:94`=6 等） |
+| MW `wait_history_ready` | `timeout=600` 由 `deadline` 封顶、`max_retries=1`（`mw_ume_kpi_service.py:759-772`）；实测每轮 12 次轮询 / 12 次成功，**未打满** |
+| `_wait_export_ready` 之外的轮询 | `mw_ume` 探活、`_wait_export_ready` 均已定界 |
+
+> **MW 探活的调用位置约束**已在 `mw_ume_kpi_service.py:445` 用注释锁死：
+> `_probe_session_alive()` 只允许在**登录路径**调用（每轮最多一次）。
+> 若日后被挪进请求热路径，就会变成新的风暴源。
+
+### 已知竞态：`get_auth()` 的「检查-再登录」（2026-10-04 发现，**未修**）
+
+`get_auth()` 的流程是 `_read_cache()` → 无缓存则 `_do_login()`
+（`auth_manager.py:635` 与 `:646`），而 **`_do_login()` 没有加锁**：
+
+```
+进程 A: _read_cache() → 无缓存 ─┐
+进程 B: _read_cache() → 无缓存 ─┤ 两者都判定"需要登录"
+进程 A: _do_login() ────────────┤ 同时向上游登录 → 重复会话
+进程 B: _do_login() ────────────┘
+```
+
+**别被 `auth_manager.py:38-71` 的 `msvcrt.locking`/`fcntl.flock` 误导**：
+那两把锁只用在 `_read_cache`（`:243`，共享锁）与 `_write_cache` 里，
+保护的是**缓存文件**的读写，**不保护登录动作本身**。
+
+**为什么这次不改**：修它需要引入跨进程的登录互斥（文件锁或 DB 行锁），
+而登录路径本身是"上次事故的中心"，在没有复现证据时改它，风险高于收益。
+
+**实测未触发**：扫过 107 个日志文件的全部 `[AUTH]` 行，按"一次 OAuth2 登录
+耗时数秒"的量级取 8s 窗口统计，**未观察到跨文件的相邻登录**
+（探针：`TMP/_probe_login_race.py`，在 `my_app/TMP/`）。
+
+**什么时候必须修**：一旦出现"同一上游在数秒内出现两次真实登录"、
+或上游开始报"会话互踢/超出最大用户数"，就先查这里。
+
+### 网络风暴排查速查（下次直接照做）
+
+1. **数真实请求，不看代码意图**：`task_execution_log` 数运行次数，
+   `auth_cache/*.json` 的 `created_at` 数真实登录。
+2. **并发 × 次数 × 重试 = 放大倍数**，三者相乘才是真实压力。
+3. **cron 要查两个地方**：代码 `default_cron` **和**数据库
+   `task_schedule_config.cron`（后者优先，见上）。
+4. **轮询不要叠加重试**，也不要靠调小 interval 提速。
+5. 日志是 **GBK**：用中文串 `Select-String` 会**静默返回 0**
+   （实测 `复用=0` 与日志内容矛盾），改用 ASCII 特征串。
+6. **`paramiko.Transport()` + `connect()` 默认无超时** —— 这是全工作区反复
+   出现的一类隐患。上游 SFTP 半死不活时进程**永久挂起**，被巡检重跑就变成
+   "每 5 分钟叠加一个挂起进程"。已修 18 处（见下节），新写 SFTP 代码请照抄
+   `sp_report_gen/gernarate_sp_report.py:476-490` 的写法：socket 建连
+   `timeout=30` + `set_keepalive(30)` + `chan.settimeout(180)`。
+   ⚠ 判断某个 SFTP 脚本安不安全，**不要看它有没有 `try/except`**，要看
+   建连处有没有超时参数。
+7. **分页循环必须自己设硬上限**，不能只依赖服务端返回的 `total`：
+   上游 total 报错或忽略分页参数时，`while True` 会一路翻下去。
+
+### 工作区级同类整改（2026-10-04，提交 `27130d27`）
+
+| 项 | 位置 | 改前 → 改后 |
+| --- | --- | --- |
+| SFTP 无超时 | 18 个文件（`WareHouseDashBoard/`、`Unified_Tools/`、`Task/sp/`、`Task/MTN_Comsal/` 等） | 无超时（永久挂起）→ `timeout=30` + keepalive + `chan.settimeout(180)` |
+| eFlow 分页无界 | `ticket_export_rpa/get_eflow_table.py:441` | 退出条件全靠服务端 `total` → 加 `MAX_PAGES=500` 硬上限 + 页间 0.5s |
+| CR 页大小异常 | 同上 `:315` `CR_PAYLOAD_BASE` | `length: 50` → `2000`（2 万条的分页次数 400 → 10） |
+
+> 这些脚本**均未被计划任务调用**（已扫描 222 个计划任务与全部
+> `.bat/.ps1/.vbs`，0 命中），是手工运行的工具，所以整改不影响线上服务；
+> 但"永久挂起"的风险对人工操作同样成立。
+>
+> 同时删除了 3 个与正规版**逐字节相同**的副本脚本
+> （`Unified_Tools/WareHouseDashBoard/` 下），以及 my_app 内 2 个未登记、
+> 无人 import 的遗留 SSH 探针（`cn_ems/_mml_ssh_probe*.py`）。
+> 依据 `AGENTS.md` 第三节原则 10「删除优于兼容」—— 留着副本只会重演
+> "改了正规版、副本仍带病"（本次整改中它们就已经分叉了）。
+
+### 每小时重复登录：site_outage 会话不持久化（2026-10-04 修复）
+
+**现象**：`site_outage_screenshot` 每小时整点跑一次（DB 覆盖 `0 */1 * * *`，
+这是**有意**的，截图需要每小时更新），每次耗时 17~25s，都在走完整登录流程。
+shared `auth_cache` 里 admin 的 token 明明还有 14.6 小时有效期，却仍在登录。
+
+**根因（与 token 过期无关）**：eFlow 签发的 5 个会话 cookie
+（`JSESSIONID` / `Z-AUTH-CODE-28001` / `forgerydefense-28001` /
+`x-dexmesh-user-28001` / `X-Rm-Data-Version-zenap`）**全部是 session cookie**
+（`expires=-1`），Chrome 在**浏览器关闭时一律丢弃**。而任务每轮结束都执行
+`browser.close()`，于是持久化 profile 里的会话**每轮都被清空**，
+下一轮必然回到登录页。实测证据：`browser_session/Default/Network/Cookies`
+的 cookie 表**为空**，且该文件长期不被写入。
+
+**这不是"token 还没过期就重复登录"**，而是"会话压根没保住"。
+所以"加 keepalive 心跳探测"对它无效 —— 心跳只会多一步"发现已失效再登录"。
+
+**修法**：Chrome 丢弃 session cookie 是**浏览器行为**，改 profile 没用，
+必须由我们自己把会话序列化到磁盘。用 Playwright 的 `storage_state()`
+（含 cookie + localStorage）在 `browser.close()` **之前**落盘，
+下次启动用 `add_cookies()` + `add_init_script()` 回灌：
+
+| 位置 | 作用 |
+| --- | --- |
+| `site_outage_service.py:190-224` | `STATE_FILE`（会话副本路径）与成因注释 |
+| `:253-350` | `_state_is_fresh` / `_load_state` / `_save_state` / `_clear_state` |
+| `:355-380` | `_session_still_valid()`：回灌后先探一次看板页，未被重定向即复用 |
+| `_login()` | 会话有效则**完全不登录**；确证失败才清副本 |
+| `_run_site_outage_once()` 的 `finally` | **`_save_state` 必须在 `browser.close()` 之前** |
+
+副本路径是 `Task\Site_outage\session_state.json`（由 `__file__` 推算）。
+⚠ 本机另有 `D:\01_RPA\Site_outage\`，那是 **7 月的陈旧 profile**，不要拿它排查。
+
+**顺带收窄了一处过度清理**：`_on_retry` 原实现在**任何**失败上都清空整个
+`USER_DATA_DIR`（含 `Page.goto` 网络超时这类与登录态无关的故障），
+后果是每次清理都让下一轮必然重新登录，且反复重建 143MB profile。
+实测 10-03~10-04 产生了 7 个 `session_bak`。现改为只清理
+**登录态相关**信号（凭据失败 / authorize 重定向环）。
+
+**实测验证**（`TMP/_verify_session_reuse_live.py`，连续两轮）：
+
+| 轮次 | 复用会话 | 走登录流程 | 填登录表单 | 截图 | 耗时 |
+| --- | --- | --- | --- | --- | --- |
+| 第 1 轮 | 是 | 否 | 否 | 4 张 | 15.4s |
+| 第 2 轮 | 是 | 否 | 否 | 4 张 | 15.8s |
+
+且 `auth_cache` 的 `created_at` 未变（`04:39`），证明**没有产生新的登录**。
+
+### 代理 `result:0` 误判 + Set-Cookie 丢凭据（2026-10-04 修复）
+
+`tools/realtime_proxy.py` 是 FMS 看板的本地代理（8787）。今日日志里
+`login start` **281 次**、其中 **279 次失败**（`cookie=yes, csrf=no`），
+形成"403 → 登录 → 还是失败 → 再 403"的自激循环（10-03 峰值 **3822 次/天**）。
+
+这里其实是**两个独立缺陷**叠在同一段逻辑上：
+
+**缺陷一：`result:0` 被当成失败。** 原判据是「响应体含 `"result":"1"`」，
+但这版 eFlow 的 `login_rsa` **恒返回 `"result":"0"`**，同时正常签发
+凭据（实测历史日志里 `"result":"1"` 出现 **0 次**）。而同一时刻
+`auth_manager`（只认 `Z-AUTH-CODE`）登录**成功** —— 说明登录一直是成功的，
+是这里判错了。
+
+**缺陷二（本次新发现，更隐蔽）：`Set-Cookie` 有多条，`.get()` 只返回第一条。**
+实测 `login_rsa` 一次返回 **4 条** `Set-Cookie`：
+
+```
+[0] Z-AUTH-CODE-28001=...            <-- .get() 只拿到这条
+[1] Z-LOGIN-PUBLIC-CODE-28001=;Max-Age=0
+[2] x-dexmesh-user-28001=...
+[3] forgerydefense-28001=...          <-- csrf 在这里，被 .get() 丢掉
+```
+
+而 `headers.get("Set-Cookie")` **只返回第一条**，于是 `forgerydefense`
+被静默丢弃 → 兜底分支永远匹配不到 → csrf 恒为空 → 判登录失败 →
+会话不落盘 → 下个请求又 403。**这才是 279 次 `csrf=no` 的直接原因。**
+
+修法：新增 `_all_set_cookie()`（`:422`）用 `get_all("Set-Cookie")` 取全；
+并加 `[diag] jar cookies = [...]` 诊断输出，让下次一眼分辨
+"上游没签发"与"我们没取到"（本次正是后者）。
+
+
+| 目标 | 位置 | 安全性 |
+| --- | --- | --- |
+| 运行日志 | `log/*.log`（大文件先停服务再清，避免句柄占用） | 安全，历史问题就查不回来了 |
+| 队列与执行日志 | 主库 `task_queue`、`task_execution_log` | **系统自动保留 7 天**（`TASK_LOG_RETENTION_DAYS` 默认 7，2026-09-11 由 3 天放宽；`task_runner.py` / `worker.py` 清理），无需手工 |
+| 一次性调试产物 | `log/edge_cleanup*.txt`、`killlog*.txt`、`pidcheck.txt`、`identify.txt`、`backend/restart_dbg.log`、根目录 `send_test_v22.log` | 安全 |
+| 历史空库 | `data/app.db`、`data/my_app.db`（均 0 字节） | 安全 |
+| 旧构建目录 | `frontend/dist`、`dist2`、`dist3`（未被 `outDir` 使用） | 删前确认 nginx 没指向它们 |
+
+**不要动**：`db/app.db`（含凭据 + 快照）、`backend/services/auth_cache/`（有效登录态）、`data/` 下各任务目录、根目录 `eflow_TT_rules.xlsx`（是副本但可能是你手工维护的规则源）。
+
+`monitor_fixes/` 是监控远程主机（DB 写入 API 8765 / FTP 21 / nginx 80）的修复版 PowerShell 脚本集，路径为 `E:\01_RPA\...`，与本机启停无关，**别拿它当启停脚本**。
+
+## 测试
+
+`tests/` 是 API + Playwright E2E 套件，用法与报告位置见 `tests/README_tests.md`，报告落 `tests/reports/`。改完代码建议至少跑一遍受影响的 API 测试。

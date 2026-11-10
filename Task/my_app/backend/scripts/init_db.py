@@ -1,0 +1,285 @@
+"""数据库初始化脚本：支持从 eFlow API 直接获取数据或 Excel 文件初始化"""
+import os
+import re
+import sys
+import time
+import sqlite3
+import pandas as pd
+from pathlib import Path
+
+# 本脚本由 ftp_sync.run_init_db() 以 `python init_db.py` 独立子进程方式启动，
+# 子进程 sys.path[0] 是本文件目录 backend/scripts，项目根不在搜索路径上，会导致
+# 下方 `from backend....` 抛 ModuleNotFoundError: No module named 'backend'
+# （2026-09-28 修复，与 sp_report_gen/gernarate_sp_report.py 同类问题）。
+# 显式把项目根加入 sys.path，使 backend.* 可导入。
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
+from backend.database import get_raw_connection
+from backend.dialect_helpers import (
+    list_table_names, table_columns, safe_pragma, write_df, ensure_table_indexes,
+)
+from backend.services.county_normalize import normalize_admin_columns
+
+# 配置
+DB_DIR = Path(__file__).resolve().parent.parent.parent / "db"
+DB_PATH = DB_DIR / "app.db"
+EXCEL_DIR = DB_DIR
+
+# Excel文件 -> 表名映射
+FILE_TABLE_MAP = {
+    "Eflow_TT_FB.xlsx": "eflow_tt",
+    "Eflow_WO_FB.xlsx": "eflow_wo",
+    "ZTE OLR MS Master Site Database.xlsx": None,  # 多sheet，按sheet名生成表
+}
+
+# sheet名 -> 表名映射（Master Site Database 多sheet）
+SHEET_TABLE_MAP = {
+    "Master Site Database ": "master_site_db",
+    "E-flow Database": "eflow_database",
+    "FLM Database": "flm_database",
+    "New FLM Team information ": "flm_team_new",
+    "FLM Team information": "flm_team",
+    "SLA and Tickes Priority": "sla_priority",
+    "Victim topology（Pradeep update)": "victim_topology",
+    "Satellite sites list": "satellite_sites",
+    "ERA(VIP&No-VIP）": "era_sites",
+    "GateWay Sites": "gateway_sites",
+    "Special Sites": "special_sites",
+    "ISP Sites": "isp_sites",
+    "LandLord and AML Sites": "landlord_sites",
+}
+
+
+def clean_column_name(col: str) -> str:
+    """清洗列名：去空格、特殊字符，转小写snake_case"""
+    if not isinstance(col, str):
+        col = str(col)
+    col = col.strip()
+    col = re.sub(r'[^\w\s]', '_', col)
+    col = re.sub(r'\s+', '_', col)
+    col = re.sub(r'_+', '_', col)
+    col = col.strip('_').lower()
+    if col and col[0].isdigit():
+        col = f'col_{col}'
+    if not col:
+        col = 'unnamed'
+    return col
+
+
+def load_excel_to_db(excel_path: Path, table_prefix: str, conn: sqlite3.Connection, sheet_map: dict = None):
+    """将Excel文件的所有sheet写入SQLite"""
+    print(f"\n{'='*60}")
+    print(f"处理文件: {excel_path.name}")
+    print(f"{'='*60}")
+
+    try:
+        xls = pd.ExcelFile(str(excel_path), engine='openpyxl')
+    except Exception as e:
+        print(f"  [ERROR] 无法打开文件: {e}")
+        return
+
+    for sheet_name in xls.sheet_names:
+        # 确定表名
+        if sheet_map and sheet_name in sheet_map:
+            table_name = sheet_map[sheet_name]
+        elif sheet_map:
+            table_name = clean_column_name(sheet_name)
+        else:
+            table_name = table_prefix
+
+        print(f"\n  Sheet: '{sheet_name}' -> 表: {table_name}")
+
+        try:
+            df = pd.read_excel(xls, sheet_name=sheet_name, engine='openpyxl')
+        except Exception as e:
+            print(f"    [ERROR] 读取失败: {e}")
+            continue
+
+        if df.empty:
+            print(f"    [SKIP] 空表")
+            continue
+
+        # 清洗列名
+        original_cols = list(df.columns)
+        df.columns = [clean_column_name(c) for c in df.columns]
+
+        # 处理重复列名
+        seen = {}
+        new_cols = []
+        for c in df.columns:
+            if c in seen:
+                seen[c] += 1
+                new_cols.append(f"{c}_{seen[c]}")
+            else:
+                seen[c] = 0
+                new_cols.append(c)
+        df.columns = new_cols
+
+        # 删除全空列
+        df = df.dropna(axis=1, how='all')
+
+        # 添加元数据列
+        df['_source_file'] = excel_path.name
+        df['_source_sheet'] = sheet_name
+        df['_import_time'] = pd.Timestamp.now().isoformat()
+
+        # 县名归一化：源表人工维护，「Province/County」列实测带笔误
+        # （'Monsteraddo' / 'Rivercess' / 'River cess'，2026-11-03 版 7 行）。
+        # 在**写库前**收敛到 15 个标准县名，脏值不再入库；改动会打 WARNING 留痕。
+        fixed = normalize_admin_columns(df)
+        for col, audit in fixed.items():
+            print(f"    县名归一化 {col}: "
+                  + "; ".join(f"{raw!r}->{norm!r}×{n}" for raw, norm, n in audit))
+
+        print(f"    行数: {len(df)}, 列数: {len(df.columns)}")
+
+        # 显示前5个列名映射
+        for orig, new in zip(original_cols[:5], df.columns[:5]):
+            print(f"    列映射: '{orig}' -> '{new}'")
+        if len(original_cols) > 5:
+            print(f"    ... 共{len(original_cols)}列")
+
+        # 写入数据库（先删除旧表再创建）
+        write_df(df, table_name, if_exists='replace')
+
+        # 建立索引：清单与「表浏览器导入 / 上传建表」共用
+        # backend.dialect_helpers.TABLE_INDEX_SPECS，三处不再是各写一份。
+        idx_names = ensure_table_indexes(conn, table_name, df.columns)
+        for n in idx_names:
+            print(f"    索引: {n}")
+
+        conn.commit()
+        print(f"    [OK] 写入完成")
+
+    xls.close()
+
+
+def init_from_eflow_api(conn: sqlite3.Connection) -> bool:
+    """从 eFlow API 直接获取数据初始化数据库"""
+    print(f"\n{'='*60}")
+    print(f"从 eFlow API 直接获取数据初始化")
+    print(f"{'='*60}")
+
+    # 调用同步服务
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from services.sync_from_eflow_api import sync_from_eflow_api
+    result = sync_from_eflow_api(mode="full")
+
+    print(f"\n同步结果: {'成功' if result['success'] else '失败'}")
+    for table, count in result['tables_synced'].items():
+        print(f"  {table}: {count} 行")
+    if result['errors']:
+        for err in result['errors']:
+            print(f"  [ERROR] {err}")
+
+    return result['success']
+
+
+def main():
+    start_time = time.time()
+    print(f"数据库路径: {DB_PATH}")
+    print(f"Excel目录: {EXCEL_DIR}")
+    print(f"eFlow数据源: eFlow API (sync_from_eflow_api)")
+
+    # 确保目录存在
+    DB_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 连接数据库
+    with get_raw_connection(str(DB_PATH)) as conn:
+        safe_pragma(conn, "PRAGMA journal_mode=WAL")
+        safe_pragma(conn, "PRAGMA synchronous=NORMAL")
+
+        # 优先尝试 eFlow API 数据源
+        try_api = True  # 默认尝试 API
+
+        if try_api:
+            print("\n>>> 尝试 eFlow API 直接获取数据初始化 <<<")
+            try:
+                api_success = init_from_eflow_api(conn)
+            except Exception as e:
+                print(f"\n>>> API 初始化异常: {e}，回退到 Excel 文件初始化 <<<")
+                api_success = False
+            if not api_success:
+                print("\n>>> API 失败，回退到 Excel 文件初始化 <<<")
+                # 处理每个Excel文件
+                for filename, table_prefix in FILE_TABLE_MAP.items():
+                    excel_path = EXCEL_DIR / filename
+                    if not excel_path.exists():
+                        print(f"\n[WARNING] 文件不存在: {excel_path}")
+                        continue
+
+                    if table_prefix is None:
+                        load_excel_to_db(excel_path, "", conn, sheet_map=SHEET_TABLE_MAP)
+                    else:
+                        load_excel_to_db(excel_path, table_prefix, conn)
+
+        # 创建元数据表 - 记录所有数据表信息
+        tables = [t for t in list_table_names(conn) if t != '_metadata']
+
+        metadata_rows = []
+        for table_name in tables:
+            row_count = conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
+            col_names = table_columns(conn, table_name)
+            col_count = len(col_names)
+            # TODO-PHASE3-SCHEMA: 仅取列名（类型信息在双模下成本较高，元数据仅作展示用途）
+            columns = [{"name": c, "type": ""} for c in col_names]
+            metadata_rows.append({
+                "table_name": table_name,
+                "row_count": row_count,
+                "col_count": col_count,
+                "columns_json": str(columns),
+            })
+
+        if metadata_rows:
+            meta_df = pd.DataFrame(metadata_rows)
+            write_df(meta_df, '_metadata', if_exists='replace')
+            print(f"\n{'='*60}")
+            print(f"元数据表 _metadata: {len(metadata_rows)}条记录")
+
+        # 创建分析归档表
+        if isinstance(conn, sqlite3.Connection):
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS analysis_archive (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                description TEXT,
+                table_name TEXT,
+                chart_config TEXT,
+                conclusions TEXT,
+                snapshot_data TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """)
+        else:
+            # PG：以 GENERATED ALWAYS AS IDENTITY 取代 sqlite 的 AUTOINCREMENT
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS analysis_archive (
+                id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT,
+                table_name TEXT,
+                chart_config TEXT,
+                conclusions TEXT,
+                snapshot_data TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """)
+        conn.commit()
+
+        # 打印汇总
+        print(f"\n{'='*60}")
+        print("数据库汇总:")
+        print(f"{'='*60}")
+        for table_name in tables:
+            row_count = conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
+            print(f"  {table_name}: {row_count} 行")
+
+        conn.close()
+        elapsed = time.time() - start_time
+        print(f"\n总耗时: {elapsed:.2f}秒")
+
+
+if __name__ == "__main__":
+    main()

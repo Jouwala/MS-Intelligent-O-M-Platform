@@ -1,0 +1,43 @@
+# 统一依赖清单（由项目内多份 requirements / *_requirements 文件去重并集生成）
+# 安装：pip install -r requirements.txt
+# 锁定版本见 requirements.lock.txt
+
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+sqlalchemy>=2.0.0
+alembic>=1.13.0
+pandas>=2.0.0
+openpyxl>=3.1.0
+numpy>=1.24.0
+python-multipart>=0.0.6
+pydantic>=2.0.0
+apscheduler>=3.10.0
+requests>=2.28.0
+cryptography>=41.0.0
+xlsxwriter>=3.0.0
+matplotlib>=3.7.0
+playwright>=1.40.0
+geoip2>=4.8.0
+scipy
+shapely
+psycopg2-binary==2.9.12
+# VMAX 数仓 GBase 8a（MySQL 协议，10.123.255.12:5258）：纯 Python 驱动，无编译依赖
+pymysql>=1.1.0
+# SSH/SFTP 通道：get_sp_table.py（SP 备件同步）早已 import，但一直没登记进本清单，
+# 换机器按 requirements.txt 装完会在任务运行时才 ImportError。
+# gp_ran（RAN Greenplum 取数）同样依赖它做 control1 两跳转发。
+paramiko>=3.4.0
+exchangelib>=5.6.0
+Pillow>=10.0.0
+python-dotenv>=1.0
+
+# ---- 开发/测试与静态检查 ----
+# 此前 pytest 未登记，导致 tests/ 下 20+ 个 test_*.py 在任何环境都跑不起来
+# （系统 Python 与 .venv 均无此模块），tests/README_tests.md 的回归流程实际是断的。
+# conftest.py:12 的 collect_ignore 已排除会真连 UME/浏览器的手动脚本，
+# 因此 `pytest tests/` 可安全执行。
+pytest>=8.0.0
+# ruff 只开启 E9/F/S110/T20（见 pyproject.toml）：E9/F 是真错误，
+# S110 对应"裸 except 后 pass"（AGENTS.md 第四节第 2 条的机器化），
+# T20 禁止 print 残留在库代码里。存量告警走 per-file-ignores 白名单。
+ruff>=0.6.0

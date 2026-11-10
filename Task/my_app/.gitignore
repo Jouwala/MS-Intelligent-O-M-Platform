@@ -1,0 +1,214 @@
+# my_app 专属忽略规则
+#
+# 历史：本文件原先只有 venv 自动生成的两行（内容为 `*`），它把 my_app 下
+# 所有未跟踪文件都屏蔽了 —— 包括新写的 backend 模块。git status 因此看不到
+# 漏提交，已连续三周。现在改成显式列出真正该忽略的东西。
+
+# 虚拟环境直接建在源码目录里（Lib 352M / Scripts 6.4M / include）
+/Lib/
+/Scripts/
+/include/
+/pyvenv.cfg
+/.venv/
+/.venv-test/
+
+# 运行时数据（sqlite 956M / 日志 152M）
+/db/
+/log/
+
+# IDE（根 .gitignore 未覆盖 .trae）
+/.trae/
+
+# 构建产物与编译中间件
+/frontend/dist*/
+*.class
+
+# 进程锁文件
+*.pid
+
+# 进程状态标记（运行时产物，非源码）：stop.bat 停机前写的 worker_stopping.flag
+# 属于"本机派生数据"，内容只是「谁在何时停机」的一行文本。
+# 2026-10-07：该文件此前**被误提交进版本库**（见 commit 3979e9ee），
+# 会导致每台机器互相干扰（worker 读到的陈旧标记可能把真实崩溃误判为人为停机）。
+# 与 *.pid 同理，一律不入库。
+*.flag
+
+# 鉴权缓存与本地凭据（含敏感信息，根规则同样覆盖，这里再显式写一次）
+/auth_cache/
+**/auth_cache/
+*.local.json
+
+# 电池 UME 的鉴权快照（含有效会话 cookie，与 auth_cache 同等对待）。
+# 由 battary_kpi_fetch_socket.ensure_auth_info() 自动生成/更新，严禁入库。
+**/battary_kpi_fetch/auth_info.json
+**/battary_kpi_fetch/auth_info.json.*.tmp
+
+# PM 性能数据下载缓存（zip+xml 成对，19 万量级，每次运行可重建）
+/backend/services/cn_ems/_pmcache/
+
+# TT 分析技能正文的本地缓存：openwebui_client.get_tt_skill_cached() 每次连上内网就重写，
+# 缺文件时回退到代码里的内置提示词，所以它不是源码，也不该随仓库分发。
+/backend/services/eflow_rules/tt_proivity_skill.json
+
+# SQLite 边车文件（根规则的 *.wal 匹配不到 "xxx.sqlite3-wal" 这种连字符命名）
+*-wal
+*-shm
+
+# 带时间戳的库备份与运行时整目录备份
+*.bak_*
+/backend/services/cn_ems/jab_setup/backup_*/
+
+# 实时代理的上游会话文件（FMS 8787 / VMAX 8790）。
+# 内容是两个内网门户的**有效登录 Cookie + csrf**，等同于凭据 —— 严禁入库。
+# 2026-10-03：代理脚本迁到 tools/ 后，会话文件按 dirname(__file__) 跟着落到
+# tools/，而 /Scripts/ 那条旧规则不再覆盖它，故在此显式忽略。
+# 运行时自动生成，删除无碍（下次启动重新登录）。
+/tools/fms_session.json
+/tools/vmax_session.json
+/tools/*_session.json
+
+# 任务运行产出（每次运行重写，入库只会造成永久 diff 噪声）
+/backend/services/cn_ems/daily_raw.json
+/backend/services/cn_ems/kpi_result.json
+/backend/services/cn_ems/kpi_result_raw.json
+/backend/services/cn_ems/pm_query_template.bin
+/backend/services/eflow_rules/eflow_tt_rules_check_latest.json
+/backend/services/ai_model_config.json
+_probe_file.txt
+
+# 临时产物目录（截图 / 抓包 / 一次性探针脚本 / Chrome 临时 profile）
+# 服务在用的 TMP/ccn_free_rating_charts、fw_charts、ipran_charts、email_recovery_state.json
+# 同属运行时产出，一并忽略。
+/TMP/
+
+# 代码清洁归档目录（同盘移动，确认无碍后整体删除）
+/_myapp_trash_*/
+
+# 误建的空 sqlite 占位（真正库是 /db/app.db）
+/backend/app.db
+
+# 原生看板磁盘缓存（运行时产物，可由源库重建；单页 JSON 可达数 MB）
+# 见 backend/services/dashboard_service.py 的 CACHE_DIR
+/backend/data/native_board_cache/
+
+# ⚠ 例外：GIS 县界/国界是**源码级的静态数据**，必须入库（2026-09-25 新增）。
+# 根 .gitignore:85-86 有全局 `data/` 与 `*/data/`，会把 backend/data/gis/*.geojson
+# 静默忽略掉 —— 表现为「本机跑得好好的，换台机器/新克隆就 404、地图上没有县界」。
+# 这两个文件由用户提供的《利比里亚地图文件_国家边界含州名.txt》离线转换而来，
+# 是几何真相源，无法在运行时重建，故显式取反。
+!backend/data/
+!backend/data/gis/
+!backend/data/gis/*.geojson
+#
+# ⚠ 上面 `!backend/data/` 的副作用必须在这里补回来（2026-09-25）：gitignore 无法
+# 「只豁免一个子目录」—— 被忽略目录里的东西要入库，就得先把整条路径逐级取反。
+# 取反之后 backend/data/ 的**直接子文件**就不再被根规则的 `data/` 挡住了，于是
+# 下面这几份服务端运行时状态又冒出来变成待提交新文件。它们都是页面写入的本机
+# 状态（读不到时代码各自回落默认值/内置提示词），入库只会让每台机器互相覆盖：
+#   - settings.json        → backend/config/remote_host.py，缺文件用默认主机
+#   - portal_catalog.json  → backend/routers/portal_catalog.py，缺文件前端回落内置 data.js
+#   - ui_menu_layout.json  → backend/routers/ui_config.py，缺文件前端回落默认结构
+#   - tt_timeline_cache/   → backend/services/tt_postmortem/__init__.py:_TIMELINE_CACHE_DIR
+/backend/data/settings.json
+/backend/data/portal_catalog.json
+/backend/data/ui_menu_layout.json
+/backend/data/tt_timeline_cache/
+# gp_ran 导出的 VoLTE / N78 用户号码清单（D023=MSISDN，**用户个人信息**）。
+# 上面 `!backend/data/` 的取反会让这个目录变成可提交，必须在这里挡回来：
+# 号码清单入库等于把订阅者数据分发给每一个拿到仓库的人，且永久留在 git 历史里。
+/backend/data/gp_ran/
+
+# outputs/ 整体是**产物目录**（`ume_in_screen_render.py:97` 的默认输出就落在这里）。
+# 里面的 `ume_screen_caps/`、`ume_screen_platform/` 两份是被人为入库当样例，维持现状不动；
+# 其余产物里 xlsx/png/jpg 已被根 .gitignore 的扩展名规则挡住，唯独 Markdown 漏网 ——
+# 于是「TT 复盘报告」导出件（eflow_qa.py:806 的下载文件名）会冒出来被当成新文件，
+# 而后端每次都能实时生成同一份内容，仓库里不需要副本。2026-09-25 起显式拦住。
+/outputs/*.md
+
+# eflow_rules 规则匹配报告：**任务每次运行都会重写**（eflow_rules_matcher.py:31
+# OUTPUT_REPORT，由 eflow_tt_rules_check 每天 04:20 调用），内容只有新的时间戳与
+# 重算后的匹配数 —— 属于产物而非源码，仓库里留副本只会让每次跑完 git status 变脏。
+# 同目录两个 .xlsx 产物早已被根 .gitignore 的扩展名规则挡住，唯独这份 Markdown
+# 漏网（与上面 /outputs/*.md 是同一类漏网，2026-10-15 一并拦住并把已跟踪的删除）。
+/backend/services/eflow_rules/MATCHING_REPORT.md
+
+# Chrome 临时 profile（portal_login_service 正常退出时会自清，异常退出会残留）
+/data/portal_profiles/_tmp_*/
+
+# 根目录一次性探针脚本禁止入库（2026-09-18 清理：98 个误随 2177afa 入库的 _tmp_* 已归档到 _myapp_trash_20260918/）
+/_tmp_*
+
+# 根目录一次性探针与转储（2026-09-24 扩到全部 _ 前缀：_p.py / _s.py / _slice1.txt
+# 都是这一类）。写探针请落到 /TMP/，不要留在 my_app 根目录。
+/_*
+
+# ⚠ 刻意**没有**写成 **/_* ：本仓库带下划线的子目录文件里有真源码，
+# 用全局 _ 规则会把它们静默忽略掉：
+#   backend/services/_playwright_utils.py   —— site_outage_service.py:22  import 它
+#   backend/services/_gen_native_catalog.py —— native_catalog.py 的生成器
+#   frontend/src/pages/_TemplatePage.tsx    —— AGENTS.md 三.2 规定的功能页模板
+# 这三个（及同类）必须保持在版本库里。
+
+# Office 崩溃恢复残留（历史上混进过 _fe_dist）
+*.rpltmp
+
+# pytest / ruff 的本地缓存（2026-09-27 补）
+#
+# 背景：这两个工具此前**都不在 requirements 里**，仓库里从来没人跑过它们，
+# 所以这两个目录也从未出现过，.gitignore 自然没有对应规则。2026-09-27 把
+# pytest + ruff 补进依赖后，`pytest tests/` 与 `ruff check backend` 每次执行
+# 都会在项目根新建这两个目录 —— 实测 `git check-ignore` 判定**不被忽略**，
+# 也就是第一次跑测试就会冒出一批待提交的缓存文件（正是 AGENTS.md 四.4 说的
+# "运行时产物混入版本库"）。
+# 它们纯属本机派生数据（含上一次失败的用例列表、文件指纹），随仓库分发只会
+# 让每台机器互相干扰，必须拦住。
+/.pytest_cache/
+/.ruff_cache/
+# 子目录下也可能生成（例如 frontend/ 里单独跑 ruff 时）
+**/.pytest_cache/
+**/.ruff_cache/
+# coverage.py 若将来接入，同样属于派生数据
+/.coverage
+/coverage.xml
+/htmlcov/
+
+# eFlow 规则检查的**运行时产物**（2026-10-23 补）
+#
+# 背景：backend/services/eflow_rules/ 下既有源码/规则文件，也有任务每轮重写的产物。
+# 此前的 eflow_*_latest.json / *.xlsx 因为没人加规则而一直处于**未跟踪**状态
+# （未被忽略，但也没人 git add），每次跑任务 git status 就多一批 ?? 行 ——
+# 正是 AGENTS.md 四.4 / 四.7 要杜绝的「运行时产物混入版本库」。
+# 这些文件每次运行都由任务重新生成、可由任务重建，不属于源码：
+#   · eflow_push_rules_check.xlsx          —— 推单检查表（卡片与下钻的数据源）
+#   · eflow_push_rules_check_latest.json   —— 推单检查摘要
+#   · push_rules_snapshots/                —— 推单检查周快照（跨次对比用）
+# ⚠ **忽略跟踪 ≠ 可以删除**：它们是线上页面正在读的数据源，必须留在磁盘上。
+/backend/services/eflow_rules/eflow_push_rules_check*.xlsx
+/backend/services/eflow_rules/eflow_push_rules_check_latest.json
+/backend/services/eflow_rules/push_rules_snapshots/
+
+# VMAX / Talon 浏览器抓包（curl 导出，含 JSESSIONID 会话 cookie）——
+# 2026-10-26：url2.txt 是 Talon XDR 协议复刻的一手依据，但内容含有效会话凭据，
+# 按 AGENTS.md 四.2「绝不写敏感值」禁止入库；后续新抓包同样按此规则。
+#
+# ⚠ 2026-11-10 修正（便携副本建库时）：原第 195 行有豁免 `!/backend/services/vmax_cca/url.txt`，
+#   理由是"主仓库已入库、是历史遗留"。**本副本是全新仓库，没有历史包袱，不该继承这个漏洞** ——
+#   实测该文件含有效 JSESSIONID（JSESSIONID=<已脱敏>，多处重复）。
+#   且子目录 .gitignore 的优先级**高于**根目录，所以根规则 `**/url*.txt` 挡不住它。
+#   现改为整目录通配挡住，不再豁免。
+#
+# ⚠ **忽略跟踪 ≠ 可以删除**：抓包样本是协议复刻的一手依据，必须留在磁盘上。
+#   缺 url.txt 时 vmax_cca 取数会回落（见 services/vmax_cca 里的默认 URL 与
+#   credential_store 优先级链），不会因此跑不起来。
+/backend/services/vmax_cca/url*.txt
+
+# IPT 数仓平台（portal.iptdigitalplatform.com）抓包 —— 2026-11-02。
+# url.txt 含明文口令与有效 Bearer JWT，按 AGENTS.md 四.2 禁止入库；
+# 后续该目录写正式取数代码（.py）不受影响，仅拦抓包转储。
+/backend/services/ipt_data/url*.txt
+
+# cm_data 抓包样本 —— 2026-11-10 补。
+# new_url.txt 含有效 forgerydefense 会话 cookie（实测 64 位 hex，多处重复）。
+# 根规则的 `**/url*.txt` 是**前缀**匹配，挡不住 `new_url.txt`（不是 url 开头），
+# 故在此显式列出。文件用途见 routers/cm_flows.py（cm_data_sync 的流程配置来源）。
+/backend/services/cm_data/*url*.txt

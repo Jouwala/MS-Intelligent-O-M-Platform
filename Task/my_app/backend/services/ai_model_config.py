@@ -1,0 +1,223 @@
+# -*- coding: utf-8 -*-
+"""AI 模型配置服务
+
+运行时配置持久化到 `backend/services/ai_model_config.json`，页面 GET/PUT 即时生效。
+
+openwebui_client.py 在每次 analyze_tt() 入口读取最新值（而非模块导入时），
+所以改配置无需重启后端。
+
+Schema
+------
+provider:         "local" | "openwebui" | "both"   主用方
+  local → 只用 WorkBuddy 本地代理
+  openwebui → 只用 Open WebUI（需配置邮箱密码）
+  both → WorkBuddy 主用，Open WebUI 备用
+
+local_enabled:    bool      是否启用本地代理（both 模式时控制是否加入调用链）
+local_model:       str       本地模型 ID
+local_base_url:    str       本地代理地址
+openwebui_model:   str       Open WebUI 模型（支持 auto / auto:pattern）
+openwebui_base_url: str       Open WebUI 地址
+openwebui_email:   str       Open WebUI 登录邮箱
+openwebui_password: str       Open WebUI 登录密码
+"""
+from __future__ import annotations
+
+import json
+import os
+import threading
+from pathlib import Path
+from typing import Any
+
+# ------------------------------------------------------------------ #
+# 路径
+# ------------------------------------------------------------------ #
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_CONFIG_FILE = _SCRIPT_DIR / "ai_model_config.json"
+
+# ------------------------------------------------------------------ #
+# 默认值（与 backend/.env 同值）
+# ------------------------------------------------------------------ #
+_DEFAULTS: dict[str, Any] = {
+    "provider": "both",
+    "local_enabled": True,
+    "local_model": "deepseek-v4.1-flash",
+    "local_base_url": "http://127.0.0.1:8788/v1",
+    "openwebui_model": "agnes-2.5-flash",
+    "openwebui_base_url": "http://192.168.100.27:3000",
+    "openwebui_email": "",
+    "openwebui_password": "",
+    # 自定义 Provider（用户自填 URL + API Key + Model）
+    "custom_model": "",
+    "custom_base_url": "",
+    "custom_api_key": "",
+}
+
+
+# ------------------------------------------------------------------ #
+# 持久化（JSON 文件）
+# ------------------------------------------------------------------ #
+_lock = threading.Lock()
+_cached: dict | None = None
+
+
+def _load_from_file() -> dict:
+    try:
+        if _CONFIG_FILE.is_file():
+            with open(_CONFIG_FILE, encoding="utf-8") as f:
+                d = json.load(f)
+            return d if isinstance(d, dict) else {}
+    except Exception:  # noqa: BLE001
+        pass
+    return {}
+
+
+def _save_to_file(cfg: dict) -> None:
+    _CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = str(_CONFIG_FILE) + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, str(_CONFIG_FILE))
+
+
+# ------------------------------------------------------------------ #
+# 主接口
+# ------------------------------------------------------------------ #
+def get_config(force_refresh: bool = False) -> dict:
+    """返回当前生效配置（文件 > 默认）。线程安全。"""
+    global _cached
+    if not force_refresh and _cached is not None:
+        return dict(_cached)
+    file_cfg = _load_from_file()
+    with _lock:
+        if file_cfg:
+            _cached = {**_DEFAULTS, **file_cfg}
+        elif _cached is None:
+            _cached = dict(_DEFAULTS)
+    return dict(_cached)
+
+
+def update_config(patch: dict) -> dict:
+    """更新配置：合并 patch → 写文件 → 返回新配置。"""
+    global _cached
+    new_cfg: dict
+    with _lock:
+        current = get_config()
+        new_cfg = {**current, **patch}
+        _cached = new_cfg
+    _save_to_file(new_cfg)
+    return dict(new_cfg)
+
+
+def get_effective() -> dict:
+    """返回前端需要的「当前生效配置 + 默认值」。
+
+    字段中文名/提示词由前端 i18n 承担（AIModelSettings.tsx 的 L.* 与
+    PROVIDER_OPTIONS）。这里曾经并列一份 schema.desc_zh/desc_en，前端从不读，
+    等于同一个字段说明存了两处，2026-10-19 删除。
+    """
+    cfg = get_config()
+    return {
+        "config": cfg,
+        "defaults": _DEFAULTS,
+    }
+
+
+# ------------------------------------------------------------------ #
+# 模型对比测试（供 /api/ai-model-settings/compare 使用）
+# ------------------------------------------------------------------ #
+def compare_models(
+    prompt: str,
+    system_prompt: str = "",
+    models: list[dict] | None = None,
+) -> list[dict]:
+    """同一 prompt 并发测试多个模型，返回每个的结果。
+
+    Args:
+        prompt:         用户消息
+        system_prompt:   可选的系统提示（默认只给语言指令）
+        models:          要测试的模型列表，默认用当前配置里的本地 + Open WebUI
+                        格式: [{"provider": "workbuddy"|"openwebui", "model": "模型ID"}]
+
+    Returns:
+        [{
+            "provider": str,        # "workbuddy" | "openwebui"
+            "model":    str,        # 模型 ID
+            "ok":       bool,
+            "response": str | None, # 成功时的回复文本
+            "error":    str | None, # 失败时的错误信息
+            "elapsed_ms": float,    # 耗时（毫秒）
+        }, ...]
+    """
+    import concurrent.futures
+    import time
+
+    try:
+        from backend.services import openwebui_client as owc
+    except Exception:  # noqa: BLE001
+        return [{
+            "provider": "", "model": "", "ok": False,
+            "response": None,
+            "error": "openwebui_client 不可导入，请检查后端依赖",
+            "elapsed_ms": 0.0,
+        }]
+
+    # 默认模型列表：从当前配置取本地 + Open WebUI
+    if not models:
+        cfg = get_config()
+        local_model = cfg.get("local_model", "deepseek-v4.1-flash")
+        openwebui_model = cfg.get("openwebui_model", "agnes-2.5-flash")
+        models = [
+            {"provider": "workbuddy", "model": local_model},
+            {"provider": "openwebui", "model": openwebui_model},
+        ]
+
+    # 默认语言指令 system_prompt（空时）
+    if not system_prompt:
+        system_prompt = (
+            "你是一个简洁的电信运维助手。请用简体中文回答，"
+            "标识符、站点名、字段名等保持原样。"
+        )
+
+    def _call_one(target: dict) -> dict:
+        p = target["provider"]
+        m = target["model"]
+        t0 = time.time()
+        try:
+            # chat() 内部处理 token 获取 / 重试 / 降级
+            # provider="openwebui" 时 chat() 内部会取 JWT
+            resp = owc.chat(
+                system_text=system_prompt,
+                user_text=prompt,
+                token="",          # chat() 内部自行取 token
+                model=m,
+                provider=p,
+            )
+            return {
+                "provider": p,
+                "model": m,
+                "ok": True,
+                "response": resp,
+                "error": None,
+                "elapsed_ms": round((time.time() - t0) * 1000, 1),
+            }
+        except Exception as e:  # noqa: BLE001
+            return {
+                "provider": p,
+                "model": m,
+                "ok": False,
+                "response": None,
+                "error": f"{type(e).__name__}: {e}",
+                "elapsed_ms": round((time.time() - t0) * 1000, 1),
+            }
+
+    results: list[dict] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(models), 4)) as ex:
+        futures = {ex.submit(_call_one, mdl): mdl for mdl in models}
+        for f in concurrent.futures.as_completed(futures):
+            results.append(f.result())
+
+    # 保持用户指定的顺序
+    order = {f"{m['provider']}:{m['model']}": i for i, m in enumerate(models)}
+    results.sort(key=lambda r: order.get(f"{r['provider']}:{r['model']}", 99))
+    return results

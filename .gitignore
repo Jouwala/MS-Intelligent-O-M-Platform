@@ -1,0 +1,620 @@
+# 压缩文件
+*.7z
+*.zip
+*.rar
+*.tar.gz
+*.tgz
+
+# 可执行文件
+*.exe
+*.dll
+*.sys
+*.pak
+*.dat
+
+# 数据库文件
+*.db
+*.sqlite
+*.sqlite3
+*.mdb
+*.accdb
+*.frm
+*.ibd
+*.dbf
+*.wal
+*.shm
+*.db-shm
+*.db-wal
+# 2026-09-30 补：上面 4 条**匹配不到 SQLite 的边车文件**，实测 12 个边车一直挂在版本库里。
+# 原因是命名用的是**连字符**而不是点：`db.sqlite3` 的边车叫 `db.sqlite3-shm` / `db.sqlite3-wal`，
+# 而 `*.shm` 要求文件名以 `.shm` 结尾，`*.db-shm` 要求以 `.db-shm` 结尾，两者都不命中
+# （`git check-ignore -v Task/RAN/db.sqlite3-shm` 无输出，可复现）。
+# 这类文件不是数据、也不是源码：SQLite 在最后一个连接正常关闭时**会自己把它们删掉**，
+# 下次连接再重新生成 —— 实测 `Task/RAN/db.sqlite3-shm/-wal` 就已经是「磁盘已无、仍在跟踪」的
+# ` D` 状态。也就是说它们会自己反复出现和消失，是纯粹的 diff 噪声，永远不该进库。
+# 与根 .gitignore 的 `*.log` 同理，这里补齐三套后缀 + 通用 journal，不留只覆盖一半的写法。
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3-shm
+*.sqlite3-wal
+*.db-journal
+*-journal
+data_base/
+*.sql
+
+# Excel / CSV / 文档（非代码）
+*.xlsx
+*.xls
+# 带宏的 Excel（2026-09-28 补）：`Task\my_app\Contract KPI&SLA Report Template.xlsm`
+# 是手工放的对照模板，全仓 0 处代码引用（只有 .venv 里 pandas 自己的字符串命中 *.xlsm），
+# 而 *.xls 只匹配旧格式、*.xlsx 匹配不到 xlsm，于是它一直挂成待提交的 ?? 噪音。
+# 忽略跟踪 ≠ 删除，文件留在本机对照用。
+*.xlsm
+*.csv
+*.pptx
+
+# 图片文件
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.ico
+*.svg
+*.webp
+*.tiff
+*.tif
+screenshots/
+Site_outage/screenshots/
+
+# ⚠️ 2026-09-28 例外：门户顶栏的品牌图标是**源码的一部分**，不是运行时产物。
+#    这条规则原本把 *.png 一律当"非代码图片"忽略，对截图/导出图是对的，
+#    但顶栏 logo（olbrportal 的 logo-olr-ms-*.png、MsPortal 的 logo-zte-z-*.png）
+#    一旦被忽略，提交里就少了文件：本机看着正常（磁盘上有图），
+#    换台机器 clone 出来顶栏就是破图 —— 这种"本地好、别人坏"最难查。
+#    实测依据：MsPortal 那两个同名资产之所以没被忽略，只是因为它们在
+#    *.png 这条规则**之前**就已经入了库 —— gitignore 不作用于已跟踪文件。
+#    所以新加的 logo 会被静默吃掉，必须显式豁免，不能靠"照抄旧路径"。
+#    豁免范围刻意只到 assets 目录的 logo-*，不放开整个 assets：
+#    那里同时躺着运行时导出的图表，放开等于把噪声放回版本库。
+#    ⚠️ 必须用 `**/`（跨目录匹配），不能写成 `*/assets/...`：
+#    实测单星号那一版对中文+连字符的目录名匹配不上，否定规则悄悄失效 ——
+#    check-ignore 仍报 `.gitignore:38:*.png`，看起来"规则写了"其实没生效。
+!**/assets/logo-*.png
+*.thumb
+*.cache
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+env/
+.venv/
+.venv-test/
+.env
+
+# 浏览器会话与克隆仓库
+chrome-win/
+whatsapp_session/
+Task/whatsapp_session/
+**/browser_session/
+my_tools_Liberia_noc1-rpa/
+
+# Site Outage 的会话副本（2026-10-04 新增）。
+# 内容与 browser_session/ 里的 cookie 等价 —— 是 eFlow admin 的**有效登录会话**
+# （JSESSIONID / Z-AUTH-CODE / forgerydefense / x-dexmesh-user），
+# 按 AGENTS.md 四.2「绝不写敏感值」必须拦住。
+# 由 backend/services/site_outage_session.py 运行时生成，删除无碍
+# （下一轮任务重新登录并重建）。
+# ⚠ 规则要写成 **/ 前缀：文件落在 Task/Site_outage/，不在 my_app 内，
+#   my_app/.gitignore 管不到它。
+**/session_state.json
+
+# OpenClaw API 优选器的**每日运行产物**（2026-10-04 新增）。
+# 两个文件都是 api_selector.py 的纯写入目标 —— 只在 :872/:996 以 "w" 模式打开，
+# **从不被读回**当配置（脚本 :64/:65 定义路径）。内容每天 03:00 被
+# 计划任务覆盖，唯一变化就是里面的日期，属于运行时输出而非源码。
+# 它们此前被误跟踪，导致每天工作区都"脏"两个文件，干扰 `git status` 判读。
+# ⚠ 必须配合 `git rm --cached` 才生效：只加忽略规则**不会**让已跟踪文件消失。
+openclaw_api_selector/last_run.json
+openclaw_api_selector/test_results.md
+openclaw_api_selector/scheduler.log
+
+# IDE / 工具文件
+.vscode/
+.idea/
+.qoder/
+.workbuddy/
+*.swp
+*.swo
+
+# 临时与调试目录
+TMP/
+V_Tmp/
+debug/
+scheduler_logs/
+data/
+*/data/
+*/detect_column_name/
+
+# 锁文件（运行中进程独占，无法被 git 读取）
+*.lock
+
+# Node
+node_modules/
+dist/
+dist_test/
+dist_rebuild/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# 测试报告
+Task/my_app/tests/reports/
+
+# 鉴权缓存（敏感）
+Task/auth_cache/
+auth_cache/
+
+# 共享鉴权总开关的**运行时状态**（2026-10-06 新增）
+#
+# 背景：`auth-switch.json` 是"本机当前是否要求登录"的运行态，由门户页面按钮或
+# `auth_switch.py` 写入，`.prev` 是写入前的滚动备份。它不是源码，且**不同机器可以合法地
+# 取不同值**（本机调试关、生产机必须开）——一旦入库，别人拉取后会被别人的开关状态覆盖，
+# 或者反过来把本机"关闭鉴权"的状态推给所有人。
+#
+# 更关键的是：`authEnabled=false` 等于两个应用都跳过登录（见 AUTH_SWITCH.md 第 4 节），
+# 这种状态**不应该**成为仓库里的一个可提交事实。
+#
+# 该文件从未被跟踪（git log 显示它在 a1d457b3 里被加入又删除，净效果为零），
+# 此前只是"碰巧"没被提交，缺一条显式规则兜底。现在补上。
+#
+# 注意：**忽略跟踪 ≠ 删除**。文件不存在时两侧按「缺省 = 开启鉴权」处理，
+# 因此删掉它也不会放开系统；但运维若在本机有意关闭过鉴权，那份文件要留在磁盘上。
+/auth-switch.json
+/auth-switch.json.prev
+/auth-switch.json.prev_*
+/auth-switch.json.broken_*
+/auth-switch.json.tmp_*
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 备份文件 / 手工快照（命名约定 `_bak_<日期>_<说明>`，见 AGENTS.md 第四节第 9 条）
+#
+# 快照是**本机磁盘上的**回滚手段，2026-09-24 起一律不进版本库。
+# 2026-09-25 清查发现：原先这里只有 `*.json.bak` 一条，四种实际命名形式里
+# 漏了后三种，于是 52 个快照被当成源码提交进了库（nginx 配置 4 个、
+# Task/ 下 45 个、门户 MsPortal 下 3 个），已用 `git rm --cached` 退出跟踪
+# （**文件仍在磁盘上**，只是不再入库）。下面把四种形式一次补齐：
+#
+#   1) foo.json.bak                  → *.json.bak（保留：语义更明确，虽被 *.bak 涵盖）
+#   2) nginx.conf.bak.20260728       → *.bak.*
+#   3) portal.js.bak-qc              → *.bak-*   ← 用的是**连字符**，最容易漏
+#   4) main.py_bak_20260913_authswitch → *_bak_* ← 下划线形式，与前三种都不同
+#
+# 新增快照请沿用第 4 种（`<原名>_bak_<日期>_<说明>`），它最不容易与
+# 真实扩展名混淆；下面的规则会同时挡住四种写法。
+# ─────────────────────────────────────────────────────────────────────────────
+*.json.bak
+*.bak
+*.bak.*
+*.bak_*
+*.bak-*
+*_bak_*
+
+# 本地凭据/密钥参考 — 禁止提交（共享生产凭据，多机使用）
+CREDENTIALS_LOCAL_REFERENCE.txt
+**/CREDENTIALS_LOCAL_REFERENCE.txt
+LOCAL_*.txt
+*.local.txt
+
+# ─────────────────────────────────────────────────────────────────────────────
+# novel_dl 语音合成工作区（Task/my_app/TMP/novel_dl）
+#
+# 注意：本文件前面的 "TMP/" 已经把整个目录忽略了，所以下面这些规则目前是"双保险"
+# —— 它们真正起作用是在以后有人把 TMP/ 从忽略列表里去掉、想单独提交 novel_dl
+# 脚本的时候。届时只提交代码/文档，大件和中间产物仍然被排除。
+#
+# 体积参考：venv 5.5G / CosyVoice-300M-SFT 5.4G / CosyVoice2-0.5B 5.2G
+# ─────────────────────────────────────────────────────────────────────────────
+# 虚拟环境（不可搬迁，新机用 setup_new_pc.py 重建）
+Task/my_app/TMP/novel_dl/venv/
+# 模型权重（首次运行自动下载，或用 make_portable.py --with-models 单独分发）
+Task/my_app/TMP/novel_dl/CosyVoice/pretrained_models/
+# CosyVoice 上游仓库的 .git（约 40MB）
+Task/my_app/TMP/novel_dl/CosyVoice/.git/
+# 声纹缓存，随时可重建
+Task/my_app/TMP/novel_dl/.spkcache/
+# 抓取小说用的浏览器 profile
+Task/my_app/TMP/novel_dl/chrome_profile/
+# 合成产出（每本书一个目录，内含 full.wav）
+Task/my_app/TMP/novel_dl/audio_*/
+# 合成中间产物：分块 wav / ffmpeg 拼接列表
+Task/my_app/TMP/novel_dl/_c[0-9]*_b[0-9]*.wav
+Task/my_app/TMP/novel_dl/_t[0-9]*_s[0-9]*.wav
+Task/my_app/TMP/novel_dl/_batch[0-9]*
+Task/my_app/TMP/novel_dl/_final[0-9]*
+Task/my_app/TMP/novel_dl/_full_list*
+Task/my_app/TMP/novel_dl/*.tmp.wav
+# 打包产物
+Task/my_app/TMP/novel_dl_portable_*.zip
+# 调试/临时脚本
+Task/my_app/TMP/novel_dl/_smoke*
+Task/my_app/TMP/novel_dl/bench_*.py
+Task/my_app/TMP/novel_dl/profile_*.py
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 前端构建产物整目录（2026-09-24 新增）
+#
+# vite 的 build.outDir 是 D:/01_RPA/Task/_fe_dist（在 my_app 之上），所以
+# Task/my_app/.gitignore 里的 /frontend/dist*/ 匹配不到它；根规则的 dist/
+# 也匹配不到 _fe_dist/。结果 9047 个产物文件被跟踪，每次 npm run build
+# 都产生几百条 diff。
+#
+# 已实测这些目录 100% 可由 frontend/ 源码重建：public/ 下有 lib/、legacy-*.css、
+# *.geojson、各手写 HTML 的母本，index.html 是 vite 根模板。
+# nginx.conf:150/160 用 alias 直接发 Task/_fe_dist/，它是**运行时服务目录**，
+# 忽略跟踪 ≠ 删除，磁盘上必须留着。
+# ─────────────────────────────────────────────────────────────────────────────
+Task/_fe_dist/
+Task/_fe_dist_tmp/
+Task/_fe_dist_bak_*/
+# 2026-09-25 修正：这条原先写的是 `Task/_fe_dist_cloud/`，**磁盘上从来没有这个目录**，
+# 真名是 `Task/_fe_cloud/`（59 个文件 / 9MB）。错名字当时没出事，是因为该目录压根没被
+# 跟踪过；但它已被移进 `_quarantine_20260925/Task/_fe_cloud/`，而 AGENTS.md 第四节第 4 条
+# 记录的规则名是真名 —— 谁按那份清单把目录移回来，就会立刻冒出 59 条待提交新文件。
+# 这里补真名；旧的不存在规则直接删掉，不留兼容写法。
+Task/_fe_cloud/
+
+# 一次性隔离区（同盘移动产物，保留原相对路径，确认无碍后再处置）
+/_quarantine_*/
+# 历史归档桶（2026-09-25 起其内容已移入 _quarantine_20260925/，原路径只留一个
+# junction 供 .workbuddy-ai/memory/2026-09-13.md 里记录的还原路径继续解析）。
+# 该目录此前仅靠 *.db 等扩展名规则"碰巧"没冒出来，这里补显式规则。
+/_myapp_trash_*/
+
+# nginx 巡检的运行态文件（计划任务 Nginx_EnsureRunning 每 5 分钟重写一次，不是源码）。
+# 同目录的 nginx_monitor.log 已被 *.log 覆盖；.state 没有扩展名规则能命中，补显式条目。
+Task/nginx_monitor.state
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 本机 nginx 发行包（2026-10-01 新增）
+#
+# 背景：MSNOC1 (.20) 的 nginx 原先跑在网络映射盘 Y:\01_RPA\nginx-1.28.0
+# （= \\192.168.100.19\e，即 .19 的 E 盘）。2026-09-30 21:56~22:15 nginx 猝死，
+# error.log 无 crash 痕迹，判定为 SMB 网络盘 I/O 阻塞所致；遂搬回本地 D 盘。
+# 搬移方式是**复制**不是移动 —— Y: 上那份 .19 自己也在用，必须保持原样。
+#
+# 为什么忽略：这是可重新下载的第三方发行包（nginx.exe + 一堆 .conf/*.pl/docs），
+# 不是本项目源码，也不参与任何构建。与 Y: 上那份同理（它从来就在版本库外）。
+# 忽略跟踪 ≠ 删除：D:\01_RPA\nginx-1.28.0\ 是**本机线上服务目录**，
+# nginx.exe 与 conf\ 必须留在磁盘上，删了服务就起不来。
+#
+# 注意生效配置有两份且**必须同步维护**：
+#   - 本机 (.20) 生效：D:\01_RPA\nginx-1.28.0\conf\nginx.conf   ← 改这个
+#   - .19 那边生效的：\\192.168.100.19\e\01_RPA\nginx-1.28.0\conf\nginx.conf
+# 改本机配置不要去动 Y: 那份（那是给 .19 用的）。
+# ─────────────────────────────────────────────────────────────────────────────
+/nginx-1.28.0/
+
+# Office 崩溃恢复残留 / TS 增量缓存
+*.rpltmp
+*.tsbuildinfo
+*.log.err
+
+# ow-bridge/：2026-09-30 落到工作区的 OW-Bridge 0.2.5 桌面端 Electron 发行包
+# （525MB / 510 个文件，其中主程序 `OW-Bridge/OW` 单文件 234MB）。
+# GitHub 的 100MB 单文件上限会直接拒收，整包入库等于把 push 打回；
+# 它是可重新下载的第三方运行产物，不参与本项目任何构建，也不是源码。
+# 只加忽略规则，**不动磁盘** —— 目录留着本机自用。
+/ow-bridge/
+
+# 工作区根的一次性探针转储（2026-10-03 新增）
+# 背景：根目录 76 个 tmp_qc*.txt 是 QC 面板改造期的 grep 转储，2026-09-21 误随
+#       d528a1e9「refine Quality Control cards」入库，之后一直跟到现在。
+# 为什么此前没被忽略：门户 .gitignore:55 有 `tmp_*`，但那只作用于门户目录，
+#       **管不到工作区根**；根 .gitignore 里也一直没有对应规则，所以它们既没被
+#       忽略、也没被那次历史清理（模式只含 _bak_/.bak/.qcbak）覆盖。
+# 为什么锚定成 /tmp_*.txt：只清工作区根这一层，不动 Task/ 等子目录里可能存在的
+#       同名真文件（AGENTS.md 第四节第 7 条：探针只能落各子系统的 TMP\）。
+# 只加忽略规则，**不动磁盘** —— 这 76 个文件留在本机，本次仅脱离跟踪。
+/tmp_*.txt
+
+# 浏览器自动化临时 profile（2026-10-03 新增）
+# 背景：`chrome_xhs_profile/` 是小红书发布流程用的 Chrome 用户数据目录，
+#       实测 **1,092,938 KB / 3911 个文件**（缓存、Cookies、Local Storage、
+#       GPU 缓存等）。它既非源码也非构建输入，且内含登录态与浏览轨迹，
+#       一旦 `git add -A` 就会把 1GB 垃圾和凭据一起推到 GitHub。
+# 为什么此前没被忽略：根 .gitignore 只有针对 my_app 的
+#       `/data/portal_profiles/_tmp_*/`，管不到工作区根这一层。
+# 只加忽略规则，**不动磁盘** —— 目录留着本机自用。
+/chrome_*_profile/
+
+# 一次性 PPT / 探针产物（2026-10-03 新增）
+# `_ppt_probe2/`（*.slide / *.pptx 草稿）与 AI 工作目录 `.workbuddy-ai/`（仅 memory/）
+# 都是过程产物，不是交付源码。按 AGENTS.md 第四节第 7 条，探针应落各子系统 TMP\；
+# 这两处落在工作区根，此前无规则覆盖。
+/_ppt_probe*/
+/.workbuddy-ai/
+
+# 工具自建的同步备份目录（2026-10-03 新增）
+# `Task/whatsapp-kb-bot/.sync-backup-<时间戳>/` 由同步脚本在覆盖前整目录备份生成，
+# 属可重建的中间态，不入库。
+**/.sync-backup-*/
+
+# 工具删除暂存残留（2026-10-31 新增）
+# `Task/whatsapp-kb-bot/config.json.tmpdel_*` 由同步/清理工具在覆盖前生成，
+# 属可重建的过程态（此前误跟踪，已 `git rm --cached` 退出，磁盘文件保留）。
+*.tmpdel_*
+
+# ─────────────────────────────────────────────────────────────────────────────
+# P0-A 真凭据兜底（2026-11-02 新增，见 商用整改清单v2.md）
+# 背景：openclaw.json / openclaw_new.json 已被跟踪且含真实 Key（A1 另行脱钩）；
+# whatsapp-kb-bot 的 data/auth/creds.json 目前靠 `data/` 规则碰巧忽略，
+# 缺显式规则，一次改动就可能入库。这里补显式兜底。
+# 注意：忽略规则对已跟踪文件无效，需配合 `git rm --cached`（见 A2/A3）。
+# ─────────────────────────────────────────────────────────────────────────────
+**/auth/**/creds.json
+**/auth-notify/**/creds.json
+**/*.pem
+**/*.key
+openclaw.json
+Task/PS_CS_CORE_Scripts/openclaw_new.json
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Herdr + OMP 并行开发工作目录（2026-10-31 新增）
+#
+# 背景：`Herdr + OMP 多项目并行开发落地方案.md` 约定每个并行任务一个 Git Worktree
+# （`.agent-worktrees/<任务>`）+ 一套任务说明（`.agent-work/tasks|contracts|…`）。
+# 这两处都是过程态（分支合入后 Worktree 即删、任务说明只在开发期有效），不是源码，
+# 按 AGENTS.md 第四节第 7 条不能入库。实测 `git check-ignore -v .agent-worktrees/foo`
+# 无命中，若不补规则，建 Worktree 当天 `git status` 就会多出一堆 `??` 噪声。
+# 忽略跟踪 ≠ 删除：Worktree 本体与任务说明留在磁盘上正常用，仅不进版本库。
+# ─────────────────────────────────────────────────────────────────────────────
+/.agent-worktrees/
+/.agent-work/
+
+# AI 工具规则真源的本地备份（2026-11-02 新增）
+# `/_agents/` 是规则真源目录（rules\ 入库）；`_backup\` 下是改前完整快照，
+# 按 AGENTS.md 第四节第 7 条「快照一律不进版本库」，只留在本机磁盘。
+/_agents/_backup/
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 各 AI 工具的运行时数据（2026-11-02 新增）
+#
+# 这些都是工具自己写的缓存 / 会话记录 / 一次性分析稿，不是源码，按 AGENTS.md
+# 第四节第 7 条不能入库。此前 `.agnes/`、`.trae/documents/`、`.zcode/` 里的 7 个
+# 文件被误跟踪（2026-11-02 已 `git rm --cached` 退出，磁盘文件保留）。
+#
+# 忽略跟踪 ≠ 删除：缓存与会话记录留在磁盘上照常工作，仅不进版本库。
+# ⚠ 新增 AI 工具目录时照抄一条；判定标准是「删掉它工具还能重建吗」——
+#    能就忽略，不能才是源码。
+# ─────────────────────────────────────────────────────────────────────────────
+/.agnes/
+/.zcode/
+/.trae/documents/
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 运行产物显式忽略（2026-11-04 补）
+# 只挡产物本身，不整目录忽略：outputs/ 与 desktop_shortcuts/ 下都有已入库的源码
+# （ume_screen_caps/data.json、make_desktop_shortcuts.ps1），整目录挡会把真源码一起吞掉。
+# ─────────────────────────────────────────────────────────────────────────────
+# county 名称归一等一次性回填任务落的备份与对账 JSON，以及导出的对比 PNG
+Task/my_app/outputs/*.json
+Task/my_app/outputs/*.png
+# 改前整目录快照，本机回滚用（AGENTS.md 四.7：快照不进版本库）
+Task/my_app/backup/
+# Windows 桌面快捷方式：里面是本机绝对路径，换台机器就是错的
+**/*.url
+
+# ─────────────────────────────────────────────────────────────────────────────
+# bigdata-dashboard-skill 本地专用（2026-11-07 新增）
+#
+# 背景：从 github.com/AragornZJF/bigdata-dashboard-skill 克隆的数据大屏生成
+# Skill（提交 9b581cc，仅本机生成单文件 HTML 大屏用）。用户明确要求永远
+# 不提交、只本地用：它是可重新克隆的第三方工具，不参与本仓库任何构建，
+# 且含约 45MB 模板图片/示例 Excel，入库只会给版本库添噪声。
+# 只加忽略规则，**不动磁盘** —— 目录留在本机正常使用。
+# 注意：忽略规则对已跟踪文件无效；该目录从未被跟踪，无需 `git rm --cached`。
+# ─────────────────────────────────────────────────────────────────────────────
+/bigdata-dashboard-skill/
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 抓包探针 url.txt 一律不入库（2026-11-08 新增）
+#
+# 这些文件是从浏览器「Copy as cURL」直接存下来的请求样本，头部里带的是
+# **有效会话凭据**（Cookie 里的 Z-AUTH-CODE / x-dexmesh-user / forgerydefense
+# 与 token 同效力），不属于源码。AGENTS.md 第四节第 2 条「绝不写敏感值」直接适用。
+#
+# 现状：`Task/my_app/backend/services/` 下已有 5 个 url.txt 被历史提交跟踪
+# （cm_data/new_url.txt、eflow_rules、ume_in、vmax_cca、vmax_multi_data），
+# 忽略规则对已跟踪文件无效，要清理得单独 `git rm --cached` 并轮换会话凭据 ——
+# 此事待用户决定，不在本次忽略规则的处理范围内。
+# ─────────────────────────────────────────────────────────────────────────────
+**/url.txt
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 便携副本（D:/01_olbr_portal）专属追加规则 —— 2026-11-10
+#
+# 本文件上游是主仓库 D:/01_RPA 的 .gitignore（2026-11-10 同步时整份复制过来），
+# 上面那些规则**大部分直接适用**（数据、构建产物、快照、凭据、IDE 缓存等）。
+# 下面只补**副本特有**的差异点，每条都写明「为什么」，方便后来者判断能否删。
+# ═════════════════════════════════════════════════════════════════════════════
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 捆绑运行时（6.5 GB）—— 本副本最大的体积来源
+#
+# runtime/ 下有 4 样东西，全部是「可重新获取的第三方发行包或运行态数据」，
+# 一条都不该进版本库：
+#   python312/    1.4 GB  系统 Python 3.12.10 解释器 + 依赖
+#   pgdata/       4.9 GB  便携 PostgreSQL 的**数据目录**（initdb 出来的库文件）
+#   postgresql16/ 125 MB  PG 16 服务端二进制
+#   node/          97 MB  Node v24.16.0
+#   portal-auth-data/     门户鉴权数据（含加盐密码哈希）
+#
+# 为什么必须排除：
+#   1. pgdata 是**数据库文件**，不是源码。进 git 后任何一次 clone 都会拖走 4.9 GB，
+#      而且 PG 的数据文件跨版本/跨机器不保证可移植，误当"备份"比没有更危险。
+#   2. Python/Node/PG 二进制是可重新下载的第三方发行包，且体积远超 GitHub 单文件
+#      100 MB 上限（push 会被直接拒收）。
+#   3. portal-auth-data 含加盐密码哈希 —— 入库等于把登录态写进 git 历史，删不干净。
+#
+# 拿到别人的副本时怎么补齐：跑 D:/01_RPA/scripts/build_olbr_portable.ps1
+# 的 -Stage runtimes，或按 scripts\start_all.ps1 的报错提示逐个装。
+# 首次启动时 start_all.ps1 会对缺失的 runtime 自动 initdb 建库。
+# ─────────────────────────────────────────────────────────────────────────────
+/runtime/
+
+# ─────────────────────────────────────────────────────────────────────────────
+# nginx 发行包（37 MB）
+#
+# 主仓库规则里的 `/nginx-1.28.0/` 已覆盖本目录 —— nginx.exe 是第三方二进制、
+# html/ 是地图瓦片（29.6 MB）、certs/portal.key 是**自签私钥**，
+# conf/ 由 write_nginx_conf.ps1 从根目录的 nginx.conf.template 生成。
+#
+# ⚠ 注意：conf/ 里有两段是**我们的源码**而非生成物 ——
+#   portal_ports.conf        8081-8088 + 9443 独立端口反代（本副本的 nginx.conf
+#                            只在注释里提到它，见 nginx.conf.template:17）
+#   portal_eflow_common.conf eFlow 反代公共段
+# 这两份在主仓库也是落在 nginx-1.28.0/conf/ 下、未入库；它们的**留档副本**
+# 分别在主仓库 docs/nginx-reference/portal_ports.conf.txt 与本副本
+# Task/my_app/nginx/ 下（后者已入库）。此处保持与主仓库一致：整个目录不入库。
+# 副本根的 nginx.conf.template 是入库的真源。
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 前端构建产物
+#
+# 主仓库规则里的 `Task/_fe_dist/` 已覆盖（277 MB / 8751 个文件）。
+# 副本的 dist/ 由 Task/my_app/frontend/ 源码经 `npm run build` 重建，
+# 前端源码已入库，所以产物不入库。
+# ⚠ nginx.conf.template 里用 alias 直接发这个目录 —— 它是**运行时服务目录**，
+#   忽略跟踪 ≠ 删除：磁盘上必须留着，否则副本起来是白屏。
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 临时目录
+#
+# 主仓库规则里的 `TMP/` 已覆盖（182 MB，含 myapp_snapshot.dump 182 MB 的
+# PG 快照与 _pre_switch_backup_20261109/ 备份区）。全是可重建的中间态。
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WhatsApp 登录态
+#
+# 主仓库规则里的 `Task/whatsapp_session/` + `whatsapp_session/` 已覆盖（40 MB）。
+# 里面是 Baileys 的设备凭据（auth_info），入库等于交出登录态。
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 抓包样本 url*.txt —— 比主仓库更严
+#
+# 主仓库根规则只有 `**/url.txt`（只挡文件名恰好是 url.txt 的那一个），
+# 而本副本实测有 17 个同类文件：
+#   url.txt / url_aid.txt / url_alarm_rule.txt / url_test.txt / url (2).txt
+#   url (3).txt / url_推单规则.txt / url_alarm_suggestion.txt ...
+# 这些都是浏览器「Copy as cURL」的请求样本，里面带的是**有效会话凭据**
+# （Cookie 的 Z-AUTH-CODE / x-dexmesh-user / forgerydefense 与 token 同效力）。
+#
+# ⚠ 不能只靠 `**/url.txt`：实测 battary_kpi_fetch_socket.py:69 会
+#   `URL_FILE = SCRIPT_DIR / "url.txt"` 读取 url.txt 取账号口令 ——
+#   也就是说这些文件在运行时**确实被当凭据源用**，但凭据本身绝不该入库。
+#   代码侧有 credential_store / 环境变量 / 内置默认值三层更优先的来源，
+#   缺 url.txt 时会回落，不会因此跑不起来。
+#
+# 规则写成 `**/*url*.txt` 中缀通配，覆盖全部变体：
+#   url.txt / url_aid.txt / url_alarm_rule.txt / url_test.txt / url (2).txt
+#   url (3).txt / url_推单规则.txt / url_alarm_suggestion.txt
+#   new_url.txt / all_urls.txt   ← 这两个不是 url 开头，前缀匹配挡不住
+#
+# ⚠ 不能只靠 `**/url.txt`：实测 battary_kpi_fetch_socket.py:69 会
+#   `URL_FILE = SCRIPT_DIR / "url.txt"` 读取 url.txt 取账号口令 ——
+#   也就是说这些文件在运行时**确实被当凭据源用**，但凭据本身绝不该入库。
+#   代码侧有 credential_store / 环境变量 / 内置默认值三层更优先的来源，
+#   缺 url.txt 时会回落，不会因此跑不起来。
+# ⚠ 优先级：子目录 .gitignore 的规则**高于**本文件。my_app 与门户各自的
+#   .gitignore 里也有 url*.txt 规则，那两处已同步修好（见各子目录文件内的注释）。
+# ─────────────────────────────────────────────────────────────────────────────
+**/*url*.txt
+# 门户的 all_urls.txt 例外 —— 2026-11-10。
+# 它是门户 51 条看板的**免密链接清单**（含单个稳定的 t= 参数），
+# 不是浏览器抓包样本、不含会话 cookie（实测 password/token/cookie 关键词 0 命中）。
+# 主仓库已跟踪它（PUBLIC 仓库里已公开），此处保持一致，避免副本与主仓库脱节。
+!liberia-noc_soc-数据看板统一门户/MsPortal/all_urls.txt
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 桌面快捷方式（.lnk）
+#
+# 里面是**本机绝对路径**（D:/01_olbr_portal/...），换台机器双击就是错的。
+# 生成脚本本身（desktop_shortcuts/make_desktop_shortcuts.ps1、
+# my_portal/make_desktop_shortcuts.ps1）是源码，要入库；只有产物 .lnk 不入库。
+# ─────────────────────────────────────────────────────────────────────────────
+*.lnk
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 隔离实例标记文件
+#
+# ISOLATED_COPY.flag 是**本机运行态标记**（让 my_portal_ctl.ps1 拦截所有
+# start/stop 命令）。它记录的是"这台机器当前是什么角色"，不是源码 ——
+# 换台机器该文件该不该存在，取决于那台机器是生产还是副本。
+# 标记语义已在 部署说明.md 里写清，故不入库。
+# ─────────────────────────────────────────────────────────────────────────────
+/ISOLATED_COPY.flag
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 便携 PG 的运行时痕迹
+#
+# runtime/ 已被整目录排除，但 pg_ctl 会在**当前工作目录**留下 postmaster.pid
+# 与 postmaster.opts（记录启动参数与端口）。副本的 start_all.ps1 以副本根为
+# cwd 启动 PG，这两个文件会落在根目录 —— 必须挡住，否则 git status 天天脏。
+# 同理 nginx 的 logs/ 已在 /nginx-1.28.0/ 内一并排除。
+# ─────────────────────────────────────────────────────────────────────────────
+/postmaster.pid
+/postmaster.opts
+/backup_label
+/tablespace_map
+/PG_VERSION
+
+# ─────────────────────────────────────────────────────────────────────────────
+# my_app 的本地 SQLite 兜底库（2.4 GB）
+#
+# 主仓库规则里的 `Task/my_app/.gitignore` 的 `/db/` 已覆盖 Task/my_app/db/，
+# 但副本的 Task/my_app/db/ 里**另外带了 4 份 xlsx 业务表**（Eflow_TT_FB.xlsx、
+# Eflow_WO_FB.xlsx、ZTE OLR MS Master Site Database*.xlsx）——
+# 这些是 master site 数据库，属于**业务数据不是源码**，且根规则 `*.xlsx` 已挡。
+# 单独再写一条是为了让"为什么 db/ 整个不入库"在本文件里能一眼看到。
+# ─────────────────────────────────────────────────────────────────────────────
+/Task/my_app/db/
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 便携 PG 数据快照（若有人手工 dump 到根目录）
+#
+# scripts/bundle_data.ps1 生成的 myapp_snapshot.dump（182 MB）+ sidecar
+# .searchpath 文件，是**数据库的二进制导出**，不是源码。
+# 正常流程下它们在 TMP/ 里（已被排除），但脚本允许改输出目录，故兜一层。
+# ─────────────────────────────────────────────────────────────────────────────
+*.dump
+*.searchpath
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WhatsApp bot 知识库里的安装手册 —— 2026-11-10（便携副本建库时新增拦截）
+#
+# 23_iMind融合版-AIO安装手册.md 里有 iMind AIO 安装脚本的**明文口令**
+#（password = "..."，Base64 形态，2 处）。它是第三方产品安装手册的摘录，
+# 属知识库内容不是本项目源码。
+#
+# ⚠ 主仓库（PUBLIC）历史上已跟踪该文件，口令早已公开；本副本是**新仓库**，
+#   不主动扩大暴露面，故排除。但**排除不等于泄露已解决** —— 主仓库侧仍需
+#   处理（git rm --cached + 轮换该口令），见 2026-11-10 的记忆记录。
+#
+# ⚠ 忽略跟踪 ≠ 可以删除：bot 的知识库检索要用这些 md 喂向量索引，
+#   文件必须留在磁盘上。
+# ─────────────────────────────────────────────────────────────────────────────
+Task/whatsapp-kb-bot/knowledge/23_iMind融合版-AIO安装手册.md
