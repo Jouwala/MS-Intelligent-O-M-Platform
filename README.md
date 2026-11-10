@@ -172,8 +172,19 @@ node scripts/setup-git-hooks.mjs
 本仓库为 **PUBLIC**，故：
 
 - 所有口令、token、私钥、加盐密码哈希**一律不入库**（见「不入库的内容」）。
-- 部分**历史遗留**文件在主仓库 PUBLIC 仓库中已公开（`check_pg_alert_log.py` 的 PG 默认口令、`cxo_dashboard.html` 内嵌抓包数据）。本仓库不扩大暴露面，但**这些凭据应视为已泄露并轮换**。
+- **两处历史遗留的硬编码凭据已于 2026-11-10 从源码收口**（同步自主仓库 PR #9）：
+  - `Task/my_app/backend/migrations/check_pg_alert_log.py` 的 PG 口令 → 读环境变量 `PG_ALERT_LOG_PASSWORD`；
+    未提供时脚本以退出码 2 结束并提示（刻意「不连」而非用弱口令连接）。
+  - `Task/whatsapp-kb-bot/scripts/tt-bridge-hidden.vbs` 的 TT 桥接令牌 → 依次读环境变量
+    `TT_BRIDGE_TOKEN`、同目录 `.tt_bridge_token` 文件；两者都没有则报错退出。
+    该文件已被 `.gitignore` 挡住，**请在本机自建**（内容即原来的令牌值），
+    否则手工启动 TT 桥接会报「token is not configured」。
+  - ⚠ **改代码不能消除历史泄露** —— 这两个旧值在 git 历史里仍可见，仍需服务端轮换。
+- `cxo_dashboard.html` 内嵌抓包数据含有效 `JSESSIONID`，属历史遗留，同样应视为已泄露。
 - 抓包样本 `url*.txt` 被显式排除；其中 `vmax_cca/url.txt` 含有效 `JSESSIONID`、`cm_data/new_url.txt` 含有效 `forgerydefense` 会话 cookie。
+  - ⚠ **子目录 `.gitignore` 优先级高于根目录** —— 主仓库 `Task/my_app/.gitignore` 若再出现
+    `!` 放行（例如 `!/backend/services/vmax_cca/url.txt`），同步过来会**打穿**根目录更严的
+    `**/*url*.txt`，把含凭据的抓包重新暴露。改动忽略规则后请两端一起复核。
 
 ---
 
