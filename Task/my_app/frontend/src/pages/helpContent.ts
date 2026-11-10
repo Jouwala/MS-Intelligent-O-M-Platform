@@ -28,6 +28,7 @@ export const PAGE_LIST: { key: string; iframe?: boolean }[] = [
   { key: 'vmaxCxoDashboard_90Days', iframe: true },
   { key: 'socTrendDashboard', iframe: true },
   { key: 'mwUmeTopology', iframe: true },
+  { key: 'ipranTopo' },
   { key: 'mwRealTime', iframe: true },
   { key: 'gis' },
   { key: 'realtime_alarm' },
@@ -99,6 +100,7 @@ export const NAV_KEY_MAP: Record<string, string> = {
   vmaxCxoDashboard_90Days: 'nav.vmaxCxoDashboard90Days',
   socTrendDashboard: 'nav.socTrendDashboard',
   mwUmeTopology: 'nav.mwUmeTopology',
+  ipranTopo: 'nav.ipranTopo',
   mwRealTime: 'nav.mwRealTime',
   gis: 'nav.gis',
   realtime_alarm: 'nav.realtimeAlarm',
@@ -148,7 +150,7 @@ export const CATEGORIES: { id: string; pages: string[] }[] = [
   { id: 'tasks', pages: ['sync', 'email_reports', 'upload', 'tables', 'overview'] },
   {
     id: 'boards',
-    pages: ['alarm', 'ttwo', 'v1_ttwo', 'tt', 'wo', 'nur', 'ms_nur_only', 'ms_sla', 'ms_sla_only', 'ms_wo_sla', 'ms_contract_kpi', 'cxoDashboard', 'vmaxCxoDashboard', 'vmaxCxoDashboard_Daily', 'vmaxCxoDashboard_90Days', 'socTrendDashboard', 'mwUmeTopology', 'mwRealTime', 'alarmManagement', 'fme_ranking', 'site_avail', 'avail_ms', 'avail_flm', 'avail_county', 'bm_speedtest', 'bm_meta', 'noc_analyst', 'repeat_site_down', 'cr_analysis', 'pm_analysis', 'bp_report', 'ran_cells_kpi', 'packet_loss', 'battery', 'ume_in_kpi', 'cn_kpi', 'cn_kpi_5mins', 'imonitor', 'gis', 'realtime_alarm', 'person', 'incident_overview', 'warehouse', 'sp_material', 'sp_details', 'sp_report', 'com_report', 'warehouse_summary'],
+    pages: ['alarm', 'ttwo', 'v1_ttwo', 'tt', 'wo', 'nur', 'ms_nur_only', 'ms_sla', 'ms_sla_only', 'ms_wo_sla', 'ms_contract_kpi', 'cxoDashboard', 'vmaxCxoDashboard', 'vmaxCxoDashboard_Daily', 'vmaxCxoDashboard_90Days', 'socTrendDashboard', 'mwUmeTopology', 'ipranTopo', 'mwRealTime', 'alarmManagement', 'fme_ranking', 'site_avail', 'avail_ms', 'avail_flm', 'avail_county', 'bm_speedtest', 'bm_meta', 'noc_analyst', 'repeat_site_down', 'cr_analysis', 'pm_analysis', 'bp_report', 'ran_cells_kpi', 'packet_loss', 'battery', 'ume_in_kpi', 'cn_kpi', 'cn_kpi_5mins', 'imonitor', 'gis', 'realtime_alarm', 'person', 'incident_overview', 'warehouse', 'sp_material', 'sp_details', 'sp_report', 'com_report', 'warehouse_summary'],
   },
   { id: 'analysis', pages: ['eflow_qa', 'eflow_flow', 'dashboard', 'archive', 'ip_trace', 'vmax_user_query', 'vmax_user_cca', 'ipt_power'] },
   { id: 'workflow', pages: ['ap_center', 'feedback'] },
@@ -358,6 +360,20 @@ export const PAGE_DOCS: Record<Locale, Record<string, PageDoc>> = {
     mwUmeTopology: {
       desc: 'ZXMW 微波网络拓扑与带宽利用率 NOC 看板（日粒度）。',
       usage: ['数据每天 05:15 由 mw_ume_kpi_sync 写入 mw_ume_bw_ultilazation，本页一天只变一次', '风险榜、抽屉、趋势图均可交互'],
+    },
+    ipranTopo: {
+      desc: 'IP RAN 光纤拓扑：UME（ZTE NetNumen）IP RAN 层（lid=1293626099480711168）的 93 个网元与 167 条物理链路，按机框对折叠成 141 条边后，用「力导向 / 地理 / 分层」三种视图展示，并叠加当前活动告警。',
+      usage: [
+        '三种布局回答不同问题：**力导向（默认）**看环网与簇团（42 次边交叉）、**地理**看断站影响哪个城市（221 次）、**分层**看层级关系（390 次，适合导出）；布局是确定性的，同一份数据每次位置一致',
+        '三种着色：按层级（默认）/ 按在线状态 / 按最高告警级。**告警不着色是刻意的**：实测 74/93（80%）网元都有紧急告警，按告警级填色整张图会全红；告警只做节点右上角小红点',
+        '带宽只体现在**线宽**（100G / 25G / 10G / 其它四档），断链是红色虚线，有告警的链路转橙色；「折叠平行链路」开关可把 ×N 展开成扇面',
+        '点节点聚焦：其余节点变暗、只保留一跳邻居，右侧面板列出邻居与归属汇聚；再点一次或点空白取消。悬停节点看告警/站点/坐标匹配情况，悬停链路看物理链路数与端口名',
+        '四张统计卡（网元数 / 折叠后链路 / 失联网元 / 带紧急告警网元）**都能点开**，弹窗是构成这个数的那些行，与卡上数字同一份数据',
+        '层外上游 7 个设备（如 89MW01/89MW02、HQ-RAN-SW5960）是链路引用到的设备，名称取自 UME 属性接口；它们只作端点，不计入「网元数」，也没有在线状态',
+        '地理视图的坐标来自本机 PG 的 kml_mw_links：74 个精确、3 个近似（顶部常驻提示需人工确认）、16 个取不到 —— **不猜位置**，统一排在画布底部「无坐标」区',
+        '后端把 8 次 UME 调用聚合成一次响应并缓存 120 秒；「重新取数」绕缓存。顶栏自动刷新默认关闭，本页建议 300 秒，开启后走原地刷新（画布不重建、聚焦不丢）；上游失败时显示上次成功数据并在顶部常驻告警',
+        '「导出 Excel」输出网元与链路两张 sheet（含告警计数、坐标来源、端口名）',
+      ],
     },
     mwRealTime: {
       desc: '与微波拓扑同构的 15 分钟粒度实时版（拓扑骨架、风险榜、抽屉、趋势完全一致）。',
@@ -1018,6 +1034,20 @@ export const PAGE_DOCS: Record<Locale, Record<string, PageDoc>> = {
     mwUmeTopology: {
       desc: 'ZXMW microwave network topology & bandwidth utilization NOC board (daily granularity).',
       usage: ['Data is written daily at 05:15 by mw_ume_kpi_sync into mw_ume_bw_ultilazation — the page changes once a day', 'Risk ranking, drawer and trend chart are all interactive'],
+    },
+    ipranTopo: {
+      desc: 'IP RAN fiber topology: 93 network elements and 167 physical links in the UME (ZTE NetNumen) IP RAN layer (lid=1293626099480711168), folded into 141 edges per chassis pair and drawn in "force / geographic / tiered" views with current active alarms overlaid.',
+      usage: [
+        'The three layouts answer different questions: **force (default)** shows rings and clusters (42 edge crossings), **geographic** shows which city an outage hits (221), **tiered** shows the hierarchy (390, best for export). Layouts are deterministic, so the same data always lands in the same place',
+        'Three color modes: tier (default) / online state / highest alarm severity. **Alarms are deliberately not a fill color**: 74/93 NEs (80%) carry critical alarms, so filling by severity would paint the whole map red; alarms are a small corner dot instead',
+        'Bandwidth is shown by **line width** only (100G / 25G / 10G / others); down links are red dashed and links with alarms turn orange. The "Fold parallel links" switch expands ×N into a fan',
+        'Click a node to focus: the rest dim and only one-hop neighbors stay lit, with a side panel listing neighbors and the home aggregation. Click again or click empty space to clear. Hover a node for alarms/site/coordinate match, hover a link for physical link count and port names',
+        'All four stat cards (NEs / folded links / down NEs / NEs with critical alarms) **open a drill table** built from the same arrays as the card numbers',
+        'The 7 external upstream devices (e.g. 89MW01/89MW02, HQ-RAN-SW5960) are referenced by links; their names come from the UME attribute API. They act as endpoints only, are excluded from the NE count, and have no online state',
+        'Geographic coordinates come from local PG table kml_mw_links: 74 exact, 3 approximate (persistent banner asking for confirmation) and 16 missing — **positions are never guessed**; they sit in the "no coordinates" band at the bottom',
+        'The backend merges the 8 UME calls into one response cached for 120 seconds; "Refetch" bypasses it. Header auto-refresh is off by default and suggests 300s here; when on it refreshes in place (canvas not rebuilt, focus kept). On upstream failure the last successful snapshot is shown with a persistent banner',
+        '"Export Excel" writes two sheets (NEs and links) including alarm counts, coordinate source and port names',
+      ],
     },
     mwRealTime: {
       desc: '15-minute realtime variant of the microwave topology board (same skeleton, risk ranking, drawer and trends).',

@@ -154,6 +154,8 @@ from backend.routers import (
     # CMDB 站点同步比对（Email Reports →「站点同步」页签）：只读摘要 + 文件下载，
     # 执行走 /api/tasks/eflow_site_update/run
     cmdb_site_update,
+    # IP RAN 光纤拓扑图：UME 8 次调用聚合成一次响应（见 services/ipran_topo/）
+    ipran_topo,
 )
 # 任务配置文件注册表（Settings「任务配置」页签 → 配置文件管理）
 from backend.services import task_configs_registry  # noqa: F401  (注册副作用)
@@ -403,6 +405,10 @@ app.include_router(data_agent.router)
 # POST /api/tasks/eflow_site_update/run，把队列、禁用态校验、执行历史都交给 task_runner。
 # 任务本体见 services/eflow_site_update_task.py（只生成文件，绝不写库）。
 app.include_router(cmdb_site_update.router)
+
+# IP RAN 光纤拓扑（?page=ipran_topo）：UME lid=1293626099480711168 的网元 + 链路 + 活动告警，
+# 8 次上游调用在服务层聚合成一次响应并缓存 120s（见 services/ipran_topo/ipran_topo_service.py）
+app.include_router(ipran_topo.router)
 
 
 # ========== 统一门户鉴权中间件 ==========

@@ -190,25 +190,18 @@ _probe_file.txt
 # VMAX / Talon 浏览器抓包（curl 导出，含 JSESSIONID 会话 cookie）——
 # 2026-10-26：url2.txt 是 Talon XDR 协议复刻的一手依据，但内容含有效会话凭据，
 # 按 AGENTS.md 四.2「绝不写敏感值」禁止入库；后续新抓包同样按此规则。
-#
-# ⚠ 2026-11-10 修正（便携副本建库时）：原第 195 行有豁免 `!/backend/services/vmax_cca/url.txt`，
-#   理由是"主仓库已入库、是历史遗留"。**本副本是全新仓库，没有历史包袱，不该继承这个漏洞** ——
-#   实测该文件含有效 JSESSIONID（JSESSIONID=<已脱敏>，多处重复）。
-#   且子目录 .gitignore 的优先级**高于**根目录，所以根规则 `**/url*.txt` 挡不住它。
-#   现改为整目录通配挡住，不再豁免。
-#
-# ⚠ **忽略跟踪 ≠ 可以删除**：抓包样本是协议复刻的一手依据，必须留在磁盘上。
-#   缺 url.txt 时 vmax_cca 取数会回落（见 services/vmax_cca 里的默认 URL 与
-#   credential_store 优先级链），不会因此跑不起来。
+# 2026-11-10：删掉 `!/backend/services/vmax_cca/url.txt` 这条放行。原先 url.txt
+#   是「历史遗留已入库」，所以补了 `!` 让规则不误伤它 —— 但这等于把含有效
+#   JSESSIONID 的 1.2 MB 抓包继续留在版本库里。
+#   更要命的是这条 `!` 会被 build_olbr_portable.ps1 同步进便携副本
+#   D:\01_olbr_portal 的 Task/my_app/.gitignore，而**子目录 .gitignore 优先级
+#   高于根目录** —— 副本根 .gitignore 里更严的 `**/*url*.txt` 会被这条 `!` 打穿，
+#   副本是 **PUBLIC 仓库**，等于把带会话 cookie 的抓包推向公开互联网。
+#   现在改为整目录通配挡住，且 url.txt 已用 `git rm --cached` 停止跟踪。
+#   ⚠ 忽略跟踪 ≠ 可以删除：抓包文件留在磁盘上，不入库即可。
 /backend/services/vmax_cca/url*.txt
 
 # IPT 数仓平台（portal.iptdigitalplatform.com）抓包 —— 2026-11-02。
 # url.txt 含明文口令与有效 Bearer JWT，按 AGENTS.md 四.2 禁止入库；
 # 后续该目录写正式取数代码（.py）不受影响，仅拦抓包转储。
 /backend/services/ipt_data/url*.txt
-
-# cm_data 抓包样本 —— 2026-11-10 补。
-# new_url.txt 含有效 forgerydefense 会话 cookie（实测 64 位 hex，多处重复）。
-# 根规则的 `**/url*.txt` 是**前缀**匹配，挡不住 `new_url.txt`（不是 url 开头），
-# 故在此显式列出。文件用途见 routers/cm_flows.py（cm_data_sync 的流程配置来源）。
-/backend/services/cm_data/*url*.txt

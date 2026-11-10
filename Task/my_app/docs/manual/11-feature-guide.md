@@ -50,6 +50,7 @@
 | 35 | 告警管理看板 | `alarmManagement` | **iframe** |
 | 36 | 事件总览 | `incident_overview` | **iframe** |
 | 37 | MW 微波拓扑 | `mwUmeTopology` | **iframe** |
+| 37b | IP RAN 光纤拓扑 | `ipranTopo` | React |
 | 38 | MW 微波实时 | `mwRealTime` | **iframe** |
 | 39 | GIS 地图 | `gis` | React |
 | 40 | 实时告警地图 | `realtime_alarm` | React（同组件另一模式） |
@@ -553,6 +554,19 @@ ZXMW 微波网络拓扑与带宽利用率 NOC 看板（`MwUmeDashboard.tsx:4-8`�
 
 - 壳载入 `public/mw_ume_topology.html`（:17）。
 - 数据来自 `GET /api/mw-ume/topology`，底层表 `mw_ume_bw_ultilazation` 由 `mw_ume_kpi_sync` **每天 05:15** 写入（`backend/services/mw_ume/mw_ume_topology.py`）。所以本页一天只变一次，早上看到的还是昨天的数。
+
+## 8b. IP RAN 光纤拓扑（`?page=ipranTopo`，2026-11-10 新增）
+
+IP RAN 光纤层的网元—链路关系图（React + 自绘 SVG 画布），数据全部来自 UME（ZTE NetNumen），取数方法沿用抓包记录 `backend/services/ipran_topo/url_ipran_fiber.txt`。
+
+- **数据链路**：`GET /api/ipran-topo/graph`（`backend/routers/ipran_topo.py:23`）→ `ipran_topo_service.build_graph()`（`backend/services/ipran_topo/ipran_topo_service.py:271`）。层 id 固定为 `LID`（:64），服务层把 **8 个 UME 接口**（层统计、层内 children、节点属性、层内链路、链路属性、网元告警统计、链路告警统计、层外端点属性）聚合成**一次响应**，进程内缓存 `120` 秒（:68）；上游失败时返回上一次成功的数据并置 `meta.stale`。实测 93 个层内网元 + 7 个层外上游 = 100 节点 / 167 条物理链路折叠成 141 条边。
+- **聚合口径**：同一对机框 id 的多根光纤折叠成一条边（`n` = 物理链路数，带宽取组内**最小端口速率**，从链路名的 `10GE/25GE/100GE` 解析）；站点坐标取本机 PG 的 `kml_mw_links`（`kind='site'`，:71），按规范化站名匹配 —— 实测 74 精确 / 3 近似 / 16 缺坐标（不猜位置，地理视图单独排「无坐标」区）；层外 7 个设备名取自 UME 属性接口，不从链路名截取。
+- **告警只做徽标、不给节点填色**：实测 74/93（80%）的层内网元都有紧急告警，按最高告警级填色会让 80% 的图变红、颜色失去区分度。因此节点颜色只表达**层级 / 在线状态**，告警在节点右上角画小红点；后端 `meta.warnings` 会带 `alarm_saturated` 说明这条依据。
+- **三种布局**（`frontend/src/pages/ipranTopo/layouts.ts`，画布 760×540，:25）：力导向（默认，`layoutForce` :194）、地理（`layoutGeo` :255）、分层（`layoutTier` :131）。布局都是**确定性**的（固定种子），同一份数据每次打开位置一致。以**边交叉次数**为可读性代理量扫描参数：力导向 42 次 < 地理 221 次 < 分层 390 次（辐射布局实测 877 次，已删除）。
+- **交互**：点节点聚焦（再次点击取消），右侧面板列出该网元的告警分布与邻居；点链路看端到端端口明细与物理链路名；点 KPI 卡（网元数 / 链路数 / 失联 / 带紧急告警）落到明细弹窗（`ipranTopo/TopoDrillModal.tsx`，12 行/页）。图例随着色模式切换，线宽 = 带宽、红色虚线 = 断链、`×N` = 平行链路数。
+- **口径说明与数字悬浮**：页内「数据源与口径」用 `CalcChainNote` 默认收起；KPI 卡与列头的 ⓘ 走 `MetricExplain`，气泡内容取接口既有字段，不在前端重算。
+- **刷新**：已登记 `AR_PAGE_DEFAULTS`（建议 300 秒，后端缓存 120 秒）与 `AR_INPLACE_REFRESH_PAGES` —— 顶栏开启自动刷新后监听 `myapp-refresh` **静默重取**（`IpranTopo.tsx:70`），画布不重建、聚焦状态不丢。页面上的「重新取数」走 `refresh=1` 绕缓存。
+- **导出**：`exportReport` 两个 sheet（网元 / 链路），文件名 `IPRAN_Topo_YYYYMMDD_HHmmss.xlsx`。
 
 ## 9. MW 微波实时（`?page=mwRealTime`）— iframe
 

@@ -1115,3 +1115,12 @@ export function iptPowerStatus() {
 export function iptPowerWatch() {
   return api.get('/ipt-power/watch')
 }
+
+// ========== IP RAN 光纤拓扑（?page=ipran_topo）==========
+// 新增于 2026-11-10；对应后端 routers/ipran_topo.py。
+// 数据链路：UME（ZTE NetNumen）lid=1293626099480711168 的层内网元 + 链路 + 活动告警，
+// 8 次上游调用在服务层聚合成一次响应并缓存 120s（见 services/ipran_topo/）。
+// refresh=1 绕过缓存重新取数（页面「重新取数」按钮用；普通刷新走缓存）。
+export function getIpranTopoGraph(refresh = 0) {
+  return api.get('/ipran-topo/graph', { params: { refresh } })
+}

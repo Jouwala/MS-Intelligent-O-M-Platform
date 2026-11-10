@@ -1,6 +1,6 @@
 # my_app User Help & Guide
 
-> User-facing platform features & operations guide. Generated from the same source as the in-app Help page (frontend/src/helpMarkdown.ts), compiled from docs/manual/ and backend/task_registry.py. Generated on 2026-11-09.
+> User-facing platform features & operations guide. Generated from the same source as the in-app Help page (frontend/src/helpMarkdown.ts), compiled from docs/manual/ and backend/task_registry.py. Generated on 2026-11-10.
 
 > In-app entry: the "Help" sidebar item, or `http://<host>/myapp/?page=help` directly.
 
@@ -2019,6 +2019,20 @@ ZXMW microwave network topology & bandwidth utilization NOC board (daily granula
 
 - Data is written daily at 05:15 by mw_ume_kpi_sync into mw_ume_bw_ultilazation — the page changes once a day
 - Risk ranking, drawer and trend chart are all interactive
+
+#### ipranTopo（`ipranTopo`）
+
+IP RAN fiber topology: 93 network elements and 167 physical links in the UME (ZTE NetNumen) IP RAN layer (lid=1293626099480711168), folded into 141 edges per chassis pair and drawn in "force / geographic / tiered" views with current active alarms overlaid.
+
+- The three layouts answer different questions: **force (default)** shows rings and clusters (42 edge crossings), **geographic** shows which city an outage hits (221), **tiered** shows the hierarchy (390, best for export). Layouts are deterministic, so the same data always lands in the same place
+- Three color modes: tier (default) / online state / highest alarm severity. **Alarms are deliberately not a fill color**: 74/93 NEs (80%) carry critical alarms, so filling by severity would paint the whole map red; alarms are a small corner dot instead
+- Bandwidth is shown by **line width** only (100G / 25G / 10G / others); down links are red dashed and links with alarms turn orange. The "Fold parallel links" switch expands ×N into a fan
+- Click a node to focus: the rest dim and only one-hop neighbors stay lit, with a side panel listing neighbors and the home aggregation. Click again or click empty space to clear. Hover a node for alarms/site/coordinate match, hover a link for physical link count and port names
+- All four stat cards (NEs / folded links / down NEs / NEs with critical alarms) **open a drill table** built from the same arrays as the card numbers
+- The 7 external upstream devices (e.g. 89MW01/89MW02, HQ-RAN-SW5960) are referenced by links; their names come from the UME attribute API. They act as endpoints only, are excluded from the NE count, and have no online state
+- Geographic coordinates come from local PG table kml_mw_links: 74 exact, 3 approximate (persistent banner asking for confirmation) and 16 missing — **positions are never guessed**; they sit in the "no coordinates" band at the bottom
+- The backend merges the 8 UME calls into one response cached for 120 seconds; "Refetch" bypasses it. Header auto-refresh is off by default and suggests 300s here; when on it refreshes in place (canvas not rebuilt, focus kept). On upstream failure the last successful snapshot is shown with a persistent banner
+- "Export Excel" writes two sheets (NEs and links) including alarm counts, coordinate source and port names
 
 #### MW Realtime（`mwRealTime`, iframe page）
 
