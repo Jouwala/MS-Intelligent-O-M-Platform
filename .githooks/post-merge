@@ -1,0 +1,39 @@
+#!/bin/sh
+# ─────────────────────────────────────────────────────────────────────────────
+# 合并后自动修正副本本地路径（入库版）
+#
+# 与 post-checkout 同源，触发点不同：
+#   post-checkout  → git clone / checkout / 分支切换
+#   post-merge     → git merge / git pull（把别人的改动并进来）
+#
+# 为什么要修：
+#   本仓库跟踪着两个**含本机绝对路径**的脚本：
+#       Task/my_app/monitor_fixes/nginx_monitor.ps1  (NginxExe/NginxDir/Port/Log/State)
+#       <门户>\rotate_nginx_logs.ps1                   ($Prefix)
+#   合并进来的版本可能带着「入库那台机器」的路径（例如从主仓库同步过来的
+#   D:\01_RPA\...），必须立刻改回本机副本根目录，否则 nginx watchdog 会去
+#   探测旧目录、可能起出第二个实例抢端口。
+#
+# 脚本是逐字节改写的（保持 BOM 标志与行尾风格不变），因此：
+#   · 在同一台机器上，改完与入库版本逐字节一致 -> git status 干净
+#   · 换机器 clone 时必然有差异 -> git status 会显示这两个文件，那是预期的
+#
+# 用法：clone 后跑一次
+#   git config core.hooksPath .githooks
+# ---------------------------------------------------------------------------
+
+repo_root="$(git rev-parse --show-toplevel)"
+fixer="$repo_root/scripts/post_sync_fix_paths.ps1"
+
+[ -f "$fixer" ] || exit 0
+
+# -Force 与旧版兼容：脚本可能还是旧版（不认识 -Force），那时退回不带参数调用。
+if grep -q 'Force' "$fixer" 2>/dev/null; then
+  powershell -NoProfile -ExecutionPolicy Bypass -File "$fixer" -CopyRoot "$repo_root" -Force 2>&1 \
+    | sed "s|^|[$(basename "$repo_root")] |"
+else
+  powershell -NoProfile -ExecutionPolicy Bypass -File "$fixer" -CopyRoot "$repo_root" 2>&1 \
+    | sed "s|^|[$(basename "$repo_root")] |"
+fi
+
+exit 0

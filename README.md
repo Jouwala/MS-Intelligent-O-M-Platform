@@ -108,6 +108,7 @@ D:\01_RPA  (主仓库 / 开发态)          D:\01_olbr_portal  (本仓库 / 便�
         │                                        │
         │  scripts/build_olbr_portable.ps1        │
         │  -Stage source                          │
+        │    └─ 阶段末尾自动跑修路径 ─────────────►│
         └────────────────────────────────────────►│
                                                  │  同步源码
                                                  │  scripts/post_sync_fix_paths.ps1
@@ -117,12 +118,35 @@ D:\01_RPA  (主仓库 / 开发态)          D:\01_olbr_portal  (本仓库 / 便�
 **同步纪律**（每次从主仓库同步后必做）：
 
 1. **只跑 `-Stage source`**，绝不跑 `-Stage all` / `-Stage config` —— config 会覆盖本副本特有的 `部署说明.md`、`my_portal/status.ps1`。
-2. **必须 `/XF` 跳过 6 个正在被写入的大 SQLite**（`ran_kpi_avalability_1day` / `db_sqlite3` / `bp_report` / `olib_soc_report` / `vmax_multi_data` / `soc_trend`）—— 文件级复制会撕裂正在写的库。
-3. **同步后必须跑 `scripts/post_sync_fix_paths.ps1`**（幂等）—— source 阶段会把本副本隔离期手改过的两处路径冲回 `D:\01_RPA`：
+2. **6 个正在被写入的大 SQLite 已由 manifest 自动跳过**（`ran_kpi_avalability_1day` / `db_sqlite3` / `bp_report` / `olib_soc_report` / `vmax_multi_data` / `soc_trend`，合计约 1.8 GB）—— 文件级复制会撕裂正在写的库。主仓库的 `scripts/portable/manifest.json` 里已登记，无需手工加 `/XF`。
+3. **同步后无需再手工跑 `scripts/post_sync_fix_paths.ps1`** —— `-Stage source` 阶段末尾会自动调用它（`build_olbr_portable.ps1` 的 `Invoke-PathFix`）。它负责把本副本隔离期手改过的两处路径冲回 `D:\01_RPA` 之前修回来：
    - `Task/my_app/monitor_fixes/nginx_monitor.ps1` 的 5 个 param
    - 门户 `rotate_nginx_logs.ps1` 的 `$Prefix`
 
    不修的话，切生产时 nginx watchdog 会去探测旧目录的 nginx，可能起出第二个实例抢端口。
+
+   需要手工跑时（幂等，可反复执行）：
+
+   ```powershell
+   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\post_sync_fix_paths.ps1 -Force
+   ```
+
+### 换机器 clone 后必做一步
+
+```bash
+node scripts/setup-git-hooks.mjs
+```
+
+它把 `core.hooksPath` 指向仓库内的 `.githooks/`（该配置是**本地配置**，不入库，每台机器装一次）。装上之后：
+
+| 钩子 | 触发时机 | 作用 |
+| --- | --- | --- |
+| `.githooks/post-checkout` | clone / checkout / 切分支 | 把两个脚本里的**本机绝对路径**改成本机副本根目录 |
+| `.githooks/post-merge` | merge / pull | 同上 |
+
+为什么必须有这一步：本仓库跟踪着两个**含本机绝对路径**的脚本，而路径必须因机器而异。git 检出的是入库时的字节，`D:\01_olbr_portal\...` 会原样出现在新机器上 —— nginx watchdog 会去探测一个不存在的目录，nginx 根本起不来。
+
+> 换机器后 `git status` 会显示那两个文件有差异，这是**预期**的：那正是「本机路径」的体现。在同一台机器上，改写结果是逐字节一致的，status 保持干净。
 
 ---
 

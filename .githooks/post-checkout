@@ -1,0 +1,47 @@
+#!/bin/sh
+# ─────────────────────────────────────────────────────────────────────────────
+# 检出后自动修正副本本地路径（入库版）
+#
+# 为什么需要这个钩子（2026-11-10）：
+#   本仓库跟踪着两个**含本机绝对路径**的脚本：
+#       Task/my_app/monitor_fixes/nginx_monitor.ps1  (NginxExe/NginxDir/Port/Log/State)
+#       <门户>\rotate_nginx_logs.ps1                   ($Prefix)
+#   它们必须指向「副本所在的那台机器」，而不是入库时那台机器的路径。
+#
+#   这带来一个 clone 之后必踩的坑：git 检出的是**入库时**的字节，
+#   于是 D:\01_olbr_portal\... 会原样出现在任何一台新机器上 ——
+#   nginx watchdog 会去探测一个不存在的目录，nginx 根本起不来。
+#
+#   本钩子在 checkout / merge / pull 之后立刻把路径改成本机的实际根目录。
+#   路径是逐字节改写的（保持 BOM 标志与行尾风格不变），所以：
+#     · 改写结果与入库版本在「同一台机器上」逐字节一致 -> git status 干净
+#     · 换一台机器 clone 时，改写结果与入库版本**必然**不同 -> git status 会
+#       显示出这两个文件的差异，这是**预期的**：那正是「本机路径」的体现。
+#
+# 配套：
+#   · 本仓库 .gitattributes 把这两个文件的行尾固定住（crlf / lf），
+#     保证字节级改写的不变量成立。
+#   · scripts\post_sync_fix_paths.ps1 是真正的执行者，本钩子只负责调用。
+#
+# 用法：clone 后跑一次
+#   git config core.hooksPath .githooks
+# （core.hooksPath 是本地配置，不随仓库分发，所以每台机器装一次。）
+# ---------------------------------------------------------------------------
+
+repo_root="$(git rev-parse --show-toplevel)"
+fixer="$repo_root/scripts/post_sync_fix_paths.ps1"
+
+[ -f "$fixer" ] || exit 0
+
+# -Force：新克隆的机器上没有 ISOLATED_COPY.flag（它不入库），需要强制改写。
+# 但脚本自身可能还是旧版（不认识 -Force 参数）—— 那种情况下退回不带参数调用，
+# 让旧版自己判断；旧版在缺 flag 时会直接报错退出，不影响检出本身。
+if grep -q 'Force' "$fixer" 2>/dev/null; then
+  powershell -NoProfile -ExecutionPolicy Bypass -File "$fixer" -CopyRoot "$repo_root" -Force 2>&1 \
+    | sed "s|^|[$(basename "$repo_root")] |"
+else
+  powershell -NoProfile -ExecutionPolicy Bypass -File "$fixer" -CopyRoot "$repo_root" 2>&1 \
+    | sed "s|^|[$(basename "$repo_root")] |"
+fi
+
+exit 0

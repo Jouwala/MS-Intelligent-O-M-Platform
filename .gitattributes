@@ -1,0 +1,57 @@
+# ---------------------------------------------------------------------------
+# 行尾规范 —— 副本仓库专用（2026-11-10）
+#
+# 背景：主仓库 D:\01_RPA 早就有一份 .gitattributes（2026-10-06 加的），本文件
+# 是它的对应版本，但**只保留与便携副本相关的条目**，并额外说明了为什么
+# 补丁脚本依赖这份规范。
+#
+# 本仓库 core.autocrlf=true（仓库级设置，随 .git/config 走，不入库）。
+# 换一台机器 clone 时如果没有 .gitattributes，检出到工作区的形态就由那台机器的
+# core.autocrlf 决定 —— 可能把 LF 的 .ps1 检出成 CRLF。
+#
+# 为什么这对便携副本是**硬约束**（不是风格问题）：
+#   scripts\post_sync_fix_paths.ps1 靠**逐字节**改写副本里的两个 .ps1 来把
+#   本地路径写回（nginx_monitor.ps1 / rotate_nginx_logs.ps1）。它刻意保持
+#   源文件的 BOM 标志与行尾风格不变，这样「主仓库同步过来 → 补丁改路径」
+#   之后的结果能与入库版本逐字节对齐，git status 不会永远脏。
+#   一旦行尾在检出时被转换，这个字节级不变量就破了 —— 每次同步后 git status
+#   都会冒出那两个文件的差异，而且提交进去就再也对不齐。
+#
+# 校验方法：
+#   $b=[IO.File]::ReadAllBytes('Task\my_app\monitor_fixes\nginx_monitor.ps1')
+#   ($b|?{$_ -eq 13}).Count; ($b|?{$_ -eq 10}).Count      # CRLF: 两者相等
+#   $b=[IO.File]::ReadAllBytes('liberia-noc_soc-数据看板统一门户\rotate_nginx_logs.ps1')
+#   ($b|?{$_ -eq 13}).Count                              # LF: 应为 0
+# ---------------------------------------------------------------------------
+
+# 批处理与 cmd 脚本必须用 CRLF。
+#
+# cmd.exe 解析纯 LF 的批处理会**静默吞掉部分行的首字符**（实测症状：
+# "REM" -> "EM"、"Defense" -> "efense"），报错信息具有欺骗性 —— 服务往往
+# 仍然启停成功，只有夹带的 "xxx is not recognized as an internal or external
+# command" 暴露它；一旦某行恰好是控制语句（goto/if/set），行为就会真的跑偏。
+#
+# -text 关闭任何行尾转换，eol=crlf 保证检出形态，不再依赖机器级设置。
+*.bat   -text eol=crlf
+*.cmd   -text eol=crlf
+
+# PowerShell 脚本同样固定为 CRLF（与主仓库一致，便于两侧 diff）。
+# 注意：rotate_nginx_logs.ps1 在主仓库是 **LF**，但那是主仓库的既有状态；
+# 这里统一声明 CRLF 会改变它的入库形态 —— 所以它被下面的显式规则覆盖。
+*.ps1   text eol=crlf
+
+# 补丁脚本改写的两个文件必须**逐字节稳定**，行尾不能被自动转换。
+#
+# nginx_monitor.ps1 在主仓库是 BOM+CRLF，rotate_nginx_logs.ps1 是 no-BOM+LF。
+# 补丁脚本会保持各自的 BOM 标志与行尾不变（见 scripts\post_sync_fix_paths.ps1
+# 的 Get-TextPreserving / Set-TextPreserving），所以这里把这两个文件的行尾
+# 显式固定住，防止 checkout 时被 core.autocrlf 改写。
+Task/my_app/monitor_fixes/nginx_monitor.ps1      text eol=crlf
+liberia-noc_soc-数据看板统一门户/rotate_nginx_logs.ps1  text eol=lf
+
+# Git 钩子必须用 LF —— sh 脚本被 CRLF 检出会出现两类故障：
+#   1. `#!/bin/sh\r` -> 解释器名变成 "/bin/sh\r"，报 "bad interpreter"；
+#   2. 脚本体内的行尾 \r 被当成命令的一部分（`exit 0\r` -> command not found）。
+.githooks/*   text eol=lf
+
+# 其余文本类型交给 git 默认规则即可。
