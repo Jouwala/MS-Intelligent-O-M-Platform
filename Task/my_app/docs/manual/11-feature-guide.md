@@ -2466,11 +2466,29 @@ WO 的 `current_handler` 是 `P:Kelvin Kollie`（只有姓名），
     ② 「共 N 条」是**挂载去重后**的条数（按 规则名+类型+触发步骤 去重，且要求 `wo_type` 与节点归属一致，`:574-597`），同一条规则可挂多个节点、各节点分别计数，**把各节点相加会超过全库条数**；
     ③ 「生效 N 条」= `status == "ACTIVE"` **严格大小写**（`:598`，`_s()` 只去首尾空格），上游写成 `Active` 会进总数但不进生效数。
   - **两条易读错的写进「读图须知」**：规则表是当前快照，几个月前走完的单，图上用的是**今天**的规则；
-    「本单命中 N 条」只统计**当前所在节点**挂载的规则 + 建单定级规则（`:892-909`，按 规则名+节点 去重），**不是全过程命中数**。
+    「本单命中 N 条」统计**全部节点**中条件对本单求值为 True 的规则（含空条件兜底，按 规则名+节点 去重，
+    `eflow_flow_rules.py` 的 `annotate_graph`），与规则明细「仅相关」同一口径，**不是只数当前节点**（2026-11-10 改）。
   - **顺手修的一处显示错**：「全程共 N 个步骤」原先用 `graph.nodes.length` 当分母，而 `reached_ids` 由 `_actual_path()` 生成时
     `order` 只取 `_FLOW_NODES`（`:700` 附近），WO 泳道的 5 个节点（`wo_create/accept/process/confirm/closed`）**永远不会进已走步骤** ——
     分母把 WO 节点算进去会让「4 / 16」这种读法永远追不上。现改为按 `stage !== 'wo'` 且 key 不以 `wo_` 开头过滤（`ttNodeCount`），
     并在气泡里单列「WO 子流程另计：走过 N 个节点」。
+- **节点规则「仅相关」过滤 + 规则详情（2026-11-10 新增）**：查某个告警/TT 后，点图中节点（如「TT 建单」），
+  规则明细**默认只显示与本单相关的规则**，不再铺全部挂载规则。
+  - **判定同源不另造**：`backend/services/eflow_flow_rules.py` 的 `annotate_graph()` 把图上每条规则与采集表
+    `eflow_push_rules.xlsx`（Push_Rules 工作表，全规则类型、含「条件」列）按（规则名, 规则类型）对齐，
+    复用 TT 规则检查的同一引擎（`tt_rule_evidence._parse_push_conditions` + `eflow_rules_matcher.build_value_frame`
+    / `build_rule_mask` / `format_details`）对本单取值帧求值。站点属性同源 `master_site_db.victims(hub_site=Y)`
+    + `eflow_site.sitesubtype/"Site Type"`，连接改为双模（`get_raw_connection`）。
+  - **五态**：`matched`（条件 True）/ `fallback`（空条件兜底，全命中）→ 算「相关」，默认显示；
+    `not_matched`（条件 False）默认隐藏；`undecidable`（条件引用本地取不到的字段）与 `no_data`（采集表无此规则原文）
+    只在「全部」里出现，不算未命中。STOP 规则只要条件匹配也列出，用状态标签区分（相关≠生效）。
+  - **界面**：规则卡头 `Segmented`「仅相关 (N) / 全部 (N)」切换，默认仅相关；表格新增「与本单」状态列；
+    **点击规则名**打开 `DraggableClickModal` 详情（基本信息 / 条件原文 / 逐条件 ✓/✗ 证据 / 本单取值帧）。
+    匹配不可用时（`rule_match_meta.available=false`）常驻 `Alert` 告警并降级显示全部规则。
+    接口 `/query` 返回追加 `rule_match_meta`（可用性 / 取值帧 fields / evaluated / undecidable）与逐规则 `match*` 字段。
+  - **导出同口径**：`Rules` sheet 按当前范围（related/all）过滤，匹配可用时追加「与本单」「条件证据」两列。
+  - **口径说明**：`CalcChainNote` 增第五段「『仅相关』怎么判」（`eflowFlow.calcNote.secRelated`）；
+    `rule_hits` 改为「全部节点条件 True（含兜底）按 规则名+节点 去重」，KPI 气泡 `tip.rules` / `caveat2` 同步更新。
 
 ## 14h. 承接方归属：ZTE 自维 vs IPT 第三方（2026-09-24 新增）
 

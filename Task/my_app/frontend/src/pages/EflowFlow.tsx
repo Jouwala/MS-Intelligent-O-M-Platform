@@ -23,7 +23,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
-  Alert, Button, Col, Descriptions, Empty, Form, Input, Row, Space, Spin,
+  Alert, Button, Col, Descriptions, Empty, Form, Input, Row, Segmented, Space, Spin,
   Table, Tag, Tooltip, Typography,
 } from 'antd'
 import {
@@ -39,6 +39,7 @@ import { CardBase, StatCard } from '../components/cards'
 // 本页此前只有 ECharts 节点 tooltip，卡片数字与规则计数问不到。
 import CalcChainNote from '../components/CalcChainNote'
 import { ExplainLabel, ExplainPopover } from '../components/MetricExplain'
+import DraggableClickModal from '../components/DraggableClickModal'
 import api from '../api'
 import { formatDateTime as fmtDateTime } from '../datetime'
 import { exportReport, type ReportSheetSpec } from '../utils/excelReport'
@@ -60,6 +61,17 @@ type FlowRule = {
   description: string
   update_time: string
   push_path: string
+  /* 以下由 backend/services/eflow_flow_rules.py 按本单条件求值后附加 */
+  match?: boolean | null
+  match_state?: 'matched' | 'fallback' | 'not_matched' | 'undecidable' | 'no_data' | ''
+  match_details?: string
+  conditions_text?: string
+  unknown_fields?: string[]
+  rule_id?: string
+  severity?: string
+  create_by?: string
+  update_by?: string
+  create_time?: string
 }
 
 type FlowNode = {
@@ -69,6 +81,7 @@ type FlowNode = {
   rules: FlowRule[]
   rule_count: number
   active_rule_count: number
+  related_rule_count?: number
 }
 
 type FlowEdge = { from: string; to: string; kind: string; rule_names: string[] }
@@ -110,6 +123,16 @@ type QueryResult = {
     steps?: { key: string; ts: string; detail: string }[]
   }
   rule_hits?: (FlowRule & { node: string; reason_zh: string; reason_en: string })[]
+  rule_match_meta?: {
+    available: boolean
+    error: string
+    tt_no: string
+    fields: Record<string, string>
+    evaluated: number
+    undecidable: number
+    rules_file_mtime?: string
+    elapsed_sec?: number
+  }
   candidates?: Record<string, string>[]
   message?: string
   message_en?: string
@@ -155,6 +178,27 @@ function queryTypeKey(qt: string): string {
   }
 }
 
+/** 规则与本单的匹配状态 → i18n 键（显式 switch，避免动态拼键被 check:i18n 拦下） */
+function matchStateKey(s: string): string {
+  switch (s) {
+    case 'matched': return 'eflowFlow.match.matched'
+    case 'fallback': return 'eflowFlow.match.fallback'
+    case 'not_matched': return 'eflowFlow.match.notMatched'
+    case 'undecidable': return 'eflowFlow.match.undecidable'
+    default: return 'eflowFlow.match.noData'
+  }
+}
+
+/** 匹配状态标签：颜色区分「命中 / 兜底 / 未命中 / 无法判定 / 无原文」。
+ *  文案由调用处传 t(matchStateKey(state))（组件外拿不到 i18n hook）。 */
+function MatchTag({ state, label }: { state?: string; label: string }) {
+  const color = state === 'matched' ? 'green'
+    : state === 'fallback' ? 'cyan'
+      : state === 'undecidable' ? 'orange'
+        : 'default'
+  return <Tag color={color} style={{ marginInlineEnd: 0 }}>{label}</Tag>
+}
+
 /** 节点泳道 → 横坐标（决定流程图的分层从左到右） */
 const STAGE_ORDER: Record<string, number> = {
   upstream: 0, create: 1, dispatch: 2, fo: 3, bo: 3, third: 4, confirm: 5, closed: 6, wo: 7,
@@ -172,6 +216,12 @@ export default function EflowFlow() {
   const [searched, setSearched] = useState(false)
   /** 当前选中的节点（点击图中节点 → 右侧规则明细） */
   const [activeNode, setActiveNode] = useState<string>('')
+  /** 规则明细范围：related = 只显示与本单条件匹配（含兜底）；all = 全部挂载规则。
+   *  默认 related —— 用户查某个告警时只想看与它相关的规则。 */
+  const [ruleScope, setRuleScope] = useState<'related' | 'all'>('related')
+  /** 规则详情弹窗（点击规则名打开）与点击锚点 */
+  const [detailRule, setDetailRule] = useState<FlowRule | null>(null)
+  const [detailAnchor, setDetailAnchor] = useState<{ x: number; y: number } | null>(null)
 
   /* ---- 查询 ---- */
   const runQuery = useCallback(async (kw: string) => {
@@ -214,6 +264,35 @@ export default function EflowFlow() {
   const activeNodeObj = useMemo(
     () => graph?.nodes.find((n) => n.id === activeNode) || null,
     [graph, activeNode],
+  )
+
+  /* ---- 规则相关性（后端 eflow_flow_rules 标注） ---- */
+  const matchMeta = data?.rule_match_meta
+  const matchAvailable = matchMeta?.available === true
+  // 匹配不可用时降级为「全部」，避免空表误导
+  const effectiveScope: 'related' | 'all' = matchAvailable ? ruleScope : 'all'
+  const isRelated = (r: FlowRule) => r.match === true
+  const filterRules = useCallback(
+    (rules: FlowRule[]) => (effectiveScope === 'related' ? rules.filter(isRelated) : rules),
+    [effectiveScope],
+  )
+  /** 当前视图的规则总数（related 口径 = 条件 True 含兜底） */
+  const relatedTotal = useMemo(
+    () => (graph?.nodes || []).reduce((s, n) => s + (n.related_rule_count ?? 0), 0),
+    [graph],
+  )
+  const scopeRelatedCount = activeNodeObj ? (activeNodeObj.related_rule_count ?? 0) : relatedTotal
+  const scopeTotalCount = activeNodeObj
+    ? activeNodeObj.rule_count
+    : (graph?.nodes || []).reduce((s, n) => s + n.rule_count, 0)
+  /** 未选中节点时铺全部节点规则，附 node_id 供「步骤」列与 rowKey 用 */
+  const allRulesWithNode = useMemo(
+    () => (graph?.nodes || []).flatMap((n) => n.rules.map((r) => ({ ...r, node_id: n.id }))),
+    [graph],
+  )
+  const tableRules = useMemo(
+    () => filterRules(activeNodeObj ? activeNodeObj.rules : allRulesWithNode),
+    [filterRules, activeNodeObj, allRulesWithNode],
   )
 
   /** 图上的规则命中节点集合 */
@@ -304,6 +383,7 @@ export default function EflowFlow() {
         _current: isCurrent,
         _ruleCount: n.rule_count,
         _activeCount: n.active_rule_count,
+        _relatedCount: n.related_rule_count ?? 0,
       }
     })
 
@@ -341,6 +421,9 @@ export default function EflowFlow() {
               : t('eflowFlow.nodeStatusNotReached')
           return `<b>${d.name}</b><br/>${status}<br/>${t('eflowFlow.ruleCountShort')}: `
             + `${d._activeCount} / ${d._ruleCount}<br/>`
+            + (matchAvailable
+              ? `${t('eflowFlow.relatedShort', { n: d._relatedCount })}<br/>`
+              : '')
             + `<span style="color:${isDark ? '#9aa6c8' : '#5b6478'};font-size:11px">`
             + `${t('eflowFlow.explain.nodeRulesTooltip')}</span>`
         },
@@ -357,11 +440,35 @@ export default function EflowFlow() {
         edgeSymbolSize: 8,
       }],
     }
-  }, [graph, isDark, t, reachedIds, actualEdgeKeys, currentNode, hitNodeIds])
+  }, [graph, isDark, t, reachedIds, actualEdgeKeys, currentNode, hitNodeIds, matchAvailable])
 
   /* ---- 规则明细表（当前选中节点） ---- */
+  /** 点击规则名 → 以点击位置为锚点打开详情弹窗 */
+  const openDetail = useCallback(
+    (r: FlowRule, e: { clientX: number; clientY: number; stopPropagation(): void }) => {
+      e.stopPropagation()
+      setDetailRule(r)
+      setDetailAnchor({ x: e.clientX, y: e.clientY })
+    },
+    [],
+  )
   const ruleColumns = useMemo(() => [
-    { title: t('eflowFlow.col.ruleName'), dataIndex: 'name', render: fmt, width: 220 },
+    // 未选中节点（全部规则视图）时补一列「步骤」，标明每条规则挂在哪个节点
+    ...(!activeNode ? [{
+      title: t('eflowFlow.col.step'), dataIndex: 'node_id', width: 120,
+      render: (v: string) => t(nodeLabelKey(v)),
+    }] : []),
+    {
+      title: t('eflowFlow.col.ruleName'), dataIndex: 'name', width: 220,
+      render: (v: string, r: FlowRule) => (
+        <Link onClick={(e) => openDetail(r, e)}>{fmt(v)}</Link>
+      ),
+    },
+    // 与本单的匹配状态（仅条件匹配可用时显示）
+    ...(matchAvailable ? [{
+      title: t('eflowFlow.col.matchState'), dataIndex: 'match_state', width: 110,
+      render: (v: string) => <MatchTag state={v} label={t(matchStateKey(v))} />,
+    }] : []),
     {
       title: t('eflowFlow.col.ruleType'), dataIndex: 'rule_type', width: 170,
       render: (v: string, r: FlowRule) => (
@@ -386,7 +493,7 @@ export default function EflowFlow() {
       title: t('eflowFlow.col.pushPath'), dataIndex: 'push_path', width: 200,
       render: (v: string) => <span style={{ fontSize: 12 }}>{fmt(v)}</span>,
     },
-  ], [t, isZh])
+  ], [t, isZh, activeNode, matchAvailable, openDetail])
 
   /** 实际路径时间轴表 */
   const stepColumns = useMemo(() => [
@@ -461,33 +568,36 @@ export default function EflowFlow() {
       })
     }
 
-    // ② 规则明细（当前选中节点的规则；未选中时退化为全部节点的规则并加一列节点名）
-    const selectedRules = activeNode
-      ? (nodes.find(n => n.id === activeNode)?.rules || [])
+    // ② 规则明细（与页面同一过滤口径：当前范围 related/all；选中节点无规则时退化为全部节点并加节点列）
+    const selNode = activeNode ? nodes.find(n => n.id === activeNode) : undefined
+    const selectedRules = selNode ? filterRules(selNode.rules || []) : []
+    const useAll = selectedRules.length === 0
+    const matchCols = matchAvailable
+      ? [t('eflowFlow.col.matchState'), t('eflowFlow.col.evidence')]
       : []
-    const ruleRows = selectedRules.length
-      ? selectedRules.map(r => [
-          r.name, r.rule_type, isZh ? r.role_zh : r.role_en, r.wo_type,
-          r.trigger_step, r.status, r.priority, r.handler, r.push_path, r.update_time,
-        ])
-      : nodes.flatMap(n => (n.rules || []).map(r => [
-          nodeName(n.id), r.name, r.rule_type, isZh ? r.role_zh : r.role_en, r.wo_type,
-          r.trigger_step, r.status, r.priority, r.handler, r.push_path, r.update_time,
-        ]))
+    const baseRow = (r: FlowRule) => [
+      r.name, r.rule_type, isZh ? r.role_zh : r.role_en, r.wo_type,
+      r.trigger_step, r.status, r.priority, r.handler, r.push_path, r.update_time,
+      ...(matchAvailable ? [t(matchStateKey(r.match_state || '')), r.match_details || ''] : []),
+    ]
+    const ruleRows = useAll
+      ? nodes.flatMap(n => filterRules(n.rules || []).map(r => [nodeName(n.id), ...baseRow(r)]))
+      : selectedRules.map(baseRow)
     if (ruleRows.length) {
-      const withNode = selectedRules.length === 0
+      const withNode = useAll
+      const scopeTag = effectiveScope === 'related' ? ` · ${t('eflowFlow.scope.related')}` : ''
       sheets.push({
         name: 'Rules',
-        title: `${t('eflowFlow.rulesTitle')}${selectedRules.length ? ` · ${nodeName(activeNode)}` : ''}`,
+        title: `${t('eflowFlow.rulesTitle')}${selectedRules.length ? ` · ${nodeName(activeNode)}` : ''}${scopeTag}`,
         header: withNode
           ? [t('eflowFlow.col.step'), t('eflowFlow.col.ruleName'), t('eflowFlow.col.ruleType'),
              t('eflowFlow.col.role'), t('eflowFlow.col.woType'), t('eflowFlow.col.triggerStep'),
              t('eflowFlow.col.status'), t('eflowFlow.col.priority'), t('eflowFlow.col.handler'),
-             t('eflowFlow.col.pushPath'), t('eflowFlow.col.updateTime')]
+             t('eflowFlow.col.pushPath'), t('eflowFlow.col.updateTime'), ...matchCols]
           : [t('eflowFlow.col.ruleName'), t('eflowFlow.col.ruleType'), t('eflowFlow.col.role'),
              t('eflowFlow.col.woType'), t('eflowFlow.col.triggerStep'), t('eflowFlow.col.status'),
              t('eflowFlow.col.priority'), t('eflowFlow.col.handler'), t('eflowFlow.col.pushPath'),
-             t('eflowFlow.col.updateTime')],
+             t('eflowFlow.col.updateTime'), ...matchCols],
         rows: ruleRows,
         tabColor: '#548235',
       })
@@ -536,7 +646,7 @@ export default function EflowFlow() {
     if (!sheets.length) return
     const stamp = fmtDateTime(new Date()).replace(/[: ]/g, '-')
     await exportReport(sheets, `eflow_flow_${String(data.query).replace(/[^\w]+/g, '_')}_${stamp}.xlsx`)
-  }, [data, activeNode, reachedIds, isZh, t])
+  }, [data, activeNode, reachedIds, isZh, t, filterRules, matchAvailable, effectiveScope])
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--wh-space-md)' }}>
@@ -743,6 +853,7 @@ export default function EflowFlow() {
             sections={[
               { title: t('eflowFlow.calcNote.secGraph'), lines: [t('eflowFlow.calcNote.graph1'), t('eflowFlow.calcNote.graph2')] },
               { title: t('eflowFlow.calcNote.secAttach'), lines: [t('eflowFlow.calcNote.attach1'), t('eflowFlow.calcNote.attach2'), t('eflowFlow.calcNote.attach3')] },
+              { title: t('eflowFlow.calcNote.secRelated'), lines: [t('eflowFlow.calcNote.related1'), t('eflowFlow.calcNote.related2'), t('eflowFlow.calcNote.related3'), t('eflowFlow.calcNote.related4')] },
               { title: t('eflowFlow.calcNote.secReached'), lines: [t('eflowFlow.calcNote.reached1'), t('eflowFlow.calcNote.reached2'), t('eflowFlow.calcNote.reached3')] },
               { title: t('eflowFlow.calcNote.secCaveat'), lines: [t('eflowFlow.calcNote.caveat1'), t('eflowFlow.calcNote.caveat2')] },
             ]}
@@ -777,48 +888,82 @@ export default function EflowFlow() {
               : <Empty description={t('eflowFlow.graph.empty')} />}
           </CardBase>
 
-          {/* ⑧ 节点的规则明细（点击图中节点切换） */}
+          {/* ⑧ 节点的规则明细（点击图中节点切换；默认只显示与本单相关的规则） */}
           <CardBase
             title={
-              activeNode
-                ? t('eflowFlow.nodeRules.title', { node: t(nodeLabelKey(activeNode)) })
-                : t('eflowFlow.nodeRules.titleAll')
+              <ExplainLabel
+                label={activeNode
+                  ? t('eflowFlow.nodeRules.title', { node: t(nodeLabelKey(activeNode)) })
+                  : t('eflowFlow.nodeRules.titleAll')}
+                text={t('eflowFlow.explain.nodeRules')}
+              />
             }
             extra={
-              activeNodeObj && (
-                <Space size={8}>
-                  <ExplainPopover placement="left" text={t('eflowFlow.tip.nodeActive', {
-                    active: activeNodeObj.active_rule_count,
-                    total: activeNodeObj.rule_count,
-                  })}>
-                    <Tag color="green">{t('eflowFlow.nodeRules.active', { n: activeNodeObj.active_rule_count })}</Tag>
-                  </ExplainPopover>
-                  <ExplainPopover placement="left" text={t('eflowFlow.tip.nodeTotal', {
-                    total: activeNodeObj.rule_count,
-                    rules: graph?.rules_total || 0,
-                  })}>
-                    <Tag>{t('eflowFlow.nodeRules.total', { n: activeNodeObj.rule_count })}</Tag>
-                  </ExplainPopover>
-                  <Button size="small" type="link" onClick={() => setActiveNode('')}>
-                    {t('eflowFlow.nodeRules.showAll')}
-                  </Button>
-                </Space>
-              )
+              <Space size={8} wrap>
+                {matchAvailable && (
+                  <Segmented
+                    size="small"
+                    value={effectiveScope}
+                    onChange={(v) => setRuleScope(v as 'related' | 'all')}
+                    options={[
+                      { label: `${t('eflowFlow.scope.related')} (${scopeRelatedCount})`, value: 'related' },
+                      { label: `${t('eflowFlow.scope.all')} (${scopeTotalCount})`, value: 'all' },
+                    ]}
+                  />
+                )}
+                {activeNodeObj && (
+                  <>
+                    <ExplainPopover placement="left" text={t('eflowFlow.tip.nodeActive', {
+                      active: activeNodeObj.active_rule_count,
+                      total: activeNodeObj.rule_count,
+                    })}>
+                      <Tag color="green">{t('eflowFlow.nodeRules.active', { n: activeNodeObj.active_rule_count })}</Tag>
+                    </ExplainPopover>
+                    <ExplainPopover placement="left" text={t('eflowFlow.tip.nodeTotal', {
+                      total: activeNodeObj.rule_count,
+                      rules: graph?.rules_total || 0,
+                    })}>
+                      <Tag>{t('eflowFlow.nodeRules.total', { n: activeNodeObj.rule_count })}</Tag>
+                    </ExplainPopover>
+                    <Button size="small" type="link" onClick={() => setActiveNode('')}>
+                      {t('eflowFlow.nodeRules.showAll')}
+                    </Button>
+                  </>
+                )}
+              </Space>
             }
           >
+            {matchMeta && !matchAvailable && (
+              <Alert
+                type="warning"
+                showIcon
+                style={{ marginBottom: 'var(--wh-space-sm)' }}
+                message={t('eflowFlow.matchUnavailable')}
+                description={matchMeta.error || undefined}
+              />
+            )}
             <Table
-              rowKey={(r: FlowRule) => `${r.name}-${r.trigger_step}-${r.rule_type}`}
+              rowKey={(r: FlowRule & { node_id?: string }) =>
+                `${r.node_id || activeNode}-${r.name}-${r.trigger_step}-${r.rule_type}`}
               columns={ruleColumns as any}
-              dataSource={
-                activeNodeObj
-                  ? activeNodeObj.rules
-                  : (graph?.nodes || []).flatMap((n) => n.rules)
-              }
+              dataSource={tableRules}
               size="small"
               pagination={{ pageSize: 10, showSizeChanger: true }}
-              scroll={{ x: 1180 }}
-              locale={{ emptyText: <Empty description={t('eflowFlow.nodeRules.empty')} image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
+              scroll={{ x: 1400 }}
+              locale={{
+                emptyText: (
+                  <Empty
+                    description={effectiveScope === 'related'
+                      ? t('eflowFlow.nodeRules.emptyRelated')
+                      : t('eflowFlow.nodeRules.empty')}
+                    image={Empty.PRESENTED_IMAGE_SIMPLE}
+                  />
+                ),
+              }}
             />
+            <div style={{ marginTop: 6 }}>
+              <Text type="secondary" style={{ fontSize: 12 }}>{t('eflowFlow.nodeRules.clickHint')}</Text>
+            </div>
           </CardBase>
 
           {/* ⑨ 实际路径时间轴 + TT 基本信息 */}
@@ -951,6 +1096,101 @@ export default function EflowFlow() {
           )}
         </>
       )}
+
+      {/* 规则详情弹窗：点击规则名打开，展示条件原文 / 逐条件证据 / 本单取值帧 */}
+      <DraggableClickModal
+        open={!!detailRule}
+        title={detailRule?.name || ''}
+        anchor={detailAnchor}
+        onClose={() => setDetailRule(null)}
+        width={780}
+        maxWidth="95vw"
+        headerExtra={detailRule && (
+          <Space size={6}>
+            {matchAvailable && (
+              <MatchTag state={detailRule.match_state} label={t(matchStateKey(detailRule.match_state || ''))} />
+            )}
+            <Tag color={detailRule.status === 'ACTIVE' ? 'green' : 'default'}>{fmt(detailRule.status)}</Tag>
+          </Space>
+        )}
+      >
+        {detailRule && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--wh-space-md)' }}>
+            <div>
+              <Text strong>{t('eflowFlow.detail.secBase')}</Text>
+              <Descriptions column={2} size="small" bordered style={{ marginTop: 8 }}
+                labelStyle={{ width: 130, fontSize: 12 }} contentStyle={{ fontSize: 12 }}>
+                <Descriptions.Item label={t('eflowFlow.detail.ruleId')}>{fmt(detailRule.rule_id)}</Descriptions.Item>
+                <Descriptions.Item label={t('eflowFlow.col.ruleType')}>
+                  <Tooltip title={isZh ? detailRule.role_zh : detailRule.role_en}>{fmt(detailRule.rule_type)}</Tooltip>
+                </Descriptions.Item>
+                <Descriptions.Item label={t('eflowFlow.col.triggerStep')}>{fmt(detailRule.trigger_step)}</Descriptions.Item>
+                <Descriptions.Item label={t('eflowFlow.col.priority')}>{fmt(detailRule.priority)}</Descriptions.Item>
+                <Descriptions.Item label={t('eflowFlow.detail.newSeverity')}>{fmt(detailRule.severity)}</Descriptions.Item>
+                <Descriptions.Item label={t('eflowFlow.col.woType')}>{fmt(detailRule.wo_type)}</Descriptions.Item>
+                <Descriptions.Item label={t('eflowFlow.col.handler')} span={2}>{fmt(detailRule.handler)}</Descriptions.Item>
+                <Descriptions.Item label={t('eflowFlow.col.pushPath')} span={2}>{fmt(detailRule.push_path)}</Descriptions.Item>
+                <Descriptions.Item label={t('eflowFlow.detail.description')} span={2}>{fmt(detailRule.description)}</Descriptions.Item>
+                <Descriptions.Item label={t('eflowFlow.detail.createBy')}>{fmt(detailRule.create_by)}</Descriptions.Item>
+                <Descriptions.Item label={t('eflowFlow.detail.updateBy')}>{fmt(detailRule.update_by)}</Descriptions.Item>
+                <Descriptions.Item label={t('eflowFlow.detail.createTime')}>{fmt(detailRule.create_time)}</Descriptions.Item>
+                <Descriptions.Item label={t('eflowFlow.col.updateTime')}>{fmt(detailRule.update_time)}</Descriptions.Item>
+              </Descriptions>
+            </div>
+
+            <div>
+              <Text strong>{t('eflowFlow.detail.secConditions')}</Text>
+              <div style={{
+                marginTop: 8, padding: '8px 10px', fontSize: 12, lineHeight: 1.7,
+                whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+                background: isDark ? 'rgba(8,18,44,0.6)' : 'rgba(15,23,42,0.04)',
+                border: `1px solid ${isDark ? 'rgba(111,140,180,0.3)' : 'rgba(148,163,184,0.4)'}`,
+                borderRadius: 6, color: WH.textMuted,
+              }}>
+                {detailRule.conditions_text || t('eflowFlow.detail.noConditions')}
+              </div>
+            </div>
+
+            <div>
+              <Text strong>{t('eflowFlow.detail.secEvidence')}</Text>
+              {detailRule.match_state === 'undecidable' && !!detailRule.unknown_fields?.length && (
+                <Alert type="warning" showIcon style={{ marginTop: 8 }}
+                  message={t('eflowFlow.detail.unknownFields', { fields: detailRule.unknown_fields.join(', ') })} />
+              )}
+              {detailRule.match_details ? (
+                <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  {detailRule.match_details.split(/;\s*/).filter(Boolean).map((line, i) => (
+                    <div key={i} style={{
+                      fontSize: 12, padding: '3px 8px', borderRadius: 4,
+                      borderLeft: `3px solid ${line.includes('✓') ? WH.ok : WH.danger}`,
+                      background: isDark ? 'rgba(8,18,44,0.5)' : 'rgba(15,23,42,0.03)',
+                      color: WH.textMuted, wordBreak: 'break-all',
+                    }}>
+                      {line}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div style={{ marginTop: 8, fontSize: 12, color: WH.textDim }}>
+                  {t('eflowFlow.detail.noEvidence')}
+                </div>
+              )}
+            </div>
+
+            {!!Object.keys(matchMeta?.fields || {}).length && (
+              <div>
+                <Text strong>{t('eflowFlow.detail.secFields')}</Text>
+                <Descriptions column={2} size="small" bordered style={{ marginTop: 8 }}
+                  labelStyle={{ width: 160, fontSize: 12 }} contentStyle={{ fontSize: 12 }}>
+                  {Object.entries(matchMeta?.fields || {}).map(([k, v]) => (
+                    <Descriptions.Item key={k} label={k}>{v === '' ? '-' : v}</Descriptions.Item>
+                  ))}
+                </Descriptions>
+              </div>
+            )}
+          </div>
+        )}
+      </DraggableClickModal>
     </div>
   )
 }

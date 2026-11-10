@@ -1,8 +1,9 @@
 /* ============================================================================
- * IP RAN 光纤拓扑（?page=ipran_topo）
+ * UME 四层拓扑（?page=ipranTopo&layer=ipran|ipcore|metro|dwdm）
  * ============================================================================
- * 数据源：UME（ZTE NetNumen）拓扑层 lid=1293626099480711168 的层内网元 + 链路 +
- * 活动告警。8 次上游调用由后端 services/ipran_topo 聚合成一次响应并缓存 120s，
+ * 数据源：UME（ZTE NetNumen）四张逻辑拓扑层，端点序列相同、只有 lid 与口径不同。
+ * 8 次上游调用由后端 services/ipran_topo 聚合成一次响应并**按层**缓存 120s
+ * （层清单与口径见后端 layers.py、前端 ipranTopo/layerDefs.ts）。
  * 本页只负责「怎么画得好看、点得动」：
  *
  *   布局 3 种（力导向默认 / 地理 / 分层），可读性依据见 ipranTopo/layouts.ts 顶部：
@@ -13,9 +14,10 @@
  *
  * 交互：点节点聚焦（其余变暗、只显示一跳邻居）；点边看物理链路明细；
  * 统计卡点开是「构成这个数的那些行」（TopoDrillModal），与卡上数字同一份数据。
- * 自动刷新：已登记 AR_INPLACE_REFRESH_PAGES，监听 myapp-refresh 静默重取，画面不重建。
+ * 切页签会清空旧层数据与聚焦态，并用请求序号丢弃「切走后迟到的旧层响应」；
+ * 自动刷新：已登记 AR_INPLACE_REFRESH_PAGES，监听 myapp-refresh 只静默重取当前层。
  * ========================================================================== */
-import { useCallback, useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { Alert, Button, Col, Empty, Row, Segmented, Space, Spin, Switch, Table } from 'antd'
 import { DownloadOutlined, ReloadOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
@@ -31,7 +33,8 @@ import { getIpranTopoGraph } from '../api'
 import TopoCanvas from './ipranTopo/TopoCanvas'
 import TopoDrillModal, { type DrillKind } from './ipranTopo/TopoDrillModal'
 import { buildIndex, LAYOUT_FNS } from './ipranTopo/layouts'
-import type { ColorMode, LayoutKey, Tier, TopoEdge, TopoNode, TopoResp } from './ipranTopo/types'
+import { LAYER_KEYS, LAYER_LABEL_KEY, calcSectionKeys, explainKeys, isLayerKey } from './ipranTopo/layerDefs'
+import type { ColorMode, LayerKey, LayoutKey, Tier, TopoEdge, TopoNode, TopoResp } from './ipranTopo/types'
 
 type Drill = { kind: DrillKind; anchor: { x: number; y: number } }
 type NbRow = { node: TopoNode; edge: TopoEdge }
@@ -40,6 +43,11 @@ export default function IpranTopo() {
   const { t } = useI18n()
   const { colors } = useTheme()
 
+  /* 层：URL 的 &layer= 可深链到单层，非法值回落到 ipran（与后端白名单一致） */
+  const [layer, setLayer] = useState<LayerKey>(() => {
+    const v = new URLSearchParams(window.location.search).get('layer')
+    return isLayerKey(v) ? v : 'ipran'
+  })
   const [resp, setResp] = useState<TopoResp | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -49,21 +57,26 @@ export default function IpranTopo() {
   const [foldParallel, setFoldParallel] = useState(true)
   const [focus, setFocus] = useState(-1)
   const [drill, setDrill] = useState<Drill | null>(null)
+  // 快速连切页签时先发的请求可能后返回，只认最后一次请求的响应
+  const reqSeq = useRef(0)
 
   /* 取数：silent 供原地自动刷新（不清 loading、失败保留旧数据），force 绕过后端 120s 缓存 */
   const load = useCallback(async (opts?: { silent?: boolean; force?: boolean }) => {
+    const seq = ++reqSeq.current
     const silent = !!opts?.silent
     if (!silent) { setLoading(true); setError('') }
     try {
-      const r = await getIpranTopoGraph(opts?.force ? 1 : 0)
+      const r = await getIpranTopoGraph(layer, opts?.force ? 1 : 0)
+      if (seq !== reqSeq.current) return
       setResp(r.data as TopoResp)
       if (!silent) setError('')
     } catch (e: any) {
+      if (seq !== reqSeq.current) return
       setError(e?.message || String(e))
     } finally {
-      if (!silent) setLoading(false)
+      if (seq === reqSeq.current && !silent) setLoading(false)
     }
-  }, [])
+  }, [layer])
 
   useEffect(() => { void load() }, [load])
   useEffect(() => {
@@ -71,6 +84,25 @@ export default function IpranTopo() {
     document.addEventListener('myapp-refresh', onInplaceRefresh)
     return () => document.removeEventListener('myapp-refresh', onInplaceRefresh)
   }, [load])
+  /* 地址栏保留当前层，便于分享单层链接；replaceState 不产生多余历史，App.tsx 的
+     page 同步用 set('page')，不会丢掉 layer 参数 */
+  useEffect(() => {
+    const url = new URL(window.location.href)
+    url.searchParams.set('layer', layer)
+    window.history.replaceState(window.history.state, '', url)
+  }, [layer])
+
+  const changeLayer = (k: LayerKey) => {
+    if (k === layer) return
+    // 旧层数据/聚焦/下钻不能带到新层：先清空，load 因 layer 变化会自动取新层
+    setLayer(k)
+    setResp(null)
+    setError('')
+    setLoading(true)
+    setFocus(-1)
+    setDrill(null)
+  }
+  const explain = explainKeys(layer)
 
   const nodes = useMemo(() => resp?.nodes ?? [], [resp])
   const edges = useMemo(() => resp?.edges ?? [], [resp])
@@ -223,7 +255,7 @@ export default function IpranTopo() {
     ])
     void exportReport([
       {
-        name: t('ipranTopo.export.nodes'), title: t('ipranTopo.export.title'),
+        name: t('ipranTopo.export.nodes'), title: exportTitle,
         header: [
           t('ipranTopo.col.name'), t('ipranTopo.col.tier'), t('ipranTopo.col.site'), t('ipranTopo.col.model'),
           t('ipranTopo.col.ip'), t('ipranTopo.col.status'), t('ipranTopo.col.crit'), t('ipranTopo.col.major'),
@@ -233,7 +265,7 @@ export default function IpranTopo() {
         rows: nodeRows, numericCols: [6, 7, 8, 9, 10],
       },
       {
-        name: t('ipranTopo.export.links'), title: t('ipranTopo.export.title'),
+        name: t('ipranTopo.export.links'), title: exportTitle,
         header: [
           t('ipranTopo.col.peerA'), t('ipranTopo.col.peerB'), t('ipranTopo.col.physLinks'),
           t('ipranTopo.col.gb'), t('ipranTopo.col.downLinks'), t('ipranTopo.col.crit'),
@@ -242,22 +274,33 @@ export default function IpranTopo() {
         rows: linkRows, numericCols: [2, 3, 4, 5, 6], autoWidth: false,
         columnWidths: [28, 28, 12, 12, 12, 10, 10, 60],
       },
-    ], `IPRAN_Topo_${dayjs().format('YYYYMMDD_HHmmss')}.xlsx`)
-  }, [resp, idx, t])
+    ], `UME_Topo_${layer}_${dayjs().format('YYYYMMDD_HHmmss')}.xlsx`)
+  }, [resp, idx, t, layer])
 
-  const calcSections = useMemo<CalcChainSection[]>(() => [
-    { title: t('ipranTopo.calc.source.title'), lines: [t('ipranTopo.calc.source.l1'), t('ipranTopo.calc.source.l2')] },
-    { title: t('ipranTopo.calc.agg.title'), lines: [t('ipranTopo.calc.agg.l1'), t('ipranTopo.calc.agg.l2')] },
-    { title: t('ipranTopo.calc.alarm.title'), lines: [t('ipranTopo.calc.alarm.l1')] },
-    { title: t('ipranTopo.calc.view.title'), lines: [t('ipranTopo.calc.view.l1'), t('ipranTopo.calc.view.l2')] },
-    { title: t('ipranTopo.calc.cache.title'), lines: [t('ipranTopo.calc.cache.l1')] },
-  ], [t])
+  /* 口径说明按层切换：ipran 用实测版，其余三层用通用版（不套用 93/167 这类实测数字） */
+  const calcSections = useMemo<CalcChainSection[]>(
+    () => calcSectionKeys(layer).map((s) => ({
+      title: t(s.title), lines: s.lines.map((k) => t(k)),
+    })),
+    [layer, t],
+  )
 
   const openDrill = (kind: DrillKind) => (e: ReactMouseEvent<HTMLDivElement>) =>
     setDrill({ kind, anchor: { x: e.clientX, y: e.clientY } })
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--wh-space-md)' }}>
+
+      {/* 拓扑层页签：四层共用同一份画布 / 统计卡 / 下钻 / 导出，切层只换数据源 */}
+      <CardBase bodyStyle={{ padding: 'var(--wh-space-sm) var(--wh-space-md)' }}>
+        <Space wrap size={12} align="center">
+          <span style={{ color: WH.textMuted, fontSize: 13 }}>{t('ipranTopo.toolbar.layer')}</span>
+          <Segmented className="wh-seg" size="small" value={layer}
+            onChange={(v) => changeLayer(v as LayerKey)}
+            options={LAYER_KEYS.map((k) => ({ label: t(LAYER_LABEL_KEY[k]), value: k }))} />
+          <span style={{ color: WH.textDim, fontSize: 12 }}>{t('ipranTopo.layer.hint')}</span>
+        </Space>
+      </CardBase>
 
       {/* ① 工具条：布局 / 着色 / 开关 / 重新取数 / 导出 */}
       <CardBase bodyStyle={{ padding: 'var(--wh-space-sm) var(--wh-space-md)' }}>
@@ -311,24 +354,24 @@ export default function IpranTopo() {
         <Col xs={24} sm={12} lg={6}>
           <StatCard title={t('ipranTopo.kpi.ne')} value={ne} accentColor={WH.teal}
             subText={t('ipranTopo.kpi.neSub', { n: ext })}
-            explainText={t('ipranTopo.kpi.explain.ne')} onClick={openDrill('ne')} />
+            explainText={t(explain.ne)} onClick={openDrill('ne')} />
         </Col>
         <Col xs={24} sm={12} lg={6}>
           <StatCard title={t('ipranTopo.kpi.links')} value={folded} accentColor={colors[1]}
             subText={t('ipranTopo.kpi.linksSub', { n: rawLinks })}
-            explainText={t('ipranTopo.kpi.explain.links')} onClick={openDrill('links')} />
+            explainText={t(explain.links)} onClick={openDrill('links')} />
         </Col>
         <Col xs={24} sm={12} lg={6}>
           <StatCard title={t('ipranTopo.kpi.down')} value={downNe}
             accentColor={downNe ? WH.danger : WH.ok}
             subText={t('ipranTopo.kpi.downSub')}
-            explainText={t('ipranTopo.kpi.explain.down')} onClick={openDrill('down')} />
+            explainText={t(explain.down)} onClick={openDrill('down')} />
         </Col>
         <Col xs={24} sm={12} lg={6}>
           <StatCard title={t('ipranTopo.kpi.crit')} value={critNe}
             accentColor={WH.sev.Major}
             subText={t('ipranTopo.kpi.critSub', { pct: critPct })}
-            explainText={t('ipranTopo.kpi.explain.crit')} onClick={openDrill('crit')} />
+            explainText={t(explain.crit)} onClick={openDrill('crit')} />
         </Col>
       </Row>
 

@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-r"""IP RAN 光纤拓扑：UME 取数 + 聚合成一次响应的图数据。
+r"""UME 拓扑图：取数 + 聚合成一次响应的图数据（四层共用的通用实现）。
 
 数据源
 ------
-UME（ZTE NetNumen，`https://10.100.2.99:28001`，自签 TLS）IP RAN 光纤层
-`lid=1293626099480711168`，8 组 REST 调用：
+UME（ZTE NetNumen，`https://10.100.2.99:28001`，自签 TLS）的四张逻辑拓扑层，
+端点序列与请求体结构完全一致，只有 `lid` 不同；层清单、lid 与每层口径的
+真相源是同目录 `layers.py`。每层 8 组 REST 调用：
 
 | # | 端点 | 作用 |
 | --- | --- | --- |
@@ -17,7 +18,9 @@ UME（ZTE NetNumen，`https://10.100.2.99:28001`，自签 TLS）IP RAN 光纤层
 | 7 | `POST /api/fm-active/v1/north/statistic/links?visible=1&maintainstatus=0` | 链路活动告警计数 |
 | 8 | `POST /api/res/v1/common/query?includeAttr=displayName,moc,id,ipAddress,connectionState` | 层外端点名称 |
 
-调用方法原始记录见同目录 `url_ipran_fiber.txt`（含浏览器会话头，仅作参考，**代码不读它**）。
+调用方法原始记录见同目录四个 `url_*.txt`（含浏览器会话头，仅作参考，**代码不读它们**；
+其凭据不得进入代码、日志或响应）。抓包对应的层：
+`url_ipran_fiber.txt` / `url_ipcore.txt` / `url_metro_ring.txt` / `url_dwdm.txt`。
 鉴权复用 `backend/services/ipran_ume_kpi_service.py::UmeSessionClient`（OAuth2 + RSA 登录、
 跨进程共享鉴权缓存），凭据组 `ipran_ume`。两个实测坑：
 
@@ -44,6 +47,14 @@ UME（ZTE NetNumen，`https://10.100.2.99:28001`，自签 TLS）IP RAN 光纤层
   `设备名-板卡:端口--设备名-板卡:端口`，而设备名自身含下划线、板卡名也用 `-`，
   字符串切分必错。
 
+四层与口径
+----------
+`build_graph(layer)` / `fetch_raw(spec)` / `_aggregate(raw, spec)` 都按层工作，
+进程内缓存也按 `layer` 分槽（**跨层仍共用一把 `_fetch_lock`**，避免四个页签同时
+刷新把 NMS 打满）。分层、站名清洗、端口速率解析不在本文件里堆 if-else，一律读
+`layers.LayerSpec` —— 除了 ipran 是实测口径，其余三层的口径都是按抓包 moc 推断的
+合理默认，待 `probe_layers.py` 实测后只改 `layers.py` 即可校准。
+
 注意：这是**只读**链路，不向 UME 写任何东西。
 """
 from __future__ import annotations
@@ -57,11 +68,10 @@ from datetime import datetime, timezone
 
 from backend.database import get_raw_connection
 from backend.services.ipran_ume_kpi_service import HOST, PORT, UmeSessionClient
+from backend.services.ipran_topo import layers
+from backend.services.ipran_topo.layers import DEFAULT_LAYER, TIER_EXT
 
 logger = logging.getLogger("ipran_topo")
-
-# IP RAN 光纤层（UME「IP RAN / Fiber」逻辑层的 lid），换层时改这里
-LID = "1293626099480711168"
 
 # 一次聚合约 1.5~3.0s，8 次调用。缓存 120s（页面建议刷新 300s），
 # 避免每个用户每次刷新都把 NMS 打一遍。
@@ -87,24 +97,18 @@ LINK_ATTRS = (
     "destIP,destPortId,sourceIP,sourcePortId"
 )
 
-TIER_CORE, TIER_AGG, TIER_ACCESS, TIER_EXT = 1, 2, 3, 0
-
-# 网元名 -> 站点名的前缀（设备型号/用途前缀，不属于站名）
-_SITE_PREFIX_RE = re.compile(
-    r"^(M6K_2S16_|M6K_2s16_|M6k_2s16_|6120H-S_|6120HS_|6120HA_|6180H-A_|6180_|6150_|9000-8EA_)",
-    re.I,
-)
-_UPE_SUFFIX_RE = re.compile(r"_UPE\d+$", re.I)
-_DIGITS_RE = re.compile(r"\d+")
-_GE_RE = re.compile(r"(\d+)GE:")
-_BARE_GE_RE = re.compile(r"(?<!\d)GE:")
-
 _req_lock = threading.Lock()
+# 四层共用一把取数锁：全局串行化，避免用户连切页签时 4×8 次调用同时打向 NMS
 _fetch_lock = threading.Lock()
-_cache: dict = {"ts": 0.0, "data": None}
+# 每层独立缓存槽，键是 layers.LAYERS 的 key（切页签不会串数据）
+_cache: dict[str, dict] = {}
 _client: UmeSessionClient | None = None
 _site_index: dict | None = None
 _site_lock = threading.Lock()
+
+
+def _cache_slot(layer: str) -> dict:
+    return _cache.setdefault(layer, {"ts": 0.0, "data": None})
 
 
 # ----------------------------------------------------------------------------
@@ -126,28 +130,30 @@ def _call(client: UmeSessionClient, method: str, path: str, payload=None, timeou
     return resp.json()
 
 
-def fetch_raw() -> dict:
+def fetch_raw(spec: layers.LayerSpec) -> dict:
     """跑完 8 组 UME 调用，返回原始响应（不落盘）。"""
+    lid = spec.lid
     client = _client_instance()
     client.login()
 
     topo = _call(
         client, "POST",
-        f"/api/res/v1/statistic/topolayer?model=me&countDisconnect=true&function=topochart&lid={LID}")
+        f"/api/res/v1/statistic/topolayer?model=me&countDisconnect=true&function=topochart&lid={lid}")
     children = _call(
         client, "GET",
-        f"/api/res/v1/tree/children/{LID}?function=topochart&operation=operation.topo.viewlogicview"
+        f"/api/res/v1/tree/children/{lid}?function=topochart&operation=operation.topo.viewlogicview"
         f"&dataType=tree&expandDepth=1&structureFlag=0&LogTracking=true"
         f"&rm%3AresponseError=true&rm:aboveMe=0")
     node_ids = [n["id"] for n in children]
-    node_mocs = sorted({n["moc"] for n in children})
+    # 探层前不保证四层 children 都带 moc，缺 moc 的节点跳过而不是让整层取数失败
+    node_mocs = sorted({n["moc"] for n in children if n.get("moc")})
     nodes_attr = _call(client, "POST", f"/api/res/v1/common/query?includeAttr={NODE_ATTRS}",
                        {"id": node_ids, "moc": node_mocs})
     links_topo = _call(
         client, "POST",
-        f"/api/res/v1/tree/children/{LID}/links?operation=operation.topo.viewlogicview",
+        f"/api/res/v1/tree/children/{lid}/links?operation=operation.topo.viewlogicview",
         {"function": "topochart", "logicLevel": 2, "operation": "topochart",
-         "layerNodeIds": {LID: node_ids}})
+         "layerNodeIds": {lid: node_ids}})
     link_ids = [x["id"] for x in links_topo]
     links_attr = _call(client, "POST", f"/api/res/v1/common/query?includeAttr={LINK_ATTRS}",
                        {"id": link_ids, "moc": ["wl.link"]})
@@ -208,12 +214,6 @@ def _load_site_index(force: bool = False) -> dict:
         return idx
 
 
-def _site_of(name: str) -> str:
-    s = _SITE_PREFIX_RE.sub("", name or "")
-    s = _UPE_SUFFIX_RE.sub("", s)
-    return s.replace("_", " ").strip()
-
-
 def _match_site(name: str, index: dict):
     """站名 -> (原名, lat, lon, how)；how ∈ exact/fuzzy/miss。"""
     if not name or not index:
@@ -226,7 +226,7 @@ def _match_site(name: str, index: dict):
     if close:
         nm, lat, lon = index[close[0]]
         # 数字不同的站点一律不认：12th Street 与 18th Street 相似度 0.94，但是两条街
-        if _DIGITS_RE.findall(name) != _DIGITS_RE.findall(nm):
+        if layers.DIGITS_RE.findall(name) != layers.DIGITS_RE.findall(nm):
             return None, None, None, "miss"
         return nm, lat, lon, "fuzzy"
     return None, None, None, "miss"
@@ -235,27 +235,6 @@ def _match_site(name: str, index: dict):
 # ----------------------------------------------------------------------------
 # 聚合
 # ----------------------------------------------------------------------------
-def _tier_of(display_name: str, moc: str) -> int:
-    moc = moc or ""
-    if "9000-8EA" in moc or re.match(r"^ODC_SPE", display_name or ""):
-        return TIER_CORE
-    if "M6000" in moc or (display_name or "").upper().startswith("M6K"):
-        return TIER_AGG
-    if "6180" in moc:
-        return TIER_AGG
-    return TIER_ACCESS
-
-
-def _port_speed_gb(link_name: str):
-    """从链路名解析端口速率（100GE/25GE/10GE/GE）；解析不出返回 None。"""
-    found = _GE_RE.findall(link_name or "")
-    if found:
-        return min(int(x) for x in found)
-    if _BARE_GE_RE.search(link_name or ""):
-        return 1
-    return None
-
-
 def _sev(stat: dict) -> str:
     for level, key in (("crit", "criticalcount"), ("major", "majorcount"),
                        ("minor", "minorcount"), ("warn", "warningcount")):
@@ -268,32 +247,41 @@ def _is_up(v) -> bool:
     return str(v) == "1"
 
 
-def build_graph(force: bool = False) -> dict:
-    """返回完整图数据；进程内缓存 CACHE_TTL_SEC 秒。"""
+def build_graph(layer: str = DEFAULT_LAYER, force: bool = False) -> dict:
+    """返回指定层的完整图数据；每层独立缓存 CACHE_TTL_SEC 秒。
+
+    `layer` 必须在 `layers.LAYERS` 白名单内（路由层已校验）。不带 layer 时仍是
+    原来的 IP RAN 光纤层，现有页面与旧调用方式无需改动。
+    """
+    spec = layers.resolve_layer(layer)
+    if spec is None:
+        raise ValueError(f"未知拓扑层: {layer}")
+    slot = _cache_slot(layer)
     now = time.time()
-    if not force and _cache["data"] is not None and now - _cache["ts"] < CACHE_TTL_SEC:
-        data = dict(_cache["data"])
+    if not force and slot["data"] is not None and now - slot["ts"] < CACHE_TTL_SEC:
+        data = dict(slot["data"])
         data["meta"] = {**data["meta"], "cached": True}
         return data
 
-    # 上游一次取数要 1.5~3.0s，并发刷新会把 NMS 打满 -> 串行化，后来者复用前者的结果
+    # 上游一次取数要 1.5~3.0s；四层共用一把锁串行化，后来者复用前者的结果
     with _fetch_lock:
+        slot = _cache_slot(layer)
         now = time.time()
-        if not force and _cache["data"] is not None and now - _cache["ts"] < CACHE_TTL_SEC:
-            data = dict(_cache["data"])
+        if not force and slot["data"] is not None and now - slot["ts"] < CACHE_TTL_SEC:
+            data = dict(slot["data"])
             data["meta"] = {**data["meta"], "cached": True}
             return data
 
         t0 = time.time()
         try:
-            raw = fetch_raw()
-            payload = _aggregate(raw)
+            raw = fetch_raw(spec)
+            payload = _aggregate(raw, spec)
         except Exception:
-            if _cache["data"] is not None:
-                # 上游抖动时返回上一版可用数据，并在 meta 里显式标注，界面必须能看到
-                logger.exception("[IPRAN-TOPO] 取数失败，回退到 %.0fs 前的缓存",
-                                 time.time() - _cache["ts"])
-                data = dict(_cache["data"])
+            if slot["data"] is not None:
+                # 上游抖动时返回该层上一版可用数据，并在 meta 里显式标注，界面必须能看到
+                logger.exception("[IPRAN-TOPO] layer=%s 取数失败，回退到 %.0fs 前的缓存",
+                                 layer, time.time() - slot["ts"])
+                data = dict(slot["data"])
                 data["meta"] = {**data["meta"], "cached": True, "stale": True,
                                 "warnings": list(data["meta"].get("warnings") or []),
                                 }
@@ -304,15 +292,15 @@ def build_graph(force: bool = False) -> dict:
         elapsed = time.time() - t0
         payload["meta"].update({"fetchedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                                 "elapsedSec": round(elapsed, 2), "cached": False})
-        _cache["ts"] = time.time()
-        _cache["data"] = payload
-        logger.info("[IPRAN-TOPO] 聚合完成 网元=%d 原始链路=%d 折叠边=%d 用时 %.2fs",
-                    payload["meta"]["ne"], payload["meta"]["rawLinks"],
+        slot["ts"] = time.time()
+        slot["data"] = payload
+        logger.info("[IPRAN-TOPO] layer=%s 聚合完成 网元=%d 原始链路=%d 折叠边=%d 用时 %.2fs",
+                    layer, payload["meta"]["ne"], payload["meta"]["rawLinks"],
                     payload["meta"]["foldedLinks"], elapsed)
         return payload
 
 
-def _aggregate(raw: dict) -> dict:
+def _aggregate(raw: dict, spec: layers.LayerSpec) -> dict:
     nodes_attr = raw["nodes_attr"] or []
     links_topo = raw["links_topo"] or []
     links_attr = {x["id"]: x for x in (raw["links_attr"] or [])}
@@ -329,7 +317,7 @@ def _aggregate(raw: dict) -> dict:
     miss_sites = []
     for nid, n in nodes.items():
         display_name = n.get("displayName") or ""
-        site = _site_of(display_name)
+        site = layers.site_of(display_name, spec)
         geo_name, lat, lon, how = _match_site(site, site_index)
         geo_stat[how] = geo_stat.get(how, 0) + 1
         if how == "fuzzy":
@@ -341,7 +329,7 @@ def _aggregate(raw: dict) -> dict:
             "id": nid,
             "name": display_name,
             "site": site,
-            "tier": _tier_of(display_name, n.get("moc")),
+            "tier": layers.tier_of(display_name, n.get("moc") or "", spec),
             "model": (n.get("moc") or "").split(".")[-1],
             "ip": n.get("ipAddress") or "",
             "up": 1 if _is_up(n.get("connectionState")) else 0,
@@ -380,7 +368,7 @@ def _aggregate(raw: dict) -> dict:
 
     out_edges = []
     for (a, b), group in by_pair.items():
-        speeds = [s for s in (_port_speed_gb(x.get("displayName")) for x in group) if s]
+        speeds = [s for s in (layers.speed_gb(x.get("displayName") or "", spec) for x in group) if s]
         alarms = [alarm_links.get(x["id"], {}) for x in group]
         down = sum(1 for x in group if not _is_up(links_attr.get(x["id"], {}).get("connectionState")))
         out_edges.append({
@@ -423,6 +411,8 @@ def _aggregate(raw: dict) -> dict:
         "edges": out_edges,
         "meta": {
             **meta_extra,
+            "layer": spec.key,
+            "layerName": spec.name_zh,
             "ne": len(ne_nodes),
             "ext": len(ext_names),
             "rawLinks": len(links_topo),
@@ -442,7 +432,10 @@ def refresh_site_index() -> int:
     return len(_load_site_index(force=True))
 
 
-def clear_cache() -> None:
+def clear_cache(layer: str | None = None) -> None:
+    """清图缓存；传 layer 只清该层，不传则清全部层（历史行为）。"""
     with _fetch_lock:
-        _cache["ts"] = 0.0
-        _cache["data"] = None
+        targets = (_cache_slot(layer),) if layer else tuple(_cache.values())
+        for slot in targets:
+            slot["ts"] = 0.0
+            slot["data"] = None

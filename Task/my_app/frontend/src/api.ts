@@ -1116,11 +1116,16 @@ export function iptPowerWatch() {
   return api.get('/ipt-power/watch')
 }
 
-// ========== IP RAN 光纤拓扑（?page=ipran_topo）==========
-// 新增于 2026-11-10；对应后端 routers/ipran_topo.py。
-// 数据链路：UME（ZTE NetNumen）lid=1293626099480711168 的层内网元 + 链路 + 活动告警，
-// 8 次上游调用在服务层聚合成一次响应并缓存 120s（见 services/ipran_topo/）。
-// refresh=1 绕过缓存重新取数（页面「重新取数」按钮用；普通刷新走缓存）。
-export function getIpranTopoGraph(refresh = 0) {
-  return api.get('/ipran-topo/graph', { params: { refresh } })
+// ========== UME 拓扑四层（?page=ipranTopo）==========
+// 新增于 2026-11-10，同日扩展为四层页签；对应后端 routers/ipran_topo.py。
+// 数据链路：UME（ZTE NetNumen）四张逻辑拓扑层，8 次上游调用在服务层聚合成一次
+// 响应并**按层**缓存 120s（层清单与口径见 services/ipran_topo/layers.py）。
+// layer 走后端白名单；refresh=1 只绕过当前层缓存（页面「重新取数」按钮用）。
+export function getIpranTopoGraph(layer: string, refresh = 0) {
+  return api.get('/ipran-topo/graph', { params: { layer, refresh } })
+}
+
+/** 页签清单（key / 中英名 / 是否有 UME 人工布局）。页面用静态层定义，此接口供门户与调试。 */
+export function getIpranTopoLayers() {
+  return api.get('/ipran-topo/layers')
 }

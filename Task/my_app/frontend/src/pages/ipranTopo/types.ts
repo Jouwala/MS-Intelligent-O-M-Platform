@@ -1,6 +1,9 @@
-/** IP RAN 拓扑页的数据与布局类型（与 /api/ipran-topo/graph 的返回结构对齐）。 */
+/** UME 拓扑页的数据与布局类型（与 /api/ipran-topo/graph 的返回结构对齐）。 */
 
-/** 0 层外上游 / 1 核心 SPE / 2 汇聚 M6K·6180 / 3 接入 UPE */
+/** 四张 UME 逻辑拓扑层；与后端 layers.LAYERS 的 key 一一对应，非法值后端会 400。 */
+export type LayerKey = 'ipran' | 'ipcore' | 'metro' | 'dwdm'
+
+/** 0 层外上游 / 1 核心 / 2 汇聚 / 3 接入（层级名称按层翻译，见 layerDefs.ts） */
 export type Tier = 0 | 1 | 2 | 3
 
 export type Sev = 'crit' | 'major' | 'minor' | 'warn' | 'ok'
@@ -47,6 +50,9 @@ export interface TopoEdge {
 }
 
 export interface TopoMeta {
+  /** 后端回填的层 key / 层名，用于核对响应与当前页签是否一致 */
+  layer?: string
+  layerName?: string
   fetchedAt?: string
   elapsedSec?: number
   cached?: boolean
