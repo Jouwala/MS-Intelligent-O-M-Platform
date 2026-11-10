@@ -56,6 +56,11 @@
 
 # 带时间戳的库备份与运行时整目录备份
 *.bak_*
+# 同上，但用「点号 + bak_」命名的那一类（页面改版的本地备份）。
+# 2026-11-10：frontend/public 下的 cxo_dashboard.html.bak_* 与
+# alarm-management.html.bak_* 内嵌了**抓包快照里的 VMAX 会话 Cookie**
+# （JSESSIONID=...），虽未被代码读取，但入库即公开 —— 必须挡住。
+*.html.bak_*
 /backend/services/cn_ems/jab_setup/backup_*/
 
 # 实时代理的上游会话文件（FMS 8787 / VMAX 8790）。

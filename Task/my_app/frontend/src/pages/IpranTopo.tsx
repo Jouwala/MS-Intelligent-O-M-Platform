@@ -242,6 +242,8 @@ export default function IpranTopo() {
   /* ---- 导出：网元 + 链路两张 sheet（统一走 excelReport） ---- */
   const doExport = useCallback(() => {
     if (!resp) return
+    // 导出标题/文件名带层名：四层表格落到磁盘后还能分清是哪一层
+    const exportTitle = `${t('ipranTopo.export.title')} · ${t(LAYER_LABEL_KEY[layer])}`
     const nodeRows = resp.nodes.map((v) => [
       v.name, tierName(v.tier), v.site, v.model, v.ip,
       v.up ? t('ipranTopo.status.up') : t('ipranTopo.status.down'),

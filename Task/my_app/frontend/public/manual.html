@@ -8395,11 +8395,35 @@ history、<code>clearstatename</code> 只在 realtime。给两表写同一条 SE
 ② 「共 N 条」是<strong>挂载去重后</strong>的条数（按 规则名+类型+触发步骤 去重，且要求 <code>wo_type</code> 与节点归属一致，<code>:574-597</code>），同一条规则可挂多个节点、各节点分别计数，<strong>把各节点相加会超过全库条数</strong>；
 ③ 「生效 N 条」= <code>status == &quot;ACTIVE&quot;</code> <strong>严格大小写</strong>（<code>:598</code>，<code>_s()</code> 只去首尾空格），上游写成 <code>Active</code> 会进总数但不进生效数。</li>
 <li><strong>两条易读错的写进「读图须知」</strong>：规则表是当前快照，几个月前走完的单，图上用的是<strong>今天</strong>的规则；
-「本单命中 N 条」只统计<strong>当前所在节点</strong>挂载的规则 + 建单定级规则（<code>:892-909</code>，按 规则名+节点 去重），<strong>不是全过程命中数</strong>。</li>
+「本单命中 N 条」统计<strong>全部节点</strong>中条件对本单求值为 True 的规则（含空条件兜底，按 规则名+节点 去重，
+<code>eflow_flow_rules.py</code> 的 <code>annotate_graph</code>），与规则明细「仅相关」同一口径，<strong>不是只数当前节点</strong>（2026-11-10 改）。</li>
 <li><strong>顺手修的一处显示错</strong>：「全程共 N 个步骤」原先用 <code>graph.nodes.length</code> 当分母，而 <code>reached_ids</code> 由 <code>_actual_path()</code> 生成时
 <code>order</code> 只取 <code>_FLOW_NODES</code>（<code>:700</code> 附近），WO 泳道的 5 个节点（<code>wo_create/accept/process/confirm/closed</code>）<strong>永远不会进已走步骤</strong> ——
 分母把 WO 节点算进去会让「4 / 16」这种读法永远追不上。现改为按 <code>stage !== 'wo'</code> 且 key 不以 <code>wo_</code> 开头过滤（<code>ttNodeCount</code>），
 并在气泡里单列「WO 子流程另计：走过 N 个节点」。</li>
+</ul>
+</li>
+<li><strong>节点规则「仅相关」过滤 + 规则详情（2026-11-10 新增）</strong>：查某个告警/TT 后，点图中节点（如「TT 建单」），
+规则明细<strong>默认只显示与本单相关的规则</strong>，不再铺全部挂载规则。
+<ul>
+<li><strong>判定同源不另造</strong>：<code>backend/services/eflow_flow_rules.py</code> 的 <code>annotate_graph()</code> 把图上每条规则与采集表
+<code>eflow_push_rules.xlsx</code>（Push_Rules 工作表，全规则类型、含「条件」列）按（规则名, 规则类型）对齐，
+复用 TT 规则检查的同一引擎（<code>tt_rule_evidence._parse_push_conditions</code> + <code>eflow_rules_matcher.build_value_frame</code>
+/ <code>build_rule_mask</code> / <code>format_details</code>）对本单取值帧求值。站点属性同源 <code>master_site_db.victims(hub_site=Y)</code>
+<ul>
+<li><code>eflow_site.sitesubtype/&quot;Site Type&quot;</code>，连接改为双模（<code>get_raw_connection</code>）。</li>
+</ul>
+</li>
+<li><strong>五态</strong>：<code>matched</code>（条件 True）/ <code>fallback</code>（空条件兜底，全命中）→ 算「相关」，默认显示；
+<code>not_matched</code>（条件 False）默认隐藏；<code>undecidable</code>（条件引用本地取不到的字段）与 <code>no_data</code>（采集表无此规则原文）
+只在「全部」里出现，不算未命中。STOP 规则只要条件匹配也列出，用状态标签区分（相关≠生效）。</li>
+<li><strong>界面</strong>：规则卡头 <code>Segmented</code>「仅相关 (N) / 全部 (N)」切换，默认仅相关；表格新增「与本单」状态列；
+<strong>点击规则名</strong>打开 <code>DraggableClickModal</code> 详情（基本信息 / 条件原文 / 逐条件 ✓/✗ 证据 / 本单取值帧）。
+匹配不可用时（<code>rule_match_meta.available=false</code>）常驻 <code>Alert</code> 告警并降级显示全部规则。
+接口 <code>/query</code> 返回追加 <code>rule_match_meta</code>（可用性 / 取值帧 fields / evaluated / undecidable）与逐规则 <code>match*</code> 字段。</li>
+<li><strong>导出同口径</strong>：<code>Rules</code> sheet 按当前范围（related/all）过滤，匹配可用时追加「与本单」「条件证据」两列。</li>
+<li><strong>口径说明</strong>：<code>CalcChainNote</code> 增第五段「『仅相关』怎么判」（<code>eflowFlow.calcNote.secRelated</code>）；
+<code>rule_hits</code> 改为「全部节点条件 True（含兜底）按 规则名+节点 去重」，KPI 气泡 <code>tip.rules</code> / <code>caveat2</code> 同步更新。</li>
 </ul>
 </li>
 </ul>
@@ -19672,7 +19696,8 @@ shared <code>auth_cache</code> 里 admin 的 token 明明还有 14.6 小时有�
 <li>输入框支持三种输入：TT 单号（TT202609230060）、告警 ID（告警表的 id/aid）、告警码（如 99933）；按告警码查询会列出该码最近的 TT 供切换</li>
 <li>底图是规则驱动的状态机：告警发生 → TT 建单 → 自动派单 → FO/BO 接单 → FO/BO 处理 → 第三方接单/处理 → 确认 → 关单，节点下方的「生效/总数」是该步骤绑定的规则条数</li>
 <li>绿色节点 = 该单实际走过的步骤，黄色节点 = 当前所处步骤（来自 operation_type 字段），灰色 = 未涉及；粗青色连线 = 实际路径</li>
-<li>点击图中任意节点，下方「规则明细」表即切到该步骤绑定的规则（规则名 / 类型 / 触发步骤 / 状态 / 优先级 / 目标处理人 / 推送路径），再点「显示全部」可看全量规则</li>
+<li>点击图中任意节点，下方「规则明细」表即切到该步骤绑定的规则；<strong>默认只显示与本单相关的规则</strong>（条件对本单求值为 True，含空条件兜底规则），「仅相关 / 全部」切换可看全量挂载，「全部节点」可一次看所有节点的规则</li>
+<li><strong>点击规则名打开详情</strong>（2026-11-10）：弹窗给出规则基础信息（ID / 级别 / 创建人 / 更新人）、条件原文、逐条件 ✓/✗ 证据与本单取值帧（告警码 / VIP / HUB / 站点类型 / 断站数等）；判定与「eFlow 知识库」「指派归因」同源，不另造一套判定；条件引用本地取不到字段的规则标「无法判定」，不算未命中</li>
 <li>「实际流程路径」表按时间列出该单真实走过的里程碑、操作人与说明；「TT 工单信息」表给出级别、当前处理人、SLA、根因等字段</li>
 <li>TT 若已派生现场工单，另有「WO 现场子流程」区块：WO 的 接单 → 处理 → 确认 → 关单 独立一条流水线，并列出各环节处理明细（来自 eflow_wo 的 *Detail 字段）</li>
 <li>「关联告警」表列出触发该 TT 的告警（realtime_alarm / history_alarm 的 tt_id 或 alarm_id 关联），含告警码、站点、网元、级别与发生时间</li>
@@ -19680,7 +19705,7 @@ shared <code>auth_cache</code> 里 admin 的 token 明明还有 14.6 小时有�
 <li>规则表由 eflow_push_rules_collect / eflow_alarm_rules_collect 定时采集（每 3 天 23:59），规则更新后流程图自动反映</li>
 <li><strong>每个数字都能悬浮看算法</strong>（2026-11-03）：「已走步骤」「流程规则」两张卡的数字、节点规则卡头的「生效 N / 共 N」两个标签都可悬浮；图上节点的气泡也补了一句挂载/生效判据。整页口径进默认收起的「eFlow 全流程图的统计口径」条</li>
 <li>读这三个数要知道的三件事：① 「流程规则」= <strong>ocrule_details 全表行数</strong>，不带任何过滤，是当前快照，不是「本单走过的规则数」；② 节点上「共 N 条」是按（规则名+类型+触发步骤）<strong>去重后的挂载数</strong>，同一条规则可挂多个节点、各节点分别计，把各节点相加会超过全库条数；③ 「生效 N 条」要求 status <strong>严格等于 ACTIVE</strong>（区分大小写），上游写成 Active 会算进总数但不算进生效数</li>
-<li>「已走步骤」只数 <strong>TT 主流程节点</strong>（告警发生与 TT 建单是无条件打点，所以起点就是 2 步），WO 现场子流程另有一条泳道、不计进这个数；「本单命中 N 条」只统计<strong>当前所在节点</strong>挂载的规则加上建单定级规则，不是全过程累计 —— 单子在流转，这个数字跟着当前步骤变</li>
+<li>「已走步骤」只数 <strong>TT 主流程节点</strong>（告警发生与 TT 建单是无条件打点，所以起点就是 2 步），WO 现场子流程另有一条泳道、不计进这个数；「本单命中 N 条」统计<strong>全部节点</strong>里条件对本单求值为 True（含空条件兜底）的规则，按（规则名,节点）去重，与「仅相关」同一口径，不随当前步骤变化</li>
 <li>规则表是<strong>当前快照</strong>：一张在流程里走了几个月的单，图上用的是<strong>今天</strong>的规则，未必是它当时实际被哪条规则路由 —— 排查历史单的归因时要留意</li>
 </ul>
 <p><a id="ch-15-s154"></a></p>
