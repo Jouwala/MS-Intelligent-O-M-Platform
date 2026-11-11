@@ -106,30 +106,35 @@ start.bat
 ```
 D:\01_RPA  (主仓库 / 开发态)          D:\01_olbr_portal  (本仓库 / 便携部署态)
         │                                        │
-        │  scripts/build_olbr_portable.ps1        │
-        │  -Stage source                          │
-        │    └─ 阶段末尾自动跑修路径 ─────────────►│
+        │  sync-now.bat（或 scripts\sync_from_main.ps1）
+        │    └─ scripts\sync-engine.mjs（事务式增量同步，源只读）─►│
         └────────────────────────────────────────►│
-                                                 │  同步源码
-                                                 │  scripts/post_sync_fix_paths.ps1
-                                                 │  ← 修回同步时被冲掉的隔离期路径
+                                                 │  同步源码 + 确定性改写两处监控脚本路径
+                                                 │  （不再需要 post_sync_fix_paths.ps1）
 ```
 
-**同步纪律**（每次从主仓库同步后必做）：
+**同步入口**：根目录 `sync-now.bat`（薄壳）→ `scripts\sync_from_main.ps1`（薄包装）→
+`scripts\sync-engine.mjs` + `sync-policy.mjs`（零 npm 依赖，用副本自带 `runtime\node`）。
 
-1. **只跑 `-Stage source`**，绝不跑 `-Stage all` / `-Stage config` —— config 会覆盖本副本特有的 `部署说明.md`、`my_portal/status.ps1`。
-2. **6 个正在被写入的大 SQLite 已由 manifest 自动跳过**（`ran_kpi_avalability_1day` / `db_sqlite3` / `bp_report` / `olib_soc_report` / `vmax_multi_data` / `soc_trend`，合计约 1.8 GB）—— 文件级复制会撕裂正在写的库。主仓库的 `scripts/portable/manifest.json` 里已登记，无需手工加 `/XF`。
-3. **同步后无需再手工跑 `scripts/post_sync_fix_paths.ps1`** —— `-Stage source` 阶段末尾会自动调用它（`build_olbr_portable.ps1` 的 `Invoke-PathFix`）。它负责把本副本隔离期手改过的两处路径冲回 `D:\01_RPA` 之前修回来：
-   - `Task/my_app/monitor_fixes/nginx_monitor.ps1` 的 5 个 param
-   - 门户 `rotate_nginx_logs.ps1` 的 `$Prefix`
+```bat
+sync-now.bat -DryRun          REM 只预览计划，不写任何文件
+sync-now.bat                  REM 增量同步；遇本地冲突整体停止（fail-closed）
+sync-now.bat -AcceptSource    REM 显式接受源版本覆盖冲突文件（先备份，可回滚）
+```
 
-   不修的话，切生产时 nginx watchdog 会去探测旧目录的 nginx，可能起出第二个实例抢端口。
+**同步纪律**：
 
-   需要手工跑时（幂等，可反复执行）：
-
-   ```powershell
-   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\post_sync_fix_paths.ps1 -Force
-   ```
+1. **源只读、副本唯一写入目标**；要求副本根有 `ISOLATED_COPY.flag`，源/副本路径不得重叠或为 junction。
+2. **只同步源码白名单**（`sync-policy.mjs`）：backend/frontend/alembic/docs/tests/tools 等 + 显式业务资源
+   （eflow 规则 xlsx、EMS 模板/样本、公共 CA）。**绝不**同步运行时凭据/会话（`.env`、`*session*.json`、
+   `auth*.json`、`config.json` 等）、`node_modules`、`data/db`、构建产物。
+3. **构建产物不同步**：`Task/_fe_dist` 与门户 `dist` 由副本**自行构建**（`npm run build`），不从生产拷贝。
+4. **两处监控脚本路径在同步时确定性改写**为副本根（`nginx_monitor.ps1` 5 个 param、门户 `rotate_nginx_logs.ps1`
+   的 `$Prefix`），匹配数必须恰为 1 否则报错停止 —— 不再依赖 `post_sync_fix_paths.ps1`。
+5. **事务式应用**：逐文件备份到 `TMP\_pre_sync_<时间戳>`、原子改名，任一步失败整体回滚；状态最后原子落盘
+   （`TMP\_sync_state.json`，SHA256 内容真相）。源已删除的受管文件隔离到 `TMP\_sync_removed_<时间戳>`。
+6. **冲突保护**：副本本地改过（哈希≠状态）的文件默认整体停止并列出；`-AcceptSource` 才覆盖（仍备份）。
+7. **同步 ≠ 部署完成**：前端输入/依赖清单/迁移变化时引擎会打印部署提示，需另行构建/核对依赖/评估迁移。
 
 ### 换机器 clone 后必做一步
 
@@ -159,11 +164,19 @@ node scripts/setup-git-hooks.mjs
 | HTTP / HTTPS | 80 / 443 | 8080 / 8443 |
 | my_app 后端 / 前端 | 7038 / 7090 | 7039 / 7091 |
 | 门户 / bot / 分析 | 9267 / 9269 / 9268 | 9277 / 9279 / 9278 |
+| 实时代理 FMS / VMAX | 8787 / 8790 | 8887 / 8890 |
 | PostgreSQL | 5432 | 55432 |
 
-根目录的 `ISOLATED_COPY.flag` 让 `my_portal_ctl.ps1` 拦截所有 start/stop 命令（防误停生产）。**转正为生产时**：改回生产端口 + 删除该 flag。
+根目录的 `ISOLATED_COPY.flag` 让 `my_portal_ctl.ps1` 拦截所有 start/stop 命令（防误停生产）；
+`start_all.ps1` / `sync-engine.mjs` / `bundle_data.ps1` 也都要求该标志存在。**转正为生产时**：改回生产端口 + 删除该 flag。
 
-> ⚠ 后端仍有约 52 处 `D:\01_RPA` 硬编码路径（SQLite 路径、`Scripts\python.exe`、`Task\_fe_dist`、`Task\eflow_Q&A`）。旧目录保留故能读，但部分服务仍会往旧目录写 → 数据分叉。转正前需收口。
+`start_all.ps1` 的隔离保障：副本 `.env` 优先于继承的进程环境（防生产污染）、拒绝任何落在生产端口上的配置、
+派生变量无条件按副本根覆盖、清除 `PYTHONPATH/PYTHONHOME/NODE_PATH`、强制 `MY_APP_DISABLE_SCHEDULER=1` 与
+`START_WA_BOT=0`（不接管真实 WhatsApp 会话/投递）、启动前预检核心入口、PG 写入前校验 `data_directory` 属于副本。
+实时代理控制器按「进程命令行含本副本脚本绝对路径」验归属，**绝不复用或击杀生产 8787/8790 代理**。
+
+> 源码侧的 `D:\01_RPA` 硬编码路径已于 2026-11-11 收口：业务数据目录、邮件/代理解释器（`sys.executable`）、
+> 前端产物目录（`FE_DIST_OUT`/相对路径）、Chrome、cn_ems 模板、eflow 问答工具均改为按副本位置定位或 env 覆盖。
 
 ---
 

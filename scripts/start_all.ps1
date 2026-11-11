@@ -74,8 +74,8 @@ if (-not $DryRun -and -not (Test-Path -LiteralPath $TmpDir)) {
 }
 
 # ---------------------------------------------------------------- .env 载入
-# 规则与 env_template.txt 的注释一致：已在进程/系统里存在的同名变量优先，
-# 所以可临时用 $env:XXX 覆盖而不改文件；模板里的空值表示「由本脚本派生」。
+# 隔离原则：副本根 .env 是唯一配置真相源，**优先于**继承的进程/系统环境变量。
+# 否则在生产机本机试跑时，父进程里的生产端口/路径会污染副本，抢生产服务。
 function Import-DotEnv {
     param([string]$Path)
     $cfg = @{}
@@ -103,9 +103,9 @@ $cfg = Import-DotEnv $envFile
 
 function Get-Cfg {
     param([string]$Key, [string]$Default = '')
+    if ($cfg.ContainsKey($Key) -and $cfg[$Key]) { return $cfg[$Key] }
     $existing = [Environment]::GetEnvironmentVariable($Key, 'Process')
     if ($existing) { return $existing }
-    if ($cfg.ContainsKey($Key) -and $cfg[$Key]) { return $cfg[$Key] }
     return $Default
 }
 function Set-Cfg {
@@ -113,19 +113,29 @@ function Set-Cfg {
     [Environment]::SetEnvironmentVariable($Key, $Value, 'Process')
 }
 
-$HttpPort = [int](Get-Cfg 'NGINX_HTTP_PORT' '80')
-$HttpsPort = [int](Get-Cfg 'NGINX_HTTPS_PORT' '443')
-$BePort = [int](Get-Cfg 'MY_APP_BE_PORT' '7038')
-$FePort = [int](Get-Cfg 'MY_APP_FE_PORT' '7090')
-$PortalPort = [int](Get-Cfg 'PORTAL_PORT' '9267')
+$HttpPort = [int](Get-Cfg 'NGINX_HTTP_PORT' '8080')
+$HttpsPort = [int](Get-Cfg 'NGINX_HTTPS_PORT' '8443')
+$BePort = [int](Get-Cfg 'MY_APP_BE_PORT' '7039')
+$FePort = [int](Get-Cfg 'MY_APP_FE_PORT' '7091')
+$PortalPort = [int](Get-Cfg 'PORTAL_PORT' '9277')
 $PgPort = [int](Get-Cfg 'PGPORT' '55432')
-$QaPort = [int](Get-Cfg 'QA_HTTP_PORT' '9269')
-$WaAnalysisPort = [int](Get-Cfg 'WA_ANALYSIS_PORT' '9268')
+$QaPort = [int](Get-Cfg 'QA_HTTP_PORT' '9279')
+$WaAnalysisPort = [int](Get-Cfg 'WA_ANALYSIS_PORT' '9278')
+$FmsProxyPort = [int](Get-Cfg 'MY_APP_PROXY_FMS_PORT' '8887')
+$VmaxProxyPort = [int](Get-Cfg 'MY_APP_PROXY_VMAX_PORT' '8890')
 $PgUser = Get-Cfg 'MY_APP_DB_USER' 'myapp'
 $PgDb = Get-Cfg 'MY_APP_DB_NAME' 'myapp'
 if ($PgUser -notmatch '^[A-Za-z0-9_]+$' -or $PgDb -notmatch '^[A-Za-z0-9_]+$') {
     throw 'MY_APP_DB_USER / MY_APP_DB_NAME 只允许字母数字下划线（会被拼进 psql 命令）'
 }
+# 隔离熔断：副本端口绝不允许落在生产端口上，且彼此不得重复。
+$prodPorts = @(80, 443, 7038, 7090, 9267, 9268, 9269, 5432, 8787, 8790)
+$allPorts = @($HttpPort, $HttpsPort, $BePort, $FePort, $PortalPort, $PgPort, $QaPort, $WaAnalysisPort, $FmsProxyPort, $VmaxProxyPort)
+foreach ($p in $allPorts) {
+    if ($prodPorts -contains $p) { throw "副本端口 $p 与生产端口冲突，请在副本 .env 改到隔离端口后再启动" }
+}
+$dupPorts = $allPorts | Group-Object | Where-Object { $_.Count -gt 1 }
+if ($dupPorts) { throw "副本端口配置有重复: $(($dupPorts | ForEach-Object { $_.Name }) -join ',')" }
 
 # ------------------------------------------------------- 派生变量（盘符无关）
 $PgData = Join-Path $RuntimeDir 'pgdata'
@@ -154,20 +164,38 @@ $derived = [ordered]@{
     'PORT' = [string]$PortalPort
     'PORTAL_HOST' = '127.0.0.1'
     'PGHOSTADDR' = '127.0.0.1'
+    'PGPORT' = [string]$PgPort
+    # 实时代理隔离：副本用独立端口与自带解释器，绝不复用/击杀生产 8787/8790。
+    'MY_APP_PROXY_FMS_PORT' = [string]$FmsProxyPort
+    'MY_APP_PROXY_VMAX_PORT' = [string]$VmaxProxyPort
+    'MY_APP_PROXY_PY' = $PyExe
+    'MY_APP_REPORT_PY' = $PyExe
+    # eflow 问答知识库：指向副本同级目录（inspect_tt 等工具据此定位 app.db）。
+    'EFLOW_QA_DIR' = (Join-Path $Root 'Task\eflow_Q&A')
 }
-foreach ($k in $derived.Keys) {
-    if (-not [Environment]::GetEnvironmentVariable($k, 'Process')) { Set-Cfg $k $derived[$k] }
-}
+# 无条件覆盖：派生值必须由副本根推导，不能被父进程残留的生产值顶掉。
+foreach ($k in $derived.Keys) { Set-Cfg $k $derived[$k] }
 
 # 安全熔断：副本必须禁用调度器，不允许被 .env 改回 0
 if ((Get-Cfg 'MY_APP_DISABLE_SCHEDULER' '1') -ne '1') {
     Write-Warn2 '.env 里 MY_APP_DISABLE_SCHEDULER != 1，已强制改回 1（副本禁止连生产采集上游）'
 }
+$cfg['MY_APP_DISABLE_SCHEDULER'] = '1'
 Set-Cfg 'MY_APP_DISABLE_SCHEDULER' '1'
 Remove-Item Env:\MY_APP_TASK_QUEUE -ErrorAction SilentlyContinue
+# 副本绝不接管真实 WhatsApp 会话/投递：即使 .env 误设 1 也强制关（需时另行扫码）。
+$cfg['START_WA_BOT'] = '0'
+Set-Cfg 'START_WA_BOT' '0'
+# 清除可能让副本解释器加载源仓库模块/依赖的环境污染。
+foreach ($k in @('PYTHONPATH', 'PYTHONHOME', 'NODE_PATH')) {
+    Remove-Item "Env:\$k" -ErrorAction SilentlyContinue
+}
 
-# 让子进程用副本自带解释器（其余 PATH 保留，避免影响 psql 之类外部命令）
-$env:PATH = '{0};{1};{2}' -f (Split-Path $NodeExe -Parent), (Split-Path $PyExe -Parent), $env:PATH
+# 子进程优先用副本自带解释器；PATH 剔除指向源仓库（\01_RPA\）的条目，避免误用源 venv。
+$copyNodeDir = Split-Path $NodeExe -Parent
+$copyPyDir = Split-Path $PyExe -Parent
+$pathParts = @($env:PATH -split ';' | Where-Object { $_ -and ($_ -notmatch '\\01_RPA\\') })
+$env:PATH = (@($copyNodeDir, $copyPyDir) + $pathParts) -join ';'
 
 # backend\.env 只写本地 trust 连接串，不含任何真实口令；已存在则不覆盖（使用者可能自己改过）
 $backendEnv = Join-Path $MyAppDir 'backend\.env'
@@ -216,7 +244,8 @@ function Save-Pid {
     [System.IO.File]::WriteAllText((Get-PidFile $Name), "$ProcessId|$($p.ProcessName)|$ticks")
 }
 
-# 按 pid 文件判定「本副本上一轮是否已起过」，避免重复启动，也避免抢别人的端口
+# 按 pid 文件判定「本副本上一轮是否已起过」，避免重复启动，也避免抢别人的端口。
+# 外部占用一律抛错停止（绝不假成功、绝不抢端口、绝不杀生产进程）。
 function Test-OwnPort {
     param([string]$Name, [int]$Port)
     if (-not (Test-PortListening $Port)) { return $false }
@@ -226,13 +255,15 @@ function Test-OwnPort {
         if ($parts.Count -eq 3) {
             $p = Get-Process -Id ([int]$parts[0]) -ErrorAction SilentlyContinue
             if ($p -and $p.ProcessName -eq $parts[1] -and $p.StartTime.Ticks -eq [long]$parts[2]) {
-                Write-Skip "$Name 已由本副本启动（pid=$($parts[0])），端口 $Port 不重复拉起"
-                return $true
+                $exe = try { $p.Path } catch { '' }
+                if ($exe -and $exe.StartsWith($Root, [StringComparison]::OrdinalIgnoreCase)) {
+                    Write-Skip "$Name 已由本副本启动（pid=$($parts[0])），端口 $Port 不重复拉起"
+                    return $true
+                }
             }
         }
     }
-    Write-Warn2 "端口 $Port 已被外部进程占用，$Name 跳过启动（绝不抢端口、绝不杀生产进程）"
-    return $true
+    throw "端口 $Port 被外部进程占用（非本副本 $Name），拒绝启动以免抢占生产服务。请先释放该端口或改副本 .env。"
 }
 
 function Start-Detached {
@@ -266,6 +297,29 @@ function Start-Detached {
     Write-Ok "$Name 已启动 (pid=$($proc.Id))"
     return $true
 }
+
+# ------------------------------------------------------------- 0) 启动预检
+# 先验隔离标志与所有核心入口，避免起了一半才发现缺文件（部分启动会留下脏端口）。
+if (-not (Test-Path -LiteralPath (Join-Path $Root 'ISOLATED_COPY.flag'))) {
+    throw '缺 ISOLATED_COPY.flag：本脚本只能在便携副本里运行，拒绝在主仓库启动'
+}
+$preflight = @(
+    @{ Name = 'Python 解释器'; Path = $PyExe },
+    @{ Name = 'Node 解释器'; Path = $NodeExe },
+    @{ Name = 'my_app 后端入口'; Path = (Join-Path $MyAppDir 'backend\main.py') },
+    @{ Name = '前端 vite'; Path = (Join-Path $FeDir 'node_modules\vite\bin\vite.js') },
+    @{ Name = '便携 PG pg_ctl'; Path = (Join-Path $PgBin 'pg_ctl.exe') }
+)
+if ($PortalRoot) {
+    $preflight += @{ Name = '门户 tsx'; Path = (Join-Path $PortalRoot 'node_modules\tsx\dist\cli.mjs') }
+}
+foreach ($item in $preflight) {
+    if (-not (Test-Path -LiteralPath $item.Path)) {
+        if ($DryRun) { Write-Warn2 "预检缺 $($item.Name) -> $($item.Path)" }
+        else { throw "启动预检失败：缺 $($item.Name) -> $($item.Path)（请先补齐依赖/运行时）" }
+    }
+}
+if (-not $DryRun) { Write-Ok '启动预检通过（隔离标志 + 核心解释器/入口齐全）' }
 
 # ------------------------------------------------------------- 1) 便携 PG
 Write-Step '--- 1/6 便携 PostgreSQL ---'
@@ -309,6 +363,15 @@ if (-not (Test-Path -LiteralPath $pgCtl)) {
             Start-Sleep -Milliseconds 500
         }
         if (-not $pgReady) { throw "便携 PG 未在 30s 内进入可连接状态，见 $pgLog" }
+        # 写入前确认连上的就是副本自己的 PG 实例：data_directory 必须等于副本 pgdata，
+        # 否则可能连到本机别的 PG（含生产），拒绝任何建库/写入。
+        $dataDir = "$(& $psql -w -h 127.0.0.1 -p $PgPort -U $PgUser -d postgres -tAc 'SHOW data_directory' 2>$null)".Trim()
+        $expectDir = (Resolve-Path -LiteralPath $PgData).Path
+        $ddNorm = ($dataDir -replace '/', '\').TrimEnd('\').ToLowerInvariant()
+        $expNorm = ($expectDir -replace '/', '\').TrimEnd('\').ToLowerInvariant()
+        if ($ddNorm -ne $expNorm) {
+            throw "便携 PG data_directory 不符（实际 '$dataDir'，期望 '$expectDir'）：可能连到别的实例，拒绝写入"
+        }
         $dbExists = & $psql -w -h 127.0.0.1 -p $PgPort -U $PgUser -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='$PgDb'" 2>$null
         if (-not $dbExists) {
             $createdb = Join-Path $PgBin 'createdb.exe'
@@ -336,23 +399,26 @@ if ($startNginx -and -not $SkipNginxConf) {
 
 # ------------------------------------------------------------- 3) my_app 后端
 Write-Step '--- 3/6 my_app 后端 ---'
-$null = Start-Detached -Name 'backend' -Exe $PyExe `
+$ok = Start-Detached -Name 'backend' -Exe $PyExe `
     -ArgList @('-m', 'uvicorn', 'backend.main:app', '--host', '127.0.0.1', '--port', [string]$BePort) `
     -WorkDir $MyAppDir -Port $BePort -WaitSeconds 45
+if (-not $ok) { throw 'my_app 后端启动失败（见 TMP\portable-backend.err / .out）' }
 
 # ------------------------------------------------------------- 4) my_app 前端
 Write-Step '--- 4/6 my_app 前端（vite preview） ---'
 $viteCli = Join-Path $FeDir 'node_modules\vite\bin\vite.js'
-$null = Start-Detached -Name 'frontend' -Exe $NodeExe `
+$ok = Start-Detached -Name 'frontend' -Exe $NodeExe `
     -ArgList @($viteCli, 'preview', '--host', '127.0.0.1', '--port', [string]$FePort, '--strictPort') `
     -WorkDir $FeDir -Port $FePort -WaitSeconds 30
+if (-not $ok) { throw 'my_app 前端启动失败（见 TMP\portable-frontend.err / .out）' }
 
 # ----------------------------------------------------------------- 5) 门户
 Write-Step '--- 5/6 统一门户 + 可选服务 ---'
 if ($PortalRoot) {
     $tsxCli = Join-Path $PortalRoot 'node_modules\tsx\dist\cli.mjs'
-    $null = Start-Detached -Name 'portal' -Exe $NodeExe `
+    $ok = Start-Detached -Name 'portal' -Exe $NodeExe `
         -ArgList @($tsxCli, 'server/index.ts') -WorkDir $PortalRoot -Port $PortalPort -WaitSeconds 30
+    if (-not $ok) { throw '统一门户启动失败（见 TMP\portable-portal.err / .out）' }
 } else {
     Write-Warn2 '未找到门户目录（liberia-noc_soc-*），门户步骤跳过'
 }
@@ -361,9 +427,14 @@ if ((Get-Cfg 'START_WA_ANALYSIS' '0') -eq '1') {
     $waDir = Join-Path $Root 'liberia-noc_soc-数据看板统一门户\scripts\whatsapp_analysis'
     $waCli = Join-Path $waDir 'node_modules\tsx\dist\cli.mjs'
     if (Test-Path -LiteralPath $waCli) {
-        $null = Start-Detached -Name 'wa_analysis' -Exe $NodeExe `
+        # 分析服务读 PORT；临时改成自己的端口，避免继承门户 PORT 而撞端口。
+        $prevPort = [Environment]::GetEnvironmentVariable('PORT', 'Process')
+        Set-Cfg 'PORT' ([string]$WaAnalysisPort)
+        $ok = Start-Detached -Name 'wa_analysis' -Exe $NodeExe `
             -ArgList @($waCli, 'server/index.ts') -WorkDir $waDir -Port $WaAnalysisPort -WaitSeconds 25
-    } else { Write-Warn2 '9268 分析服务依赖缺失，跳过' }
+        if ($prevPort) { Set-Cfg 'PORT' $prevPort } else { Remove-Item Env:\PORT -ErrorAction SilentlyContinue }
+        if (-not $ok) { throw 'WhatsApp 分析服务启动失败（见 TMP\portable-wa_analysis.err）' }
+    } else { Write-Warn2 '分析服务依赖缺失，跳过' }
 }
 
 if ((Get-Cfg 'START_WA_BOT' '0') -eq '1') {

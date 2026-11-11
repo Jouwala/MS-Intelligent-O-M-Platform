@@ -23,9 +23,9 @@
 [CmdletBinding()]
 param(
     [string]$MainRepo = 'D:\01_RPA',
-    [string]$CopyRoot = 'D:\01_olbr_portal',
+    [string]$CopyRoot = '',
     [string]$SourceEnv = '',
-    [string]$PgBin = 'C:\Program Files\PostgreSQL\16\bin',
+    [string]$PgBin = '',
     [ValidateSet('all', 'dump', 'restore')]
     [string]$Stage = 'all',
     [string]$DumpFile = '',
@@ -45,8 +45,23 @@ foreach ($k in @($dupEnv.Keys)) {
     }
 }
 
+# 副本根默认按脚本位置推导（盘符无关）；PG 工具默认用副本自带的便携实例。
+if (-not $CopyRoot) { $CopyRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path }
+$CopyRoot = (Resolve-Path -LiteralPath $CopyRoot).Path
+if (-not $PgBin) { $PgBin = Join-Path $CopyRoot 'runtime\postgresql16\bin' }
+# 隔离边界：只允许对带隔离标志的副本灌库，且源/副本路径不得重叠。
+if (-not (Test-Path -LiteralPath (Join-Path $CopyRoot 'ISOLATED_COPY.flag'))) {
+    throw "副本缺 ISOLATED_COPY.flag，拒绝灌库：$CopyRoot"
+}
+$copyReal = [System.IO.Path]::GetFullPath($CopyRoot).TrimEnd('\')
+$mainReal = [System.IO.Path]::GetFullPath($MainRepo).TrimEnd('\')
+if ($copyReal -ieq $mainReal -or $copyReal.StartsWith($mainReal + '\', [StringComparison]::OrdinalIgnoreCase) -or $mainReal.StartsWith($copyReal + '\', [StringComparison]::OrdinalIgnoreCase)) {
+    throw '源与副本路径重叠，拒绝操作'
+}
+
 if (-not $SourceEnv) { $SourceEnv = Join-Path $MainRepo 'Task\my_app\backend\.env' }
-if (-not $DumpFile) { $DumpFile = Join-Path $CopyRoot 'TMP\myapp_snapshot.dump' }
+# 快照名带时间戳，绝不覆盖已有快照（旧快照是回滚手段）。
+if (-not $DumpFile) { $DumpFile = Join-Path $CopyRoot ('TMP\myapp_snapshot_' + (Get-Date -Format 'yyyyMMdd_HHmmss') + '.dump') }
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
 function Write-Step { param([string]$m) Write-Host "[*] $m" }
@@ -70,6 +85,7 @@ $TgtDb = Get-CopyCfg 'MY_APP_DB_NAME' 'myapp'
 if ($TgtUser -notmatch '^[A-Za-z0-9_]+$' -or $TgtDb -notmatch '^[A-Za-z0-9_]+$') {
     throw '副本 .env 的 MY_APP_DB_USER / MY_APP_DB_NAME 只允许字母数字下划线'
 }
+if ($TgtPort -eq 5432) { throw '副本 PGPORT 不得用生产端口 5432，请在副本 .env 改到隔离端口' }
 
 function Invoke-Dump {
     Write-Step '=== 阶段 dump：从生产 PG 导出 ==='
@@ -90,11 +106,12 @@ function Invoke-Dump {
     $srcDb = $m.Groups['db'].Value
     $pgDump = Join-Path $PgBin 'pg_dump.exe'
     if (-not (Test-Path -LiteralPath $pgDump)) { throw "缺 pg_dump.exe：$pgDump（用 -PgBin 指定 PostgreSQL 16 的 bin）" }
-    $dumpDir = Split-Path -Parent $DumpFile
-    if (-not (Test-Path -LiteralPath $dumpDir)) { New-Item -ItemType Directory -Path $dumpDir -Force | Out-Null }
-
     Write-Step ("源库：{0}:{1}/{2}（连接串含口令，不打印）" -f $srcHost, $srcPort, $srcDb)
     if ($DryRun) { Write-Step "<干跑> pg_dump -Fc -> $DumpFile"; return }
+    if (Test-Path -LiteralPath $DumpFile) { throw "快照已存在，拒绝覆盖：$DumpFile（请换 -DumpFile 或先移走旧快照）" }
+    $dumpDir = Split-Path -Parent $DumpFile
+    if (-not (Test-Path -LiteralPath $dumpDir)) { New-Item -ItemType Directory -Path $dumpDir -Force | Out-Null }
+    $prevPgPassword = [Environment]::GetEnvironmentVariable('PGPASSWORD', 'Process')
     try {
         # native stderr 在 PS 5.1 会变成 ErrorRecord，pg_dump 的一条告警就可能中断导出
         $prevEapDump = $ErrorActionPreference
@@ -111,7 +128,8 @@ function Invoke-Dump {
         $srcSearchPath = & (Join-Path $PgBin 'psql.exe') -w -h $srcHost -p $srcPort `
             -U $srcUser -d $srcDb -tAc 'SHOW search_path' 2>$null
     } finally {
-        Remove-Item Env:\PGPASSWORD -ErrorAction SilentlyContinue
+        if ($null -ne $prevPgPassword) { $env:PGPASSWORD = $prevPgPassword }
+        else { Remove-Item Env:\PGPASSWORD -ErrorAction SilentlyContinue }
         [void]$srcPass
         $ErrorActionPreference = $prevEapDump
     }
@@ -175,17 +193,31 @@ function Invoke-Restore {
             Start-Sleep -Milliseconds 500
         }
         if (-not $ready) { throw "便携 PG 未在 30s 内进入可连接状态，见 $pgLog" }
+        # 写入前确认连上的就是副本 pgdata 实例（防连到本机别的 PG，含生产）。
+        $dataDir = "$(& $psql -w -h 127.0.0.1 -p $TgtPort -U $TgtUser -d postgres -tAc 'SHOW data_directory' 2>$null)".Trim()
+        $ddNorm = ($dataDir -replace '/', '\').TrimEnd('\').ToLowerInvariant()
+        $expNorm = ((Resolve-Path -LiteralPath $pgData).Path -replace '/', '\').TrimEnd('\').ToLowerInvariant()
+        if ($ddNorm -ne $expNorm) { throw "便携 PG data_directory 不符（实际 '$dataDir'，期望 '$pgData'），拒绝灌库" }
 
         $exists = & $psql -w -h 127.0.0.1 -p $TgtPort -U $TgtUser -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='$TgtDb'" 2>$null
         if (-not $exists) {
             & $createdb -h 127.0.0.1 -p $TgtPort -U $TgtUser $TgtDb 2>&1 | ForEach-Object { Write-Host "  $_" }
+            if ($LASTEXITCODE -ne 0) { throw "createdb 失败（exit=$LASTEXITCODE）" }
+        } else {
+            # 目标库已存在：导入前先一致备份（回滚手段），备份失败则拒绝继续。
+            $backupFile = Join-Path $CopyRoot ('TMP\_pre_restore_' + (Get-Date -Format 'yyyyMMdd_HHmmss') + '.dump')
+            Write-Step "目标库已存在，先备份 -> $backupFile"
+            & (Join-Path $bin 'pg_dump.exe') -Fc -h 127.0.0.1 -p $TgtPort -U $TgtUser -d $TgtDb -f $backupFile 2>&1 |
+                ForEach-Object { Write-Host "  $_" }
+            if ($LASTEXITCODE -ne 0) { throw "导入前备份失败（exit=$LASTEXITCODE），拒绝继续以免丢失副本现有数据" }
+            Write-Ok "已备份副本现有库：$backupFile"
         }
-        # --no-owner / --no-privileges：生产侧的 role 在副本不存在，否则恢复会一路报错
-        & $pgRestore --clean --if-exists --no-owner --no-privileges `
+        # --single-transaction --exit-on-error：要么整体成功要么整体回滚，绝不灌半套数据。
+        & $pgRestore --clean --if-exists --single-transaction --exit-on-error --no-owner --no-privileges `
             -h 127.0.0.1 -p $TgtPort -U $TgtUser -d $TgtDb $DumpFile 2>&1 |
             ForEach-Object { Write-Host "  $_" }
         if ($LASTEXITCODE -ne 0) {
-            Write-Warn2 "pg_restore 返回 exit=$LASTEXITCODE（--clean 下对象不存在会产生无害报错，请核对下方行数）"
+            throw "pg_restore 失败（exit=$LASTEXITCODE），事务已回滚；副本原有数据仍在导入前备份中"
         }
 
         # 补回 role 级 search_path：pg_dump 不含 cluster 级 role 配置，缺了它
@@ -194,8 +226,11 @@ function Invoke-Restore {
         $sp = ''
         if (Test-Path -LiteralPath $spFile) { $sp = ([System.IO.File]::ReadAllText($spFile)).Trim() }
         if (-not $sp) { $sp = 'app, eflow, lte_pl, battery, ms_sla, fw, ipran_ume, ran_ume, public' }
+        # search_path 会被拼进 ALTER ROLE，只允许 schema 标识符字符，杜绝注入。
+        if ($sp -notmatch '^[A-Za-z0-9_, "$]+$') { throw "search_path 含非法字符，拒绝设置：$sp" }
         & $psql -w -h 127.0.0.1 -p $TgtPort -U $TgtUser -d postgres -tAc "ALTER ROLE $TgtUser SET search_path = $sp" 2>&1 |
             ForEach-Object { Write-Host "  $_" }
+        if ($LASTEXITCODE -ne 0) { throw "设置 role search_path 失败（exit=$LASTEXITCODE）" }
         Write-Ok ("已设置副本 role search_path = {0}" -f $sp)
 
         # 生产库业务表分散在多个 schema，只数 public 会恒为 0、误导验收

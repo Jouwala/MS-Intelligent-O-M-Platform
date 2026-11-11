@@ -49,22 +49,23 @@ if (Test-Path -LiteralPath $envPath) {
     }
 }
 
-# 端口：显式参数 > 进程环境变量 > 副本 .env > 生产默认值
+# 端口：显式参数 > 副本 .env > 进程环境变量 > 隔离默认值。
+# .env 优先于进程环境：避免在生产机本机展开时继承到生产端口而错配。
 function Resolve-Port {
     param([int]$Explicit, [string]$EnvName, [int]$Default)
     if ($Explicit -gt 0) { return $Explicit }
-    $v = [Environment]::GetEnvironmentVariable($EnvName, 'Process')
-    if ($v -and $v -match '^\d+$') { return [int]$v }
     if ($envCfg.ContainsKey($EnvName) -and $envCfg[$EnvName] -match '^\d+$') {
         return [int]$envCfg[$EnvName]
     }
+    $v = [Environment]::GetEnvironmentVariable($EnvName, 'Process')
+    if ($v -and $v -match '^\d+$') { return [int]$v }
     return $Default
 }
-$HttpPort   = Resolve-Port $HttpPort   'NGINX_HTTP_PORT'   80
-$HttpsPort  = Resolve-Port $HttpsPort  'NGINX_HTTPS_PORT'  443
-$BePort     = Resolve-Port $BePort     'MY_APP_BE_PORT'   7038
-$FePort     = Resolve-Port $FePort     'MY_APP_FE_PORT'   7090
-$PortalPort = Resolve-Port $PortalPort 'PORTAL_PORT'      9267
+$HttpPort   = Resolve-Port $HttpPort   'NGINX_HTTP_PORT'   8080
+$HttpsPort  = Resolve-Port $HttpsPort  'NGINX_HTTPS_PORT'  8443
+$BePort     = Resolve-Port $BePort     'MY_APP_BE_PORT'   7039
+$FePort     = Resolve-Port $FePort     'MY_APP_FE_PORT'   7091
+$PortalPort = Resolve-Port $PortalPort 'PORTAL_PORT'      9277
 
 $nginxDir = Join-Path $Root 'nginx-1.28.0'
 $tplPath  = Join-Path $Root 'nginx.conf.template'

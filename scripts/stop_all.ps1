@@ -80,12 +80,25 @@ Write-Host ''
 Write-Step '--- 1/7 nginx ---'
 $nginxPidFile = Join-Path $NginxDir 'logs\nginx.pid'
 if ((Test-Path -LiteralPath $NginxExe) -and (Test-Path -LiteralPath $nginxPidFile)) {
-    if ($DryRun) { Write-Step '<干跑> 将执行 nginx -s quit' }
-    else {
-        & $NginxExe -s quit -p "$NginxDir\" 2>&1 | ForEach-Object { Write-Host "  $_" }
-        Write-Ok 'nginx -s quit 已发出'
-        Start-Sleep -Milliseconds 800
+    # 先校验 nginx.pid 指向的进程确属副本（exe 在副本根下），再发 -s quit；
+    # stale pid 可能被系统复用，盲发信号会误伤无关进程。
+    $npid = ([System.IO.File]::ReadAllText($nginxPidFile)).Trim()
+    $trusted = $false
+    if ($npid -match '^\d+$') {
+        $p = Get-Process -Id ([int]$npid) -ErrorAction SilentlyContinue
+        if ($p) {
+            $exe = try { $p.Path } catch { '' }
+            if ($exe -and $exe.StartsWith($Root, [StringComparison]::OrdinalIgnoreCase)) { $trusted = $true }
+        }
     }
+    if ($trusted) {
+        if ($DryRun) { Write-Step '<干跑> 将执行 nginx -s quit' }
+        else {
+            & $NginxExe -s quit -p "$NginxDir\" 2>&1 | ForEach-Object { Write-Host "  $_" }
+            Write-Ok 'nginx -s quit 已发出'
+            Start-Sleep -Milliseconds 800
+        }
+    } else { Write-Skip 'nginx.pid 不可信（进程不存在或不属于副本），跳过 -s quit' }
 } else { Write-Skip 'nginx 未运行（无 nginx.pid）' }
 Stop-One 'nginx'
 

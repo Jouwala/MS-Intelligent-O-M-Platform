@@ -2,8 +2,8 @@
 # env_template.txt —— 离线副本的唯一配置入口
 # -----------------------------------------------------------------------------
 # 用法：把本文件复制成副本根目录的 .env（start_all.ps1 会自动做），按需改值。
-#       start_all.ps1 逐行读入并设为进程环境变量；**已在系统/会话里存在的同名
-#       变量优先**，所以也可以临时用 $env:XXX 覆盖而不改文件。
+#       start_all.ps1 逐行读入；**副本 .env 优先于继承的进程/系统环境变量**，
+#       以免在生产机本机试跑时被父进程的生产端口/路径污染。
 #
 # 格式：KEY=VALUE，一行一个；# 开头是注释；值不要加引号（会被当成值的一部分）。
 #
@@ -12,27 +12,30 @@
 # =============================================================================
 
 # ---- 端口 -------------------------------------------------------------------
-# 默认值与生产一致，方便对照。在**生产机器本机**试跑副本时必须整体改到别的端口，
-# 否则会抢生产的 7038/7090/9267/80/5432。改端口只需改这里，nginx 配置会自动跟着变。
-NGINX_HTTP_PORT=80
-# 副本同时监听 443，保留 https://localhost/ 入口（自签证书，浏览器会提示不信任，属预期）
-NGINX_HTTPS_PORT=443
-MY_APP_BE_PORT=7038
-MY_APP_FE_PORT=7090
-PORTAL_PORT=9267
+# 默认即隔离端口（与生产 80/443/7038/7090/9267/5432/8787/8790 完全错开），
+# 在生产机器本机试跑副本也不会抢生产服务。start_all.ps1 会拒绝任何落在生产端口上的配置。
+NGINX_HTTP_PORT=8080
+# 副本同时监听 8443，保留 https://localhost:8443/ 入口（自签证书，浏览器会提示不信任，属预期）
+NGINX_HTTPS_PORT=8443
+MY_APP_BE_PORT=7039
+MY_APP_FE_PORT=7091
+PORTAL_PORT=9277
 # 副本自带的便携 PostgreSQL，刻意不用 5432，避免与本机已装的 PG 服务冲突
 PGPORT=55432
 # WhatsApp bot 的 HTTP 问答服务（只绑回环，由 my_app 后端按需拉起）
-BOT_HTTP_PORT=9269
+BOT_HTTP_PORT=9279
 # my_app「WhatsApp 分析」页依赖的独立服务（scripts/whatsapp_analysis）
-WA_ANALYSIS_PORT=9268
+WA_ANALYSIS_PORT=9278
+# 实时代理隔离端口：生产用 8787(FMS)/8790(VMAX)，副本必须不同，绝不复用/击杀生产代理。
+MY_APP_PROXY_FMS_PORT=8887
+MY_APP_PROXY_VMAX_PORT=8890
 
 # ---- my_app -----------------------------------------------------------------
 # pg = 用副本自带的便携 PostgreSQL（推荐，快照就是按它做的）
 # sqlite = 回退到 db/app.db；⚠ 副本**不带** app.db（2.58G），且部分路由硬编码了
 #          d:\01_RPA\... 的 sqlite 路径，换机会失效。除非另行准备数据，否则别改。
 MY_APP_DB_MODE=pg
-MY_APP_BACKEND_PORT=7038
+MY_APP_BACKEND_PORT=7039
 # 1 = 不启动 APScheduler。副本必须保持 1：否则采集任务会去连生产上游、
 #     并可能重复投递 WhatsApp/邮件告警（这是分发副本最大的副作用风险）。
 MY_APP_DISABLE_SCHEDULER=1
@@ -80,15 +83,15 @@ OPENWEBUI_API_KEY=
 CHAT_API_KEY=
 
 QA_HTTP_HOST=127.0.0.1
-QA_HTTP_PORT=9269
+QA_HTTP_PORT=9279
 
 # ---- my_app 侧的问答接线 ----------------------------------------------------
-PORTAL_QA_PORT=9269
+PORTAL_QA_PORT=9279
 # node 解释器绝对路径。留空则由 start_all.ps1 填成 <副本根>\runtime\node\node.exe
 PORTAL_QA_NODE=
 # bot 目录由 portal_qa_ctl.py:39 推导为 my_app 的同级目录 whatsapp-kb-bot，
 # 无环境变量可覆盖 —— 所以副本必须保持 Task\my_app 与 Task\whatsapp-kb-bot 同级。
-MY_APP_API_BASE=http://127.0.0.1:7038
+MY_APP_API_BASE=http://127.0.0.1:7039
 
 # ---- WhatsApp 发图服务（my_app 任务用，副本默认不跑）------------------------
 # 留空则用源码默认值。⚠ CHROME_PATH 默认指向 D:\01_RPA\chrome-win\...，
