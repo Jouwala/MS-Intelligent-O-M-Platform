@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { GROUPS, STATE, FIX_TARGETS, groupFor, allowedFile, allowedDirectory, relativeName, portableContent, deploymentNeeds } from './sync-policy.mjs';
+import { GROUPS, ROOT_FILES, STATE, FIX_TARGETS, groupFor, allowedFile, allowedDirectory, relativeName, portableContent, deploymentNeeds } from './sync-policy.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const argv = process.argv.slice(2);
@@ -22,7 +22,8 @@ const readStrip = p => fs.readFileSync(p, 'utf8').replace(/^\uFEFF/, '');
 function fail(msg, code = 1) { console.error('[ABORT] ' + msg); process.exit(code); }
 
 // ---- 边界校验 ----
-if (!fs.existsSync(path.join(target, 'ISOLATED_COPY.flag'))) fail('目标缺 ISOLATED_COPY.flag，拒绝同步（防误写主仓库）', 2);
+// 2026-11-11 起副本已接管 80/443，ISOLATED_COPY.flag 按转正步骤删掉了。
+// 防误写只靠下面的「源≠目标、互不嵌套」；不能再拿隔离旗当同步开关。
 const tReal = fs.realpathSync.native(target);
 const sReal = fs.realpathSync.native(source);
 if (tReal.toLowerCase() === sReal.toLowerCase()) fail('源与目标相同', 2);
@@ -72,6 +73,11 @@ for (const g of GROUPS) {
   if (!fs.existsSync(root)) { log('[SKIP GROUP] 源缺 ' + g.root); continue; }
   walk(root, g.root, sourceRels);
 }
+// 根级文档（AGENTS.md 等）：显式点名，不靠遍历 —— 它们在副本根、不是任何 GROUP 的子目录。
+for (const f of ROOT_FILES) {
+  if (fs.existsSync(path.join(source, f))) sourceRels.push(f);
+  else log('[SKIP ROOT FILE] 源缺 ' + f);
+}
 const currentSet = new Set(sourceRels);
 
 // ---- 生成计划 ----
@@ -100,7 +106,8 @@ for (const rel of sourceRels) {
 for (const rel of Object.keys(state)) {
   if (currentSet.has(rel)) continue;
   const g = groupFor(rel);
-  if (!g || !allowedFile(rel)) continue;
+  // 根级文档没有 GROUP，但同样要参与「源已删除」的处理（见 ROOT_FILES 注释）。
+  if ((!g && !ROOT_FILES.includes(rel)) || !allowedFile(rel)) continue;
   const dst = path.join(target, rel);
   if (!fs.existsSync(dst)) continue;
   if (sha(fs.readFileSync(dst)) === state[rel]) deletes.push({ rel, dst });
