@@ -1778,6 +1778,11 @@ function AppContent() {
             }
           : {
               Table: { headerBg: '#f0f5fa', headerColor: '#334155', rowHoverBg: '#e8f4f2' },
+              // 2026-11-11 QA：colorPrimary 青色 #13c2c2 被 antd 直接用作激活页签文字色，
+              // 在浅灰底 #e9eef3 上对比度仅 1.89:1（WCAG AA 正文要求 ≥4.5:1）。
+              // 这里只改 Tabs 的选中文字色为 cyan-9 #006d75（实测 5.22:1），
+              // 下划线保留品牌青，不动全局 colorPrimary（按钮是白字在青底上，原本合规）。
+              Tabs: { itemSelectedColor: '#006d75', inkBarColor: '#13c2c2' },
             },
       }}
     >

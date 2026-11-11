@@ -1,4 +1,5 @@
-import { useEffect, useState, useRef, useCallback, useMemo } from 'react'
+import { useEffect, useState, useRef, useCallback, useMemo, cloneElement, isValidElement } from 'react'
+import type { ReactElement } from 'react'
 import { Card, Table, Select, Input, Tag, Spin, Tabs, Row, Col, Statistic, Progress, Descriptions, Badge, Button, Dropdown, message, Modal, Checkbox, Divider, Upload, Space, AutoComplete, Alert, Popover, Tooltip, Segmented } from 'antd'
 import { DownloadOutlined, SettingOutlined, SearchOutlined, UploadOutlined, FilterOutlined, FilterFilled, EyeInvisibleOutlined } from '@ant-design/icons'
 import ReactECharts from 'echarts-for-react'
@@ -607,7 +608,16 @@ export default function TableBrowser() {
               }}
               style={{ width: '100%' }}
               allowClear
-              enterButton
+              // antd 默认 enterButton 是纯图标按钮、没有可访问名称（读屏只报「button」）。
+              // 传自定义 Button 节点，cloneElement 分支会保留 aria-label 与 onClick。
+              enterButton={
+                <Button
+                  aria-label={t('table.searchBtnAria')}
+                  color="primary"
+                  variant="solid"
+                  icon={<SearchOutlined />}
+                />
+              }
             />
           </Col>
           {tableInfo && (
@@ -945,6 +955,16 @@ export default function TableBrowser() {
                         </ExplainPopover>
                       ),
                       onChange: (p) => loadTableData(p),
+                      // antd 的 prevIcon/nextIcon 是无名 button（title 只挂在 li 上），
+                      // 读屏聚焦到按钮时读不出用途。只给上一页/下一页补名称，其余原样。
+                      itemRender: (_page, type, originalElement) => {
+                        if ((type === 'prev' || type === 'next') && isValidElement(originalElement)) {
+                          return cloneElement(originalElement as ReactElement<{ 'aria-label'?: string }>, {
+                            'aria-label': t(type === 'prev' ? 'table.prevPageAria' : 'table.nextPageAria'),
+                          })
+                        }
+                        return originalElement
+                      },
                     }}
                   />
                 </div>
@@ -1014,6 +1034,11 @@ function ColumnFilterHeader({ col, table, active, onApply, onClear, onHide }: {
   const [options, setOptions] = useState<{ value: string; count: number }[]>([])
   const [optLoading, setOptLoading] = useState(false)
   const [optLoaded, setOptLoaded] = useState(false)
+  /* 候选值加载失败要显式报错 + 给重试入口（2026-11-11 QA）：
+     SPA 兜底曾把「接口没部署」返回成 200 + index.html，旧实现 .catch 静默成
+     「没有可选值」，用户无法区分「真的没数据」和「接口挂了」。 */
+  const [optError, setOptError] = useState(false)
+  const [optRetry, setOptRetry] = useState(0)
   const activeKey = active ? JSON.stringify(active) : ''
 
   // 外部（标签 × / 一键清空）改了筛选时同步面板草稿；面板正开着不打断输入。
@@ -1026,14 +1051,38 @@ function ColumnFilterHeader({ col, table, active, onApply, onClear, onHide }: {
   }, [activeKey, open])
 
   // 候选值按需加载一次（全表去重、按出现次数取前 200，口径在面板里注明）。
+  // ⚠️ 必须校验响应结构：后端 SPA 兜底会把「接口不存在」返回成 200 + index.html，
+  //    只写 .catch 是抓不到的（它根本不是失败请求）。非预期响应一律判为加载失败。
+  // ⚠️ 成败都要置 optLoaded：effect 依赖里有 optLoading，若失败时不置位，
+  //    finally 把 optLoading 复位后会立即重跑，形成无限请求风暴。
   useEffect(() => {
     if (!open || mode !== 'in' || optLoaded || optLoading || !table) return
     setOptLoading(true)
+    setOptError(false)
     api.get(`/tables/${encodeURIComponent(table)}/column-values`, { params: { column: col, limit: 200 } })
-      .then(res => { setOptions(res.data.values || []); setOptLoaded(true) })
-      .catch(() => setOptions([]))
+      .then(res => {
+        const vals = res?.data?.values
+        if (!Array.isArray(vals)) {
+          setOptions([])
+          setOptError(true)
+        } else {
+          setOptions(vals)
+        }
+        setOptLoaded(true)
+      })
+      .catch(() => {
+        setOptions([])
+        setOptError(true)
+        setOptLoaded(true)
+      })
       .finally(() => setOptLoading(false))
-  }, [open, mode, optLoaded, optLoading, table, col])
+  }, [open, mode, optLoaded, optLoading, table, col, optRetry])
+
+  const retryOptions = () => {
+    setOptLoaded(false)
+    setOptError(false)
+    setOptRetry(n => n + 1)
+  }
 
   const kw = optKw.trim().toLowerCase()
   const optionList = kw ? options.filter(o => o.value.toLowerCase().includes(kw)) : options
@@ -1091,7 +1140,12 @@ function ColumnFilterHeader({ col, table, active, onApply, onClear, onHide }: {
             allowClear
           />
           <div style={{ maxHeight: '11rem', overflow: 'auto', marginTop: 6, border: '1px solid var(--wh-subtle-border)', borderRadius: 'var(--wh-radius-sm)', padding: 'var(--wh-space-xs)' }}>
-            {optLoading ? (
+            {optError ? (
+              <div role="alert" style={{ color: 'var(--wh-text-dim)', textAlign: 'center', padding: 'var(--wh-space-xs)', fontSize: '0.8125rem' }}>
+                <div style={{ marginBottom: 6 }}>{t('table.colFilterLoadFailed')}</div>
+                <Button size="small" onClick={retryOptions}>{t('table.colFilterRetry')}</Button>
+              </div>
+            ) : optLoading ? (
               <Spin size="small" style={{ display: 'block', margin: '0.75rem auto' }} />
             ) : optionList.length === 0 ? (
               <div style={{ color: 'var(--wh-text-dim)', textAlign: 'center', padding: 'var(--wh-space-xs)', fontSize: '0.8125rem' }}>

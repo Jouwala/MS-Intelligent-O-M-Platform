@@ -64,6 +64,22 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\deploy_to_copy.ps1
 
 > `sync-now.bat` 从 2026-11-11 起就是 `deploy_to_copy.ps1` 的双击入口（同步引擎仍是副本里的 `sync-engine.mjs`，源只读、冲突 fail-closed）。只搬源码、不重建前端：`sync-now.bat -SkipBuild`。
 
+> ⚠️ **迁移/换目录时还有一类东西同步器不会搬：`Task\my_app\db\app.db` 里的三张「本地权威表」**
+> —— `credentials`（设置页凭据）、`task_schedule_config`（任务启停/cron）、
+> `email_recipients`（邮件收件人）。它们由应用**固定写 SQLite**（不走 PG），
+> 同步器按策略不搬 `db/`，`sync_pg_to_sqlite.py` 又为避免 DROP 本地数据把它们列进
+> `SKIP_TABLES`，所以「从 PG 重建 app.db」的路径天生带不出它们、也不会报错。
+> **2026-11-11 实测**：漏搬后 16 个任务同时报「拒绝以空密码登录」、任务管理页的
+> 4 个手动停用任务全变回启用。检查/迁移命令：
+>
+> ```powershell
+> python scripts\local_authority_tools.py check   --source <旧app.db> --target <新app.db>
+> python scripts\local_authority_tools.py migrate --source <旧app.db> --target <新app.db>
+> ```
+>
+> `deploy_to_copy.ps1` 的 **Step 1.5** 已自动跑 `check`：缺失即非零退出并打印上面的
+> migrate 命令，不让它再静默落到线上。细节见 `scripts\portable\部署说明.md` 第八节。
+
 ### 环境拓扑（速查）
 
 ```

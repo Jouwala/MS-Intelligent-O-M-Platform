@@ -785,6 +785,15 @@ if (frontend_dist / "assets").is_dir():
 
     @app.get("/{full_path:path}")
     async def serve_frontend(full_path: str):
+        # /api/* 未匹配任何已注册路由时必须返回 404 JSON，不能落进 SPA 兜底。
+        # 2026-11-11 Tables 页「选值」筛选事故：前端 column-values 接口没部署，
+        # 这里返回 200 + index.html，前端把「接口不存在」当成「没有可选值」静默吞掉。
+        # 只拒绝兜底层面的未知 /api/ 路径；已注册的 API 路由优先匹配，不受影响。
+        if full_path.startswith("api/") or full_path.startswith("myapp/api/"):
+            return JSONResponse(
+                status_code=404,
+                content={"detail": f"API 路由不存在: /{full_path}"},
+            )
         file_path = frontend_dist / full_path
         if full_path.startswith("myapp/assets/"):
             # 已被 /myapp/assets 挂载处理，这里只兜底（理论上不会命中）

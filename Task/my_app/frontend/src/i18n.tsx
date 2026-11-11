@@ -4222,6 +4222,9 @@ const translations: Record<Locale, Record<string, string>> = {
     // TableBrowser
     'table.selectTable': '选择数据表',
     'table.searchPlaceholder': '搜索数据...',
+    'table.searchBtnAria': '搜索',
+    'table.prevPageAria': '上一页',
+    'table.nextPageAria': '下一页',
     // 列头筛选（2026-11-11）：每个列名右侧的漏斗，服务端过滤，翻页 / 导出都跟随。
     'table.colFilterTitle': '按此列筛选',
     'table.colFilterPanelTitle': '筛选列：{col}',
@@ -4233,6 +4236,9 @@ const translations: Record<Locale, Record<string, string>> = {
     'table.colFilterSearchValues': '搜索候选值',
     'table.colFilterValuesHint': '候选值来自全表去重（按出现次数取前 200 个），不受当前搜索与其它列筛选影响',
     'table.colFilterNoValues': '没有可选值',
+    // 候选值接口失败（含后端未部署被 SPA 兜底成 200 HTML）不能再静默成「没有可选值」
+    'table.colFilterLoadFailed': '候选值加载失败，接口可能未部署或网络异常',
+    'table.colFilterRetry': '重试',
     'table.colFilterEmptyHint': '只显示该列为 NULL 或空字符串的行',
     'table.colFilterNeedValue': '请输入或勾选筛选值',
     'table.colFilterClear': '清除',
@@ -10774,6 +10780,9 @@ const translations: Record<Locale, Record<string, string>> = {
     // TableBrowser
     'table.selectTable': 'Select Table',
     'table.searchPlaceholder': 'Search data...',
+    'table.searchBtnAria': 'Search',
+    'table.prevPageAria': 'Previous page',
+    'table.nextPageAria': 'Next page',
     // Column-header filters (2026-11-11): server-side, applied to pagination and export too.
     'table.colFilterTitle': 'Filter by this column',
     'table.colFilterPanelTitle': 'Filter: {col}',
@@ -10785,6 +10794,10 @@ const translations: Record<Locale, Record<string, string>> = {
     'table.colFilterSearchValues': 'Search values',
     'table.colFilterValuesHint': 'Values are distinct across the whole table (top 200 by frequency), unaffected by the current search or other column filters',
     'table.colFilterNoValues': 'No values available',
+    // A failed values request (incl. SPA fallback returning 200 HTML for an undeployed API)
+    // must never be silently shown as "no values".
+    'table.colFilterLoadFailed': 'Failed to load values. The API may be missing or the network failed',
+    'table.colFilterRetry': 'Retry',
     'table.colFilterEmptyHint': 'Show only rows where this column is NULL or an empty string',
     'table.colFilterNeedValue': 'Enter or tick at least one value',
     'table.colFilterClear': 'Clear',
