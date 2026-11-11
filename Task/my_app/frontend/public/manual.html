@@ -89,7 +89,7 @@ footer.colophon { text-align: center; color: var(--muted); font-size: 12px; marg
     <div class="logo">📘</div>
     <h1>my_app 项目手册</h1>
     <div class="sub">网络运维数据平台 · 设计手册 + 使用手册</div>
-    <div class="meta">基准日期 2026-08-27　|　适用版本 master 当前代码　|　HTML 合成生成 2026-11-10<br>含 13 章 · 141 个小节　|　打印本页（Ctrl+P）即可导出 PDF<br>英文版使用帮助另见仓库 docs/manual/15-user-help-en.md</div>
+    <div class="meta">基准日期 2026-08-27　|　适用版本 master 当前代码　|　HTML 合成生成 2026-11-11<br>含 13 章 · 141 个小节　|　打印本页（Ctrl+P）即可导出 PDF<br>英文版使用帮助另见仓库 docs/manual/15-user-help-en.md</div>
     <ul class="parts"><li><a href="#ch-00">前言 · 关于本手册</a></li><li><a href="#ch-01">设计篇 · 01 项目总览</a></li><li><a href="#ch-02">设计篇 · 02 架构设计</a></li><li><a href="#ch-03">设计篇 · 03 数据层设计</a></li><li><a href="#ch-04">设计篇 · 04 任务与调度系统</a></li><li><a href="#ch-05">设计篇 · 05 访问控制与凭据</a></li><li><a href="#ch-10">使用篇 · 10 快速上手</a></li><li><a href="#ch-11">使用篇 · 11 功能页使用手册</a></li><li><a href="#ch-12">使用篇 · 12 配置项与开关</a></li><li><a href="#ch-13">使用篇 · 13 运维手册</a></li><li><a href="#ch-14">使用篇 · 14 外部系统与数据流</a></li><li><a href="#ch-15">使用篇 · 使用帮助（一站式指南）</a></li><li><a href="#ch-90">附录 · 90 附录</a></li></ul>
   </section>
   <section class="toc-section">
@@ -450,10 +450,11 @@ schemas/   预留，实际为空
 <li><strong>三条刷新路径</strong>（2026-10-29 由两条拆成三条）：
 <ol>
 <li><strong>iframe / legacy 页软刷新</strong>（<code>AR_SOFT_REFRESH_PAGES</code>）：外壳广播 <code>postMessage({__type:'myapp-refresh'})</code>，文档内原地重拉；</li>
-<li><strong>同文档 React 页原地刷新</strong>（<code>AR_INPLACE_REFRESH_PAGES</code>，目前只有 <code>person</code>）：外壳 <code>document.dispatchEvent(new CustomEvent('myapp-refresh'))</code>，页面自己静默重拉数据；</li>
+<li><strong>同文档 React 页原地刷新</strong>（<code>AR_INPLACE_REFRESH_PAGES</code>，目前是 <code>person</code>、<code>cn_kpi_5mins</code>）：外壳 <code>document.dispatchEvent(new CustomEvent('myapp-refresh'))</code>，页面自己静默重拉数据；</li>
 <li><strong>硬重挂载</strong>（其余页面）：<code>key={refreshTick}</code> 变化 → 整页重挂载。
 前两条无副作用，<strong>在 <code>arInteractionInProgress()</code> 拦截之前发出</strong>，故全屏 / 后台 / 弹层打开时照刷；只有第 3 条受「用户正忙」与 <code>document.fullscreenElement</code> 拦截。三条路径都只在<strong>用户已开启本页自动刷新</strong>时才会发生。
-⚠ <code>person</code> 走第 2 条的原因：它的建议间隔是 300s，用户当年反馈「刷新太快」实际指的是<strong>每 5 分钟一次的整页重建</strong> —— Leaflet 地图销毁重建、flyTo 回全国视角、图层与县名标签全部重画，在门户 iframe 里就是一下闪白。页面侧的 <code>load(silent)</code> 因此<strong>不清 loading、不清 error、失败时保留旧数据</strong>（详见 <code>PersonMap.tsx</code> 取数处注释）。新页加入 <code>AR_INPLACE_REFRESH_PAGES</code> 前必须确认它的取数能在不清 loading 的前提下重跑。</li>
+⚠ <code>person</code> 走第 2 条的原因：它的建议间隔是 300s，用户当年反馈「刷新太快」实际指的是<strong>每 5 分钟一次的整页重建</strong> —— Leaflet 地图销毁重建、flyTo 回全国视角、图层与县名标签全部重画，在门户 iframe 里就是一下闪白。页面侧的 <code>load(silent)</code> 因此<strong>不清 loading、不清 error、失败时保留旧数据</strong>（详见 <code>PersonMap.tsx</code> 取数处注释）。新页加入 <code>AR_INPLACE_REFRESH_PAGES</code> 前必须确认它的取数能在不清 loading 的前提下重跑。
+⚠ <code>cn_kpi_5mins</code> 走第 2 条的原因（2026-11-10）：硬重挂载会把 <code>data</code> 清成 null，而页面在 <code>loading &amp;&amp; !data</code> 时只画一个 Spin。overview 要打远端 11 个组件（每个还先探一次列名），取数期间整页就是页头加转圈；刷新间隔短于取数耗时时，下一轮重挂载会把还没落地的 <code>setState</code> 一起丢掉，页面可以一直空白。改为 <code>CnKpi5mins.tsx</code> 的 <code>load({ silent: true })</code>：不清 loading、失败保留上一帧。后端 <code>get_overview</code> 同时单飞（后来的请求等进行中的那一轮）并把列名缓存 10 分钟，避免刷新叠在慢查询上把远端打满。</li>
 </ol>
 </li>
 <li><strong>生效间隔</strong>通过 <code>localStorage['myapp_auto_refresh_effective']</code> 公开给 legacy 页（未开启=0）。旧版同时公开的「本页是否看板」标记 <code>myapp_auto_refresh_is_board</code> 随白名单一起删除，外壳挂载时清掉残留值（缓存了旧协议脚本的直开页会读它，残留 <code>'0'</code> 会让本页拒绝自刷）。</li>
@@ -5537,11 +5538,12 @@ Network 取 <code>ms_sla_kpi</code> 快照原值不重算；PS_* = 阈值达标�
 <li><strong>数据链路</strong>：<code>GET /api/ipran-topo/graph</code>（<code>backend/routers/ipran_topo.py:23</code>）→ <code>ipran_topo_service.build_graph()</code>（<code>backend/services/ipran_topo/ipran_topo_service.py:271</code>）。层 id 固定为 <code>LID</code>（:64），服务层把 <strong>8 个 UME 接口</strong>（层统计、层内 children、节点属性、层内链路、链路属性、网元告警统计、链路告警统计、层外端点属性）聚合成<strong>一次响应</strong>，进程内缓存 <code>120</code> 秒（:68）；上游失败时返回上一次成功的数据并置 <code>meta.stale</code>。实测 93 个层内网元 + 7 个层外上游 = 100 节点 / 167 条物理链路折叠成 141 条边。</li>
 <li><strong>聚合口径</strong>：同一对机框 id 的多根光纤折叠成一条边（<code>n</code> = 物理链路数，带宽取组内<strong>最小端口速率</strong>，从链路名的 <code>10GE/25GE/100GE</code> 解析）；站点坐标取本机 PG 的 <code>kml_mw_links</code>（<code>kind='site'</code>，:71），按规范化站名匹配 —— 实测 74 精确 / 3 近似 / 16 缺坐标（不猜位置，地理视图单独排「无坐标」区）；层外 7 个设备名取自 UME 属性接口，不从链路名截取。</li>
 <li><strong>告警只做徽标、不给节点填色</strong>：实测 74/93（80%）的层内网元都有紧急告警，按最高告警级填色会让 80% 的图变红、颜色失去区分度。因此节点颜色只表达<strong>层级 / 在线状态</strong>，告警在节点右上角画小红点；后端 <code>meta.warnings</code> 会带 <code>alarm_saturated</code> 说明这条依据。</li>
-<li><strong>三种布局</strong>（<code>frontend/src/pages/ipranTopo/layouts.ts</code>，画布 760×540，:25）：力导向（默认，<code>layoutForce</code> :194）、地理（<code>layoutGeo</code> :255）、分层（<code>layoutTier</code> :131）。布局都是<strong>确定性</strong>的（固定种子），同一份数据每次打开位置一致。以<strong>边交叉次数</strong>为可读性代理量扫描参数：力导向 42 次 &lt; 地理 221 次 &lt; 分层 390 次（辐射布局实测 877 次，已删除）。</li>
-<li><strong>交互</strong>：点节点聚焦（再次点击取消），右侧面板列出该网元的告警分布与邻居；点链路看端到端端口明细与物理链路名；点 KPI 卡（网元数 / 链路数 / 失联 / 带紧急告警）落到明细弹窗（<code>ipranTopo/TopoDrillModal.tsx</code>，12 行/页）。图例随着色模式切换，线宽 = 带宽、红色虚线 = 断链、<code>×N</code> = 平行链路数。</li>
-<li><strong>口径说明与数字悬浮</strong>：页内「数据源与口径」用 <code>CalcChainNote</code> 默认收起；KPI 卡与列头的 ⓘ 走 <code>MetricExplain</code>，气泡内容取接口既有字段，不在前端重算。</li>
-<li><strong>刷新</strong>：已登记 <code>AR_PAGE_DEFAULTS</code>（建议 300 秒，后端缓存 120 秒）与 <code>AR_INPLACE_REFRESH_PAGES</code> —— 顶栏开启自动刷新后监听 <code>myapp-refresh</code> <strong>静默重取</strong>（<code>IpranTopo.tsx:70</code>），画布不重建、聚焦状态不丢。页面上的「重新取数」走 <code>refresh=1</code> 绕缓存。</li>
+<li><strong>三种布局</strong>（<code>frontend/src/pages/ipranTopo/layouts.ts</code>，画布 760×540，<code>TOPO_W</code> :25）：力导向（默认，<code>layoutForce</code> :210，<code>cluster: true</code> 把接入点往主归属的水平位置拉近）、地理（<code>layoutGeo</code> :287）、分层（<code>layoutTier</code> :147）。原力导向保留为 <code>layoutForceClassic</code>（:277），不删。布局都是<strong>确定性</strong>的（固定种子）。2026-11-10 在真实 141 条边上扫出的 42 / 221 / 390 次交叉是旧算法、且交叉口径未留档；可重复基线在 <code>ipranTopo/__tests__/topoLayoutBaseline.test.ts</code>（合成图，力导向聚类后边交叉 271、层级分离 121.6、标签重叠 0）。</li>
+<li><strong>交互</strong>（2026-11-10 V2，同日改为与微波实时页同一套分栏；2026-11-11 统计卡移入右栏）：画布占左 75%，并吃掉工具条之下、页底说明之上的高度。缺坐标、近似匹配、告警饱和这几条说明和收起的口径条放在页面最下面，不插在工具条和画布之间；取数失败或降级仍留在工具条下。右 25% 从上到下是六张统计卡（排成一行，数字在上且同一行对齐，标题在数字下面，卡高取这一行里最高的那张）、「紧急告警最多的网元」，两块同宽，加起来的高度与左侧地图一致；名单超出时在告警榜内部滚动。数字下的构成说明（如在线数/层内网元数）默认不显示，点数字才弹出。不随聚焦展开而挪位。滚轮缩放、拖空白平移、适应画布；搜索与层级/状态过滤只降低透明度，不删设备和链路。点节点或点右侧榜上的名字，从右侧滑出详情抽屉（概览 / 接口 / 告警 / 影响分析，宽度 <code>min(95vw, 45rem)</code>，与 GIS / 微波实时页一致）；点链路看物理链路与容量。再点、点空白、点遮罩或 Esc 关闭。平行链路三态：down=0 正常、0&lt;down&lt;n 部分故障（橙色虚线）、down=n 全部故障（红色虚线）。影响分析只给<strong>根因候选</strong>（<code>faultAnalysis.ts</code>），没有告警时间时不写成已确认根因；收发利用率缺数据时显示 N/A。地理布局额外复用 GIS 的 PMTiles 底图（<code>TopoGeoMap.tsx</code>），精确与近似坐标样式不同，缺坐标不落点。KPI 下钻仍是 <code>ipranTopo/TopoDrillModal.tsx</code>。</li>
+<li><strong>口径说明与数字悬浮</strong>：页内「数据源与口径」用 <code>CalcChainNote</code> 默认收起，和缺坐标 / 近似匹配 / 告警饱和的说明一起放在页面底部；KPI 卡与列头的 ⓘ 走 <code>MetricExplain</code>，气泡内容取接口既有字段，不在前端重算。</li>
+<li><strong>刷新</strong>：已登记 <code>AR_PAGE_DEFAULTS</code>（建议 300 秒，后端缓存 120 秒）与 <code>AR_INPLACE_REFRESH_PAGES</code> —— 顶栏开启自动刷新后监听 <code>myapp-refresh</code> <strong>静默重取</strong>（<code>IpranTopo.tsx:94</code>），画布不重建、聚焦状态不丢。页面上的「重新取数」走 <code>refresh=1</code> 绕缓存。</li>
 <li><strong>导出</strong>：<code>exportReport</code> 两个 sheet（网元 / 链路），文件名 <code>IPRAN_Topo_YYYYMMDD_HHmmss.xlsx</code>。</li>
+<li><strong>门户入口</strong>（2026-11-10）：<code>/v3/olbrportal/</code> 的 GIS Map 有页签「IP」，内嵌 <code>?page=ipranTopo&amp;layer=ipran&amp;maponly=1</code>，只留网络拓扑画布（与 Person 页的 <code>maponly</code> 同一约定）。Open Link 去掉 <code>maponly</code>，新窗口是完整页。直开不带该参数时仍是四层可切换的完整页。五个团队门户的可见性矩阵没有这一页，不显示。</li>
 </ul>
 <p><a id="ch-11-s14"></a></p>
 <h3>9. MW 微波实时（<code>?page=mwRealTime</code>）— iframe</h3>
@@ -5550,6 +5552,7 @@ Network 取 <code>ms_sla_kpi</code> 快照原值不重算；PS_* = 阈值达标�
 <li>壳载入 <code>public/mw_real_time.html</code>；自动刷新默认关闭（顶栏按页开启，本页建议 900 秒），开启后支持软刷新（不重载 iframe）。</li>
 <li>数据来自 <code>GET /api/mw-ume/realtime</code>，底层表 <code>mw_ume_bw_ultilazation_rt</code> 由 <code>mw_ume_kpi_sync_rt</code> <strong>每 15 分钟</strong>（<code>*/15 * * * *</code>）写入：取最近 2 小时、<code>gr=900</code> 的 FINBI 数据，看板默认只展示<strong>最新一个 15 分钟槽位</strong>，滑杆可回看窗口内的历史槽位。</li>
 <li>与日粒度页的区别仅此而已：拓扑骨架、风险榜、抽屉、趋势图逻辑完全一致。</li>
+<li><strong>门户 GIS Map 的 MW 页签</strong>（2026-11-10）：外层带 <code>mwembed=1</code>，<code>LegacyToolFrame</code> 把它和 <code>theme</code> 传进内层 <code>mw_real_time.html</code>。内层因此藏掉标题栏、KPI、右栏和底栏，地图铺满，跟 Alarm / Person / IP 一样只留地图；点链路的抽屉仍在。直开不带 <code>mwembed</code> 时仍是完整看板。</li>
 </ul>
 <p><a id="ch-11-s15"></a></p>
 <h3>10 / 11. GIS 地图 与 实时告警地图（<code>?page=gis</code> / <code>?page=realtime_alarm</code>）</h3>
@@ -6753,6 +6756,9 @@ KPI 卡讲 <strong>FE 人群</strong> —— 32 名 FE（<code>isfe=Yes</code>�
 <p>LTE 丢包（RAN UME SDR/IPRAN IPPD），最近 <strong>7 个完整自然日、小时粒度</strong>，当天没过完不展示（<code>PacketLossDashboard.tsx:2-5</code>）。</p>
 <ul>
 <li>
+<p><strong>分栏（2026-11-11 二次重排，按用户线框图）</strong>：桌面端<strong>左 2/3 地图卡</strong>（画布 flex:1 填满卡内剩余高度）、<strong>右 1/3 竖排三图</strong>（状态饼 / 每日趋势 / 区域分布，<code>CHART_HEIGHT=240</code>，<code>PacketLossDashboard.tsx:89</code>）、<strong>底部全宽 Top 站点表</strong>；六张指标卡通栏在地图上方。窄屏纵向堆叠。县底色不透明度 <strong>0.2</strong>（用户口径「透明度 80%」；仅本页经 <code>CountyLayer fillOpacity</code> 覆写，<code>:744</code>，人员 / 电源页仍共用 0.8），县名标签仅宽视口（zoom≥7.5 档）显示，<code>.pl-county-label</code> 配套保证浅 / 深主题可读（<code>:775</code>）；道路与地名注记<strong>默认关闭</strong>。</p>
+</li>
+<li>
 <p><strong>数字悬浮说明（2026-11-04，<code>AGENTS.md</code> 三.3c）+ 自写气泡清零</strong>：本页原先有<strong>两份各自实现的气泡</strong>
 （头部标签用的 <code>MetricExplainPopover:96-124</code> + 卡片角上内联的 <code>Popover:159-182</code>，各带一份复制按钮、主题色与强调渲染），
 现已全部删除，统一走 <code>components/MetricExplain</code>（<code>ExplainIcon</code> 挂角、<code>ExplainPopover</code> 包住大数字）。
@@ -6774,7 +6780,10 @@ KPI 卡讲 <strong>FE 人群</strong> —— 32 名 FE（<code>isfe=Yes</code>�
 <p>操作：<code>Switch</code> 控制是否包含 OK 站点（<code>include_ok</code>，:249）、Popover 显示口径说明、下钻 <code>GET /api/packet-loss-dashboard/drilldown?status=&amp;limit=800</code>（:273）、拓扑叠加复用 <code>GET /api/gis/topology</code>（:224，该端点 2026-09-25 起读 <code>kml_mw_links</code>；本页线宽加粗按 KML 线色判定，见 10c）。</p>
 </li>
 <li>
-<p>接口：<code>/api/packet-loss-dashboard/overview</code>、<code>/map-sites</code>、<code>/drilldown</code>。</p>
+<p><strong>站点点击下钻（2026-11-11）</strong>：地图圆点 <code>CircleMarker onClick</code> → 统一 <code>DraggableClickModal</code>（<code>placement=&quot;top&quot;</code>，<code>PacketLossDashboard.tsx:909</code>；异步内容长高后仍留在视口内），<strong>不再用 Leaflet Popup</strong>。数据走新增只读端点 <code>GET /api/packet-loss-dashboard/site-detail?site_code=&amp;site_name=</code>（<code>packet_loss_dashboard.py:309</code>）：按 code→name 关联 <code>site_pl_summary</code>，原始读数用参数化 <code>Managed Element LIKE '%(code)'</code> 查询，窗口与概览同口径（最近 7 个完整自然日、剔除当天），返回 <code>daily</code>（逐日 max / 中位 / 受影响小时 / 读数数）与 <code>hourly</code>（最后一个完整日 24 小时）。弹窗内：统计条（<code>ExplainPopover</code>）+ 每日柱线图 + 逐小时表（搜索 / 排序 / 筛选 / <code>exportAoaReport</code> 导出）。</p>
+</li>
+<li>
+<p>接口：<code>/api/packet-loss-dashboard/overview</code>、<code>/map-sites</code>、<code>/drilldown</code>、<code>/site-detail</code>。</p>
 </li>
 <li>
 <p>数据由 <code>packet_loss_sync</code>（06:30）写入 <code>lte_pl.sqlite3</code>。</p>
@@ -8424,6 +8433,16 @@ history、<code>clearstatename</code> 只在 realtime。给两表写同一条 SE
 <li><strong>导出同口径</strong>：<code>Rules</code> sheet 按当前范围（related/all）过滤，匹配可用时追加「与本单」「条件证据」两列。</li>
 <li><strong>口径说明</strong>：<code>CalcChainNote</code> 增第五段「『仅相关』怎么判」（<code>eflowFlow.calcNote.secRelated</code>）；
 <code>rule_hits</code> 改为「全部节点条件 True（含兜底）按 规则名+节点 去重」，KPI 气泡 <code>tip.rules</code> / <code>caveat2</code> 同步更新。</li>
+<li><strong>多条件模拟（2026-11-10 新增）</strong>：查询卡切到「多条件模拟」后不查具体单子，直接给一组
+取值帧字段（告警码 / 工单级别 / VIP / HUB / 站点子类型 / 站点类型 / 网络制式 / 当前断站数 /
+下挂站点总数 / 根因 / 告警描述），看全部规则会怎么判。后端 <code>POST /api/eflow-flow/simulate</code>
+→ <code>simulate_flow()</code>（<code>backend/services/eflow_flow.py</code>）→ <code>build_sim_frame()</code> 把条件构造成
+合成 TT 行 + 站点属性，<strong>原样交给 <code>build_value_frame</code></strong>（YES/NO→1/0、大小写等归一化与真实
+单子同一条路径），再走与按单查询<strong>同一个</strong> <code>annotate_graph_with_frame</code> 求值循环 —— 不存在
+第二套判定。要点：① <strong>留空字段按「无值」参与判定</strong>，引用它的条件不成立 —— 例：「HUB site P1」
+同时要求 <code>downSiteCount ≥ 5</code>，不填当前断站数它就不命中，规则详情的证据列会写明差在哪；
+② 模拟没有单据，TT 信息 / 实际路径 / 关联告警区块不渲染，概览只保留「流程规则」卡；
+③ 全空条件被路由层 422 拒绝；④ 语言切换后按最近一次提交的条件重查。</li>
 </ul>
 </li>
 </ul>
@@ -8689,8 +8708,9 @@ Top10 的<strong>筛选、排序、截断都在前端</strong>做（接口下发
 <p>不写 SQL 就能翻任意表、看字段画像、导文件。<strong>最常用的兜底工具</strong>。</p>
 <ul>
 <li>表下拉（:366）→ <code>GET /api/tables</code>；数据分页 <code>GET /api/tables/{t}/data</code>（:207，带取消请求）。</li>
-<li><strong>关键字搜索</strong>防抖（:376,251）。</li>
-<li><strong>导出</strong> xlsx / CSV（:402 → <code>GET /api/tables/{t}/export</code>，:284）。</li>
+<li><strong>关键字搜索</strong>防抖（:376,251）。⚠️ 2026-11-11 起<strong>不区分大小写</strong>：<code>tables.py::_build_search_clause</code> 两侧先 <code>LOWER</code>——PG 的 <code>LIKE</code> 大小写敏感，此前搜 <code>totota</code> 找不到 <code>Totota</code>（SQLite 默认只有 ASCII 不敏感，双模行为也曾不一致）。搜索词里的 <code>%</code> / <code>_</code> 用 <code>ESCAPE '!'</code> 当字面量，不再被当通配符。</li>
+<li><strong>列头筛选</strong>：每个列名右侧漏斗 → 包含 / 等于 / 选值 / 仅空值。<code>col_filters</code>（JSON）随 <code>GET /api/tables/{t}/data</code> 与 <code>/export</code> 下发，服务端以 AND 叠加到全局搜索上；<strong>刻意不用 antd 的本地 <code>onFilter</code></strong>——那是服务端分页，本地过滤只筛当前页 20 行，翻页就会漏。候选值走 <code>GET /api/tables/{t}/column-values</code>（全表去重、按出现次数取前 200，不受页内搜索影响）。已启用的筛选在表格上方常驻成标签，可单个关闭或一键清空；面板里的「隐藏此列」改的是显示列，不是数据过滤。</li>
+<li><strong>导出</strong> xlsx / CSV（:402 → <code>GET /api/tables/{t}/export</code>，:284）：与分页共用同一套 <code>_build_where</code>，所以导出内容 = 当前搜索 + 列筛选后的结果。</li>
 <li><strong>列显隐 + 视图模板</strong>：保存/套用/删除（:415,312,324 → <code>/api/tables/view-templates</code>）。同一张表经常只看固定几列时，存个模板比每次勾选快。</li>
 <li><strong>导入</strong>（:412 → <code>POST /api/tables/import</code>，:149，<code>multipart/form-data</code>）。</li>
 <li><strong>画像页签</strong>：字段级统计（:572 → <code>GET /api/tables/{t}/profile</code>，:273），与&quot;数据&quot;页签并列（:548）。</li>
@@ -11794,6 +11814,7 @@ VLR / Voice / Data Subscribers / 4G·3G·RG 系列是 <code>SUM</code>（RG 系�
 </tr>
 </tbody>
 </table>
+<p><strong>自动刷新不重挂载</strong>（2026-11-10）：本页在 <code>App.tsx</code> 的 <code>AR_INPLACE_REFRESH_PAGES</code> 里。顶栏到点只派发 <code>myapp-refresh</code>，页面 <code>load({ silent: true })</code> 静默重取 —— 不清 loading、失败保留上一帧图表。此前走 <code>key={refreshTick}</code> 整页重挂载，状态回到 <code>loading &amp;&amp; !data</code>，overview 打远端的那几秒到几十秒里页面只剩页头和转圈；刷新间隔短于取数耗时时会一直空白。手动「刷新」仍是非静默（按钮转圈，但已有图表不拆），<code>onClick</code> 必须写成 <code>() =&gt; load({ force: true })</code>，不能 <code>onClick={load}</code>（事件对象会被当成参数）。后端 <code>get_overview</code> 单飞，列名探测另缓存 10 分钟。</p>
 <p><a id="ch-11-s189"></a></p>
 <h4>33b.2 ⚠ 混合粒度：5 个走 5 分钟档，3 个走 15 分钟档（2026-10-19 现状）</h4>
 <table>
@@ -16619,7 +16640,7 @@ shared <code>auth_cache</code> 里 admin 的 token 明明还有 14.6 小时有�
     <h2>使用帮助（一站式指南）</h2>
   </header>
   <blockquote>
-<p>面向使用者的平台功能与操作指南。本文件由「使用帮助」页面同源生成（frontend/src/helpMarkdown.ts），内容依据 docs/manual/ 各章与 backend/task_registry.py 整理。生成日期：2026-11-10。</p>
+<p>面向使用者的平台功能与操作指南。本文件由「使用帮助」页面同源生成（frontend/src/helpMarkdown.ts），内容依据 docs/manual/ 各章与 backend/task_registry.py 整理。生成日期：2026-11-11。</p>
 </blockquote>
 <blockquote>
 <p>站内入口：侧边栏「使用帮助」，或直链 <code>http://&lt;host&gt;/myapp/?page=help</code>。</p>
@@ -18915,7 +18936,7 @@ shared <code>auth_cache</code> 里 admin 的 token 明明还有 14.6 小时有�
 <li>弹性（11-06 复盘）：cron */2 → */5 留出上游喘息窗口；整轮硬上限 100→240s 把空出的 200s 用起来，慢轮不再提前放弃尾部站；filter-map 增加 1 次短重试与「上轮站点清单」降级，瞬时抖动不再整轮判失败；连续 3 轮完全无法采集才告警，数据陈旧由 20 分钟巡检兜底</li>
 <li>弹性（11-05 复盘）：池内单请求 20s 超时（12s 会误杀「慢但会成功」的请求并形成超时风暴）+ popup 失败站在硬上限内补采一轮 + 单轮 popup 成功率 &lt;25% 视为上游被压垮并计入退避；退避按连续失败 5/10/20 分钟（封顶 30），退避期整轮静默跳过、不发失败通知，任一轮成功自动清零</li>
 <li>合成落库：全站每轮各写一条快照（popup KPI 为底、有 diagram 的站覆盖明细列，source 记 popup/diagram；popup 行 raw 不落 JSON 控表体积，diagram 明细另存 ipt_power_site_detail 每站最新一条，已剥设备凭据）</li>
-<li>清理 2 天前旧快照；运行结果写 ipt_power_meta.last_run，下一轮起点写 ipt_power_meta.shard_cursor</li>
+<li>清理 7 天前旧快照（2026-11-08 由 2 天放宽，已清理的历史补不回来）；运行结果写 ipt_power_meta.last_run，下一轮起点写 ipt_power_meta.shard_cursor</li>
 </ol>
 <p><strong>维护要点</strong>:</p>
 <ul>
@@ -18924,7 +18945,7 @@ shared <code>auth_cache</code> 里 admin 的 token 明明还有 14.6 小时有�
 <li>凭据：环境变量 IPT_USERNAME / IPT_PASSWORD 优先，缺省读同目录 url.txt 头部「用户名：/密码：」两行；url.txt 含明文密码，已被 gitignore（url*.txt 规则）覆盖不会入库</li>
 <li>密码模式（password grant）实测被拒（unauthorized_client），只有 rubix-web 允许授权码/隐式流 → 登录走表单模拟；若登录页结构变化，任务会报「登录页结构变化」</li>
 <li>单站失败只计数不阻断本轮（popup 失败下轮自然重试，diagram 失败由游标下一轮补）；改采集器代码后需重启 m 组 worker，只改 watch_sites.json 不用重启</li>
-<li>快照保留 2 天（RETENTION_DAYS），表按 (site_id, snap_time) 主键去重；太阳能口径：solarSets 与 rectifiers 的 solarPower 是同一份镜像值取 max，无太阳能设备 solar_available=0 显示「-」，夜间 0 W 属正常</li>
+<li>快照保留 7 天（RETENTION_DAYS，2026-11-08 由 2 天放宽，让页面 72h/7d 时间窗真能看到 7 天曲线），表按 (site_id, snap_time) 主键去重；太阳能口径：solarSets 与 rectifiers 的 solarPower 是同一份镜像值取 max，无太阳能设备 solar_available=0 显示「-」，夜间 0 W 属正常</li>
 <li>消费方：?page=ipt_power（站点电源查询页，左 3/5 地图 + 右 2/5 清单表）；「立即刷新」按钮走 routers/ipt_power.py 的 /refresh 实时直查，与本任务共用登录缓存</li>
 </ul>
 <p><a id="ch-15-s90"></a></p>
@@ -19082,6 +19103,7 @@ shared <code>auth_cache</code> 里 admin 的 token 明明还有 14.6 小时有�
 <li>表下拉选表 → 分页浏览，关键字搜索防抖；导出 xlsx / CSV</li>
 <li>列显隐可保存为视图模板（同一张表常看固定几列时先存模板）</li>
 <li>「画像」页签查看字段级统计；支持 Excel/CSV 导入</li>
+<li><strong>列头漏斗可按列筛数据</strong>（2026-11-11）：包含 / 等于 / 选值（全表去重后按频次取前 200 个高频值）/ 仅空值，由服务端执行，翻页与导出都跟随；已启用的筛选在表格上方常驻成标签，可单个关掉或一键清空。搜索与「包含 / 等于」都<strong>不区分大小写</strong>（PG 的 LIKE 本身大小写敏感，此前搜 <code>totota</code> 找不到 <code>Totota</code>），搜索词里的 <code>%</code> / <code>_</code> 按字面量处理。列头面板还能「隐藏此列」，与「自定义列」里的列名搜索（挑显示哪些列）是两回事</li>
 <li><strong>页头行列数、分页「共 N 条」与画像四张卡都可悬浮看口径</strong>（2026-11-05）：页头行数是 <code>SELECT COUNT(*)</code> 的<strong>全表</strong>数，不受下面搜索影响；分页的 N 是<strong>带搜索条件</strong>的 COUNT(*)，而搜索是全列 LIKE 且<strong>最多只看前 200 列</strong>（宽表超出部分不参与匹配），所以「搜出 0 行」不等于数据不存在；「画像」整块是<strong>采样</strong>结果 —— 后端 SQL 写死 <code>LIMIT 10000</code> 且无 ORDER BY（不是随机抽样），取满 1 万行时页面常驻提示；质量分 = 100 −（问题数 ÷ 列数×5）× 100，单列最多触发 4 项，因此分数下限是 20</li>
 </ul>
 <p><a id="ch-15-s100"></a></p>
@@ -19258,16 +19280,20 @@ shared <code>auth_cache</code> 里 admin 的 token 明明还有 14.6 小时有�
 </ul>
 <p><a id="ch-15-s119"></a></p>
 <h5>ipranTopo（<code>ipranTopo</code>）</h5>
-<p>IP RAN 光纤拓扑：UME（ZTE NetNumen）IP RAN 层（lid=1293626099480711168）的 93 个网元与 167 条物理链路，按机框对折叠成 141 条边后，用「力导向 / 地理 / 分层」三种视图展示，并叠加当前活动告警。</p>
+<p>UME 四层拓扑（IP RAN 光纤 / IP Core / Metro Ring / DWDM）：四层共用同一套 UME 拓扑接口，只有层 lid 与口径不同；切页签只换数据源，画布、统计卡、下钻与导出全部复用。IP RAN 光纤层实测 93 个网元、167 条物理链路折叠成 141 条边，其余三层的分层/站名/带宽口径按设备型号配置，待实测校准（下文带具体数字的说明均指 IP RAN 光纤层）。</p>
 <ul>
-<li>三种布局回答不同问题：**力导向（默认）**看环网与簇团（42 次边交叉）、<strong>地理</strong>看断站影响哪个城市（221 次）、<strong>分层</strong>看层级关系（390 次，适合导出）；布局是确定性的，同一份数据每次位置一致</li>
+<li>顶部「拓扑层」页签有 4 张图：IP RAN 光纤（实测口径）/ IP Core / Metro Ring / DWDM。切层会清空旧层数据与聚焦态后重新取数，每层独立缓存 120 秒，自动刷新只取当前层；URL 加 &amp;layer=ipcore 可直接打开单层</li>
+<li>标签会自动避让：按重要度（聚焦节点 / 层级 / 度数 / 故障）先排，逐个尝试上下错落的位置，空间实在不够就隐藏并在画布右上角提示隐藏数量 —— 宁可不显示也不叠字。名称按层级截短，悬停可看全名</li>
+<li>三种布局回答不同问题：**力导向（默认）**看环网与簇团，并把接入点往主归属的水平方向收拢；<strong>地理</strong>看断站影响哪个城市；<strong>分层</strong>看层级关系，适合导出。布局是确定性的，同一份数据每次位置一致。旧算法在真实图上扫到过 42 次边交叉，那组参数仍留在 layoutForceClassic</li>
 <li>三种着色：按层级（默认）/ 按在线状态 / 按最高告警级。<strong>告警不着色是刻意的</strong>：实测 74/93（80%）网元都有紧急告警，按告警级填色整张图会全红；告警只做节点右上角小红点</li>
 <li>带宽只体现在<strong>线宽</strong>（100G / 25G / 10G / 其它四档），断链是红色虚线，有告警的链路转橙色；「折叠平行链路」开关可把 ×N 展开成扇面</li>
-<li>点节点聚焦：其余节点变暗、只保留一跳邻居，右侧面板列出邻居与归属汇聚；再点一次或点空白取消。悬停节点看告警/站点/坐标匹配情况，悬停链路看物理链路数与端口名</li>
+<li>右侧栏（约 25%）上面是一行统计卡，下面是「紧急告警最多的网元」，两块同宽。数字下面的构成说明默认不显示，点数字才弹出；点卡片标题仍可下钻。左侧拓扑画布占约 75%，并吃掉工具条之下剩余的高度。点节点或点榜上的名字聚焦：其余节点变暗、只保留一跳邻居，详情从右侧滑出（概览 / 接口 / 告警 / 影响分析）。再点一次、点空白、点遮罩或按 Esc 关闭。滚轮缩放，拖空白处平移</li>
+<li>影响分析给出的是<strong>根因候选</strong>，不是已确认根因：只有失联设备、且上游没有更靠前的失联设备才会列入；接口没有告警发生时间。流量利用率没有数据时显示 N/A，不会用端口速率去估</li>
+<li>地理布局下另有一张站点地图（与 GIS 同一套 PMTiles 底图）。精确坐标与近似坐标样式不同；没有坐标的设备不落点</li>
 <li>四张统计卡（网元数 / 折叠后链路 / 失联网元 / 带紧急告警网元）<strong>都能点开</strong>，弹窗是构成这个数的那些行，与卡上数字同一份数据</li>
 <li>层外上游 7 个设备（如 89MW01/89MW02、HQ-RAN-SW5960）是链路引用到的设备，名称取自 UME 属性接口；它们只作端点，不计入「网元数」，也没有在线状态</li>
-<li>地理视图的坐标来自本机 PG 的 kml_mw_links：74 个精确、3 个近似（顶部常驻提示需人工确认）、16 个取不到 —— <strong>不猜位置</strong>，统一排在画布底部「无坐标」区</li>
-<li>后端把 8 次 UME 调用聚合成一次响应并缓存 120 秒；「重新取数」绕缓存。顶栏自动刷新默认关闭，本页建议 300 秒，开启后走原地刷新（画布不重建、聚焦不丢）；上游失败时显示上次成功数据并在顶部常驻告警</li>
+<li>地理视图的坐标来自本机 PG 的 kml_mw_links：74 个精确、3 个近似（页底常驻提示需人工确认）、16 个取不到 —— <strong>不猜位置</strong>，统一排在画布底部「无坐标」区。缺坐标、近似匹配、告警饱和说明和口径条都在页面最下面，不挡在工具条和画布之间</li>
+<li>后端把每层 8 次 UME 调用聚合成一次响应并<strong>按层</strong>缓存 120 秒；「重新取数」只绕开当前层缓存。顶栏自动刷新默认关闭，本页建议 300 秒，开启后走原地刷新（画布不重建、聚焦不丢）；上游失败时显示上次成功数据并在顶部常驻告警</li>
 <li>「导出 Excel」输出网元与链路两张 sheet（含告警计数、坐标来源、端口名）</li>
 </ul>
 <p><a id="ch-15-s120"></a></p>
@@ -19501,6 +19527,8 @@ shared <code>auth_cache</code> 里 admin 的 token 明明还有 14.6 小时有�
 <ul>
 <li>口径与 Packet_Loss 自动化 Excel 报告完全一致；Popover 可查看口径说明</li>
 <li>Switch 控制是否包含 OK 站点；支持下钻明细与拓扑叠加</li>
+<li>桌面布局（2026-11-11 按线框图重排）：左 2/3 是丢包地图卡，右 1/3 竖排状态饼图 / 每日趋势 / 区域分布三图，底部全宽 Top 站点表；窄屏纵向堆叠</li>
+<li>地图带县底色（不透明度 0.2，即 80% 透明）与县名标签（仅宽屏显示），道路与地名默认关闭；<strong>点站点圆点下钻</strong>：统一弹窗展示该站最近 7 个完整日的每日 Max / 中位丢包图与最后一个完整日的逐小时明细表，可搜索、可导出 Excel</li>
 <li><strong>每个数字都能悬浮看算法</strong>（2026-11-04）：六张状态卡的 ⓘ 与数字气泡同源（判据在采集层落的 FinalStatus：STATUS≠OK 且 Last 1 day Max PL ≥5 / [1,5) / [0.5,1) / [0.1,0.5) 分别是 Critical/Major/Minor/Warning，STATUS=OK 强制归一为 No Packet loss），页头 Affected Sites / 粒度标签也挂了气泡</li>
 <li>三处最容易核对不上的地方直接写进气泡：<strong>状态饼图含无坐标站点、区域柱图只统计非 OK（含 Minor/Warning）、顶部 Affected Sites 只是 Critical + Major</strong> —— 三个集合不同，数字不该互相对账</li>
 <li>每日趋势的中位数<strong>只取当天 &gt;0 的读数</strong>（逐小时丢包约 59% 是 0，全量取中位会被压成 0 失去意义）；而 Top 站点用的是<strong>含 0 的每站点中位</strong>（否则「半天全断」与「整天全断」同为 100，失去区分度）—— 同名「中位数」两种口径，气泡各写各的</li>
@@ -19698,6 +19726,7 @@ shared <code>auth_cache</code> 里 admin 的 token 明明还有 14.6 小时有�
 <li>绿色节点 = 该单实际走过的步骤，黄色节点 = 当前所处步骤（来自 operation_type 字段），灰色 = 未涉及；粗青色连线 = 实际路径</li>
 <li>点击图中任意节点，下方「规则明细」表即切到该步骤绑定的规则；<strong>默认只显示与本单相关的规则</strong>（条件对本单求值为 True，含空条件兜底规则），「仅相关 / 全部」切换可看全量挂载，「全部节点」可一次看所有节点的规则</li>
 <li><strong>点击规则名打开详情</strong>（2026-11-10）：弹窗给出规则基础信息（ID / 级别 / 创建人 / 更新人）、条件原文、逐条件 ✓/✗ 证据与本单取值帧（告警码 / VIP / HUB / 站点类型 / 断站数等）；判定与「eFlow 知识库」「指派归因」同源，不另造一套判定；条件引用本地取不到字段的规则标「无法判定」，不算未命中</li>
+<li><strong>多条件模拟</strong>（2026-11-10）：查询卡切到「多条件模拟」后不查具体单子，直接给一组条件（告警码 / 工单级别 / VIP / HUB / 站点子类型 / 站点类型 / 网络制式 / 当前断站数 / 下挂站点总数 / 根因 / 告警描述）看全部规则会怎么判 —— 判定与按单查询同引擎同归一化（YES→1/0），<strong>留空字段按「无值」参与判定</strong>，引用它的条件不成立；例如「HUB site P1」同时要求当前断站数 ≥ 5，不填它就不命中，规则详情的证据列会写明差在哪。模拟没有单据，TT 信息 / 实际路径 / 关联告警区块不显示</li>
 <li>「实际流程路径」表按时间列出该单真实走过的里程碑、操作人与说明；「TT 工单信息」表给出级别、当前处理人、SLA、根因等字段</li>
 <li>TT 若已派生现场工单，另有「WO 现场子流程」区块：WO 的 接单 → 处理 → 确认 → 关单 独立一条流水线，并列出各环节处理明细（来自 eflow_wo 的 *Detail 字段）</li>
 <li>「关联告警」表列出触发该 TT 的告警（realtime_alarm / history_alarm 的 tt_id 或 alarm_id 关联），含告警码、站点、网元、级别与发生时间</li>
@@ -20355,7 +20384,7 @@ shared <code>auth_cache</code> 里 admin 的 token 明明还有 14.6 小时有�
 <p><strong>保留在 PROJECT_DOCS.md 不动</strong>（属于历史决策与复盘，不是&quot;现状描述&quot;）：§2 迁移计划、§3 架构评估与 Django 论证、§4 FastAPI 架构优化方案、§5–§6 i18n 审计与复查、§8 IP Trace 集成方案、§10 迁移失败复盘、§11 优化建议。</p>
 
 </section>
-  <footer class="colophon">my_app 项目手册 · 由 frontend/scripts/generate-manual-html.mjs 从 docs/manual/*.md 同源生成于 2026-11-10 · 改 MD 后重跑该脚本并重新构建前端即可更新</footer>
+  <footer class="colophon">my_app 项目手册 · 由 frontend/scripts/generate-manual-html.mjs 从 docs/manual/*.md 同源生成于 2026-11-11 · 改 MD 后重跑该脚本并重新构建前端即可更新</footer>
 </div>
 </body>
 </html>

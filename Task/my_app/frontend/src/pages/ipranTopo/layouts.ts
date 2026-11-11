@@ -1,5 +1,5 @@
 /* ============================================================================
- * IP RAN 拓扑的三种布局（纯函数，不碰 DOM）
+ * UME 四层拓扑共用的三种布局（纯函数，不碰 DOM；层差异只在数据与口径，不在布局）
  * ============================================================================
  *
  * 为什么是三种而不是「能画多少画多少」：
@@ -37,23 +37,39 @@ export function buildIndex(nodes: TopoNode[], edges: TopoEdge[]): TopoIndex {
     adj[a].push({ n: b, e: i })
     adj[b].push({ n: a, e: i })
   })
-  // 主归属汇聚：接入点优先挂「层级更靠上、度数更大」的邻居
+  /* 主归属汇聚（V2 Phase 1）：三条规则依次比较，不再只按度数、
+     也不再依赖 adj 顺序 —— 顺序变化会让同一份数据布局抖动。
+       ① 层级更靠上的邻居优先；② 同层度数更大优先；③ 仍相同按设备 id 稳定排序。
+     parent 只用于布局；全部真实连接始终留在 adj / edges 里。 */
   const parent = nodes.map((v, i) => {
     if (v.tier !== 3) return -1
     let best = -1
-    let bestDeg = -1
     for (const a of adj[i]) {
       const nb = nodes[a.n]
-      if (nb.tier < 3 && nb.deg > bestDeg) { bestDeg = nb.deg; best = a.n }
+      if (!nb || nb.tier >= 3) continue
+      if (best < 0) { best = a.n; continue }
+      const cur = nodes[best]
+      if (nb.tier !== cur.tier) { if (nb.tier < cur.tier) best = a.n; continue }
+      if (nb.deg !== cur.deg) { if (nb.deg > cur.deg) best = a.n; continue }
+      if (nb.id < cur.id) best = a.n
     }
     return best
+  })
+  // 全量上游关系：双归属设备同时保留两个上游，不因布局只取主归属而丢连接
+  const upstream = nodes.map((v, i) => {
+    const out: number[] = []
+    for (const a of adj[i]) {
+      const nb = nodes[a.n]
+      if (nb && nb.tier < v.tier && !out.includes(a.n)) out.push(a.n)
+    }
+    return out
   })
   const hubs: number[] = []
   nodes.forEach((v, i) => { if (v.tier === 1 || v.tier === 2) hubs.push(i) })
   hubs.sort((a, b) => nodes[a].tier - nodes[b].tier || nodes[b].deg - nodes[a].deg)
   const hubOrder: Record<number, number> = {}
   hubs.forEach((h, k) => { hubOrder[h] = k })
-  return { adj, parent, hubs, hubOrder, byId }
+  return { adj, parent, upstream, hubs, hubOrder, byId }
 }
 
 /** 确定性伪随机（线性同余）：同一份数据每次布局一致 */
@@ -187,11 +203,15 @@ export function layoutTier(nodes: TopoNode[], idx: TopoIndex): LayoutResult {
 
 /* --------------------------- 布局 2：力导向 --------------------------- */
 /**
- * Fruchterman-Reingold + 弱层级引力（防止糊成一团、保住「上游在上」的直觉）。
- * 起点取分层结果再加 ±30px 抖动 —— 从随机起点出发实测交叉更多且不稳定。
- * K=36 / ITER=1400 / 种子 31415：对当前 141 条边扫出来的最优组合（42 次交叉）。
+ * Fruchterman-Reingold + 弱层级引力。起点取分层结果再加抖动。
+ * K=36 / ITER=1400 / 种子 31415 是原算法（`layoutForceClassic`）扫出来的组合。
+ * `cluster: true`（页面默认）只把接入点往主归属的水平位置拉近，不删边、不改双归属。
  */
-export function layoutForce(nodes: TopoNode[], idx: TopoIndex, edges: TopoEdge[]): LayoutResult {
+export function layoutForce(
+  nodes: TopoNode[], idx: TopoIndex, edges: TopoEdge[],
+  opts?: { cluster?: boolean },
+): LayoutResult {
+  const cluster = !!opts?.cluster
   const base = layoutTier(nodes, idx).pos
   const rnd = lcg(31415)
   const pos = base.map((p) => ({ x: p.x + (rnd() - 0.5) * 60, y: p.y + (rnd() - 0.5) * 60 }))
@@ -235,6 +255,13 @@ export function layoutForce(nodes: TopoNode[], idx: TopoIndex, edges: TopoEdge[]
     })
     for (let q = 0; q < nodes.length; q++) {
       disp[q].y += (targetY[nodes[q].tier] - pos[q].y) * 0.1
+      if (cluster && nodes[q].tier === 3) {
+        const parent = idx.parent[q]
+        if (parent >= 0) {
+          disp[q].x += (pos[parent].x - pos[q].x) * 0.045
+          disp[q].y += (pos[parent].y - pos[q].y) * 0.012
+        }
+      }
       const dl = Math.sqrt(disp[q].x * disp[q].x + disp[q].y * disp[q].y) || 0.1
       const lim = Math.min(dl, 14 * cool + 0.6)
       pos[q].x += (disp[q].x / dl) * lim
@@ -244,6 +271,11 @@ export function layoutForce(nodes: TopoNode[], idx: TopoIndex, edges: TopoEdge[]
     }
   }
   return { pos, bands: [] }
+}
+
+/** 改造前的力导向，参数与 2026-11-10 扫出的 42 次交叉组合一致。页面默认不再调用它。 */
+export function layoutForceClassic(nodes: TopoNode[], idx: TopoIndex, edges: TopoEdge[]): LayoutResult {
+  return layoutForce(nodes, idx, edges)
 }
 
 /* ---------------------------- 布局 3：地理 ---------------------------- */
@@ -306,7 +338,7 @@ export const LAYOUT_FNS: Record<
   (nodes: TopoNode[], idx: TopoIndex, edges: TopoEdge[]) => LayoutResult
 > = {
   tier: (nodes, idx) => layoutTier(nodes, idx),
-  force: (nodes, idx, edges) => layoutForce(nodes, idx, edges),
+  force: (nodes, idx, edges) => layoutForce(nodes, idx, edges, { cluster: true }),
   geo: (nodes) => layoutGeo(nodes),
 }
 

@@ -11,6 +11,30 @@
 
 **权威文档**：`docs\manual\`（16 份手册，**现状以它为准**）。
 
+## 一.5、⭐ 改完记得同步到运行副本（2026-11-11 用户确认）
+
+| | 路径 | 角色 |
+| --- | --- | --- |
+| 编辑区 | `D:\01_RPA` | **你在这里改代码**（git 仓库 / 文档 / 守卫） |
+| 运行副本 | `D:\01_olbr_portal` | **实际跑起来的地方**（7038/7090/80/443） |
+
+改完在 `D:\01_RPA` 做完，**一定要同步过去**：
+
+```powershell
+cd D:\01_RPA
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\deploy_to_copy.ps1
+```
+
+它做三件事：**同步源码 → 在副本里重建前端 → 校验副本真的在跑新代码**。
+
+> **为什么不能只同步源码**：同步只搬源码；前端是**构建产物**（`Task\_fe_dist`）、后端是**常驻进程**，两者都不吃源码变更。
+> 2026-11-11 实测 split-brain：前端 chunk 已含 `col_filters`（列头筛选），而 live 后端的
+> `/api/tables/{t}/data` OpenAPI 参数里**没有** `col_filters`、也没有 `/column-values` 路由 →
+> 用户看到「列头筛选点了没反应」「选值模式永远显示没有可选值」，是**完全坏掉的新功能**而不是报错。
+>
+> **脚本不自动重启**（重启会打断看数据的人）；校验不通过时会点名 `SPLIT-BRAIN` 并非零退出。
+> 细则见工作区根 `development.md` 第四节 D0。
+
 ## 二、新会话上手顺序
 
 ```
@@ -214,6 +238,7 @@ uvicorn 后端 (:7038)
 - [ ] **`cd Task\my_app && python tests\test_doc_consistency.py` 通过**（17 个用例；本地钩子与 CI 也会跑）
 - [ ] **新克隆的机器**跑过一次 `cd frontend && npm run setup:hooks`（否则本地钩子不生效，只能靠 CI 兜底）
 - [ ] 前端产物目录仍是 `_fe_dist`，且已重新 `npm run build`
+- [ ] **改动已同步到运行副本 `D:\01_olbr_portal`**（`cd D:\01_RPA` → `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\deploy_to_copy.ps1`；见本文一.5 节 —— 不同步 = 线上没生效）
 - [ ] 帮助内容改动后已重跑 `npm run docs`（`generate-help-doc.mjs` + `generate-manual-html.mjs`）
 - [ ] 没有新增裸 `sqlite3.connect`
 - [ ] 没有把 `db\`、`log\`、`TMP\`、`auth_cache\`、`*.pid` 加进版本库

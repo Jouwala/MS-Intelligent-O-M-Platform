@@ -106,19 +106,21 @@ start.bat
 ```
 D:\01_RPA  (主仓库 / 开发态)          D:\01_olbr_portal  (本仓库 / 便携部署态)
         │                                        │
-        │  sync-now.bat（或 scripts\sync_from_main.ps1）
+        │  sync-now.bat → D:\01_RPA\scripts\deploy_to_copy.ps1
         │    └─ scripts\sync-engine.mjs（事务式增量同步，源只读）─►│
         └────────────────────────────────────────►│
                                                  │  同步源码 + 确定性改写两处监控脚本路径
                                                  │  （不再需要 post_sync_fix_paths.ps1）
 ```
 
-**同步入口**：根目录 `sync-now.bat`（薄壳）→ `scripts\sync_from_main.ps1`（薄包装）→
-`scripts\sync-engine.mjs` + `sync-policy.mjs`（零 npm 依赖，用副本自带 `runtime\node`）。
+**日常就双击根目录 `sync-now.bat`**。它调用编辑区的 `D:\01_RPA\scripts\deploy_to_copy.ps1`：
+同步源码（引擎仍是本目录 `scripts\sync-engine.mjs`，源只读）+ 在副本里重建前端 + 校验线上是否还在跑旧代码。
+**不重启服务**。只搬源码、不重建时用 `scripts\sync_from_main.ps1`，或 `sync-now.bat -SkipBuild`。
 
 ```bat
+sync-now.bat                  REM 同步 + 重建前端 + 校验
 sync-now.bat -DryRun          REM 只预览计划，不写任何文件
-sync-now.bat                  REM 增量同步；遇本地冲突整体停止（fail-closed）
+sync-now.bat -SkipBuild       REM 只同步源码，不重建前端
 sync-now.bat -AcceptSource    REM 显式接受源版本覆盖冲突文件（先备份，可回滚）
 ```
 

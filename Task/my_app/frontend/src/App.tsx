@@ -310,8 +310,11 @@ const AR_PAGE_DEFAULTS: Partial<Record<PageKey, number>> = {
  *  只有数字更新。
  *  与 AR_SOFT_REFRESH_PAGES 的区别：那条是给 **iframe / legacy 静态页**用的（靠
  *  postMessage 让文档自己重载）；本条给同文档内的 React 页用（靠 DOM 事件）。
- *  逐页加入前必须确认该页的取数函数能在不清 loading 的前提下重跑。 */
-const AR_INPLACE_REFRESH_PAGES: PageKey[] = ['person']
+ *  逐页加入前必须确认该页的取数函数能在不清 loading 的前提下重跑。
+ *  cn_kpi_5mins（2026-11-10）：重挂载会把 data 清掉，`loading && !data` 期间
+ *  11 张图全部变成转圈空白；远端取数往往比刷新间隔还慢，下一轮重挂载还会
+ *  丢掉还没落地的响应。该页监听 myapp-refresh 静默重取，失败保留上一帧。 */
+const AR_INPLACE_REFRESH_PAGES: PageKey[] = ['person', 'cn_kpi_5mins']
 // 支持软刷新协议（postMessage myapp-refresh 原地重拉数据）的 legacy 页面 / React 内嵌页。
 // imonitor：跨端口 iframe 无法由外壳重挂载来刷新（会整页闪白），改由页面自己
 // 监听 myapp-refresh 后在 iframe 内原地重载（见 ImonitorScreen.tsx）。

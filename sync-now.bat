@@ -1,24 +1,26 @@
 @echo off
 setlocal EnableExtensions
-title Sync source from main repo into portable copy
+title Deploy: sync, rebuild frontend, verify
 chcp 65001 >nul 2>&1
 cd /d "%~dp0"
 
 echo.
 echo  ============================================================
-echo   Portable copy - transactional source sync (source READ-ONLY)
-echo   Backups stay in this folder's TMP\
+echo   One step: sync source + rebuild frontend + verify
+echo   Source repo is READ-ONLY. This does NOT restart services.
 echo  ============================================================
 echo.
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\sync_from_main.ps1" %*
+powershell -NoProfile -ExecutionPolicy Bypass -File "D:\01_RPA\scripts\deploy_to_copy.ps1" %*
 set "RC=%ERRORLEVEL%"
 
 echo.
 echo  ------------------------------------------------------------
 echo   Finished. Exit code: %RC%
-echo   Preview only  -^>  sync-now.bat -DryRun
-echo   Accept source -^>  sync-now.bat -AcceptSource  (backs up local edits)
+echo   Preview only    -^>  sync-now.bat -DryRun
+echo   Source only     -^>  sync-now.bat -SkipBuild
+echo   Accept source   -^>  sync-now.bat -AcceptSource
+echo   Restart only if the script above says the backend is still old.
 echo  ------------------------------------------------------------
 echo.
 

@@ -6,25 +6,26 @@
  * （层清单与口径见后端 layers.py、前端 ipranTopo/layerDefs.ts）。
  * 本页只负责「怎么画得好看、点得动」：
  *
- *   布局 3 种（力导向默认 / 地理 / 分层），可读性依据见 ipranTopo/layouts.ts 顶部：
- *     力导向 42 次边交叉（默认）、地理 221 次（回答「影响哪个城市」）、分层 390 次（导出用）。
+ *   布局 3 种（力导向默认且带主归属聚类 / 地理 / 分层），原力导向留在 layoutForceClassic。
  *   着色 3 种：按层级（默认）/ 按在线状态 / 按最高告警级 —— 告警色**不是默认**：
  *     实测 80% 网元都带紧急告警，按告警级填色会全红、失去区分度（后端 warnings 也会说明）。
  *   告警只做节点右上角小红点；带宽只做线宽；断链红色虚线。颜色全部服务于故障态。
  *
- * 交互：点节点聚焦（其余变暗、只显示一跳邻居）；点边看物理链路明细；
+ * 交互：点节点聚焦（其余变暗、只显示一跳邻居），详情从右侧滑出；
+ * 右栏（约 25%，与微波实时页同一套分栏）从上到下是统计卡、紧急告警榜，
+ * 两者同宽；左栏画布吃掉工具条之下剩余的全部高度。
+ * 点边看物理链路明细；
  * 统计卡点开是「构成这个数的那些行」（TopoDrillModal），与卡上数字同一份数据。
  * 切页签会清空旧层数据与聚焦态，并用请求序号丢弃「切走后迟到的旧层响应」；
  * 自动刷新：已登记 AR_INPLACE_REFRESH_PAGES，监听 myapp-refresh 只静默重取当前层。
  * ========================================================================== */
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
-import { Alert, Button, Col, Empty, Row, Segmented, Space, Spin, Switch, Table } from 'antd'
-import { DownloadOutlined, ReloadOutlined } from '@ant-design/icons'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent } from 'react'
+import { Alert, Drawer, Empty, Spin } from 'antd'
 import dayjs from 'dayjs'
 
 import { useI18n } from '../i18n'
-import { WH, useTheme } from '../theme'
-import { CardBase, StatCard } from '../components/cards'
+import { WH } from '../theme'
+import { CardBase } from '../components/cards'
 import { ExplainIcon, ExplainPopover } from '../components/MetricExplain'
 import CalcChainNote, { type CalcChainSection } from '../components/CalcChainNote'
 import { exportReport } from '../utils/excelReport'
@@ -32,18 +33,35 @@ import { formatDateTime } from '../datetime'
 import { getIpranTopoGraph } from '../api'
 import TopoCanvas from './ipranTopo/TopoCanvas'
 import TopoDrillModal, { type DrillKind } from './ipranTopo/TopoDrillModal'
-import { buildIndex, LAYOUT_FNS } from './ipranTopo/layouts'
-import { LAYER_KEYS, LAYER_LABEL_KEY, calcSectionKeys, explainKeys, isLayerKey } from './ipranTopo/layerDefs'
-import type { ColorMode, LayerKey, LayoutKey, Tier, TopoEdge, TopoNode, TopoResp } from './ipranTopo/types'
+import TopoGeoMap from './ipranTopo/TopoGeoMap'
+import TopologyControls, { type StatusFilter, type TierFilter } from './ipranTopo/TopologyControls'
+import TopologyDetails from './ipranTopo/TopologyDetails'
+import TopologyLegend from './ipranTopo/TopologyLegend'
+import TopologyMetrics from './ipranTopo/TopologyMetrics'
+import { buildIndex } from './ipranTopo/layouts'
+import { cachedLayout } from './ipranTopo/layoutCache'
+import { analyzeGraph } from './ipranTopo/faultAnalysis'
+import { LAYER_LABEL_KEY, calcSectionKeys, explainKeys, isLayerKey } from './ipranTopo/layerDefs'
+import type { ColorMode, LayerKey, LayoutKey, Tier, TopoNode, TopoResp } from './ipranTopo/types'
 
 type Drill = { kind: DrillKind; anchor: { x: number; y: number } }
-type NbRow = { node: TopoNode; edge: TopoEdge }
+type ViewCmd = { seq: number; kind: 'in' | 'out' | 'fit' }
+
+/** 门户 GIS Map 的 IP 页签（`?maponly=1`）只留网络拓扑画布。
+ *  与 Person 页的 maponly 同一约定：embed 只藏外壳，这个参数才藏页面自己的
+ *  工具条 / KPI / 告警榜。Open Link 会剥掉它，新窗口仍是完整页。 */
+function readMapOnlyMode(): boolean {
+  try {
+    const sp = new URLSearchParams(window.location.search)
+    return sp.get('maponly') === '1' || sp.get('maponly') === 'true'
+  } catch { return false }
+}
 
 export default function IpranTopo() {
   const { t } = useI18n()
-  const { colors } = useTheme()
 
   /* 层：URL 的 &layer= 可深链到单层，非法值回落到 ipran（与后端白名单一致） */
+  const [mapOnly] = useState(readMapOnlyMode)
   const [layer, setLayer] = useState<LayerKey>(() => {
     const v = new URLSearchParams(window.location.search).get('layer')
     return isLayerKey(v) ? v : 'ipran'
@@ -56,6 +74,11 @@ export default function IpranTopo() {
   const [showAllLabels, setShowAllLabels] = useState(false)
   const [foldParallel, setFoldParallel] = useState(true)
   const [focus, setFocus] = useState(-1)
+  const [selectedEdge, setSelectedEdge] = useState(-1)
+  const [query, setQuery] = useState('')
+  const [tierFilter, setTierFilter] = useState<TierFilter>('all')
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
+  const [viewCmd, setViewCmd] = useState<ViewCmd | null>(null)
   const [drill, setDrill] = useState<Drill | null>(null)
   // 快速连切页签时先发的请求可能后返回，只认最后一次请求的响应
   const reqSeq = useRef(0)
@@ -100,6 +123,7 @@ export default function IpranTopo() {
     setError('')
     setLoading(true)
     setFocus(-1)
+    setSelectedEdge(-1)
     setDrill(null)
   }
   const explain = explainKeys(layer)
@@ -107,7 +131,10 @@ export default function IpranTopo() {
   const nodes = useMemo(() => resp?.nodes ?? [], [resp])
   const edges = useMemo(() => resp?.edges ?? [], [resp])
   const idx = useMemo(() => buildIndex(nodes, edges), [nodes, edges])
-  const layout = useMemo(() => LAYOUT_FNS[layoutKey](nodes, idx, edges), [layoutKey, nodes, idx, edges])
+  const layout = useMemo(
+    () => cachedLayout(layoutKey, nodes, idx, edges),
+    [layoutKey, nodes, idx, edges],
+  )
   const focusSafe = focus >= 0 && focus < nodes.length ? focus : -1
 
   /* ---- 统计（卡片与下钻弹窗取同一份数组，口径不会对不上） ---- */
@@ -120,22 +147,25 @@ export default function IpranTopo() {
   const critPct = ne ? Math.round((critNe * 100) / ne) : 0
   const downNe = useMemo(() => nodes.filter((v) => v.tier > 0 && !v.up).length, [nodes])
 
-  /* 告警按页面已知的口径就地重建成中英双语；后端未知前缀（如 load_failed）原样显示，不吞 */
-  const warnLines = useMemo(() => {
-    if (!meta) return []
-    const out: string[] = []
-    if (meta.stale) out.push(t('ipranTopo.warn.stale'))
+  /* 告警按页面已知的口径就地重建成中英双语；后端未知前缀（如 load_failed）原样显示，不吞。
+     取数降级（stale）留在工具条下，用户正在看的不是本次结果。
+     告警饱和 / 缺坐标 / 近似匹配是说明，不是本次取数失败，放到页底，避免把画布顶下去。 */
+  const { topWarns, footWarns } = useMemo(() => {
+    const top: string[] = []
+    const foot: string[] = []
+    if (!meta) return { topWarns: top, footWarns: foot }
+    if (meta.stale) top.push(t('ipranTopo.warn.stale'))
     if (ne && critNe / ne > 0.5) {
-      out.push(t('ipranTopo.warn.alarmSaturated', { crit: critNe, ne, pct: critPct }))
+      foot.push(t('ipranTopo.warn.alarmSaturated', { crit: critNe, ne, pct: critPct }))
     }
     const miss = meta.geo?.miss ?? 0
-    if (miss) out.push(t('ipranTopo.warn.geoMiss', { n: miss }))
+    if (miss) foot.push(t('ipranTopo.warn.geoMiss', { n: miss }))
     const fuzzy = meta.geo?.fuzzy ?? 0
-    if (fuzzy) out.push(t('ipranTopo.warn.geoFuzzy', { n: fuzzy }))
+    if (fuzzy) foot.push(t('ipranTopo.warn.geoFuzzy', { n: fuzzy }))
     for (const w of meta.warnings || []) {
-      if (!/^(alarm_saturated|geo_miss|geo_fuzzy|upstream_unreachable):/.test(w)) out.push(w)
+      if (!/^(alarm_saturated|geo_miss|geo_fuzzy|upstream_unreachable):/.test(w)) foot.push(w)
     }
-    return out
+    return { topWarns: top, footWarns: foot }
   }, [meta, ne, critNe, critPct, t])
 
   const tierName = (tier: Tier) => {
@@ -147,27 +177,64 @@ export default function IpranTopo() {
     }
   }
 
-  const legendItems = useMemo(() => {
-    const items: { c: string; label: string }[] = []
-    const tierColor = [WH.textDim, colors[0], colors[1], colors[2]]
-    if (colorMode === 'up') {
-      items.push({ c: WH.ok, label: t('ipranTopo.legend.upOn') })
-      items.push({ c: WH.danger, label: t('ipranTopo.legend.upOff') })
-      items.push({ c: WH.textDim, label: tierName(0) })
-    } else if (colorMode === 'sev') {
-      items.push({ c: WH.sev.Critical, label: t('ipranTopo.sev.crit') })
-      items.push({ c: WH.sev.Major, label: t('ipranTopo.sev.major') })
-      items.push({ c: WH.sev.Warning, label: t('ipranTopo.sev.minor') })
-      items.push({ c: WH.sev.Info, label: t('ipranTopo.sev.warn') })
-      items.push({ c: WH.ok, label: t('ipranTopo.sev.ok') })
-    } else {
-      ;([0, 1, 2, 3] as Tier[]).forEach((k) => {
-        const n = meta?.tierCounts?.[String(k)] ?? 0
-        items.push({ c: tierColor[k], label: `${tierName(k)}（${n}）` })
-      })
+  const filtering = tierFilter !== 'all' || statusFilter !== 'all' || query.trim().length > 0
+  const dimmed = useMemo(() => {
+    if (!filtering) return null
+    const q = query.trim().toLowerCase()
+    return nodes.map((v) => {
+      if (tierFilter !== 'all' && v.tier !== tierFilter) return true
+      if (statusFilter === 'up' && !v.up) return true
+      if (statusFilter === 'down' && !!v.up) return true
+      if (statusFilter === 'alarm' && !(v.crit || v.major || v.minor || v.warn)) return true
+      if (q && !`${v.name} ${v.site} ${v.ip}`.toLowerCase().includes(q)) return true
+      return false
+    })
+  }, [filtering, nodes, tierFilter, statusFilter, query])
+
+  const fault = useMemo(() => analyzeGraph(idx, nodes, edges), [idx, nodes, edges])
+  const showImpact = focusSafe >= 0 && (nodes[focusSafe]?.up === 0
+    || fault.candidates.some((c) => c.index === focusSafe))
+  const impacted = useMemo(() => {
+    if (!showImpact || focusSafe < 0) return null
+    const downStream = new Set<number>()
+    const tier = nodes[focusSafe].tier
+    const seen = new Set<number>([focusSafe])
+    const queue = [focusSafe]
+    const isolated = new Set(fault.isolated)
+    for (let head = 0; head < queue.length; head++) {
+      for (const a of idx.adj[queue[head]] || []) {
+        const nb = nodes[a.n]
+        if (!nb || nb.tier <= tier || seen.has(a.n)) continue
+        seen.add(a.n)
+        if (isolated.has(a.n) || nb.up === 0) {
+          downStream.add(a.n)
+          queue.push(a.n)
+        }
+      }
     }
-    return items
-  }, [colorMode, colors, meta, t])
+    return downStream
+  }, [showImpact, focusSafe, nodes, idx, fault])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      const tag = (e.target as HTMLElement | null)?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return
+      setFocus(-1)
+      setSelectedEdge(-1)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
+  const locate = () => {
+    const q = query.trim().toLowerCase()
+    if (!q) return
+    const hit = nodes.findIndex((v) => `${v.name} ${v.site} ${v.ip}`.toLowerCase().includes(q))
+    if (hit >= 0) { setFocus(hit); setSelectedEdge(-1) }
+  }
+
+  const bumpView = (kind: ViewCmd['kind']) => setViewCmd((prev) => ({ seq: (prev?.seq ?? 0) + 1, kind }))
 
   /* ---- 告警 Top 10：点网元名聚焦到画布 ---- */
   const topRows = useMemo(
@@ -178,66 +245,11 @@ export default function IpranTopo() {
     [nodes],
   )
 
-  const topCols = useMemo(() => [
-    {
-      title: t('ipranTopo.col.name'), dataIndex: 'name', key: 'name',
-      render: (v: string, r: TopoNode) => <a onClick={() => setFocus(idx.byId[r.id])}>{v}</a>,
-    },
-    {
-      title: t('ipranTopo.col.tier'), dataIndex: 'tier', key: 'tier', width: 120,
-      render: (v: Tier) => tierName(v),
-    },
-    { title: t('ipranTopo.col.site'), dataIndex: 'site', key: 'site', width: 180 },
-    {
-      title: <span>{t('ipranTopo.col.crit')} <ExplainIcon text={t('ipranTopo.critExplain')} /></span>,
-      dataIndex: 'crit', key: 'crit', width: 100,
-      render: (v: number, r: TopoNode) => (
-        <ExplainPopover text={t('ipranTopo.critTip', {
-          name: r.name, crit: r.crit, major: r.major, minor: r.minor, warn: r.warn,
-        })}>
-          <b style={{ color: v > 0 ? WH.sev.Critical : WH.textMuted }}>{v}</b>
-        </ExplainPopover>
-      ),
-    },
-    { title: t('ipranTopo.col.major'), dataIndex: 'major', key: 'major', width: 90 },
-    { title: t('ipranTopo.col.minor'), dataIndex: 'minor', key: 'minor', width: 90 },
-    { title: t('ipranTopo.col.warn'), dataIndex: 'warn', key: 'warn', width: 90 },
-  ], [t, idx])
+  /* 右栏大约 340px，七列表格会把「网元」列压成 0 宽，名字逐字竖排，一行能到 600px。
+     这里跟微波实时页的风险榜一样：固定 3rem 一行，名字省略，紧急数贴右。
+     层级 / 站点 / 其余告警级放在第二行，悬停数字仍是原来的分项说明。 */
 
-  /* ---- 聚焦节点的邻居 ---- */
-  const focusNode = focusSafe >= 0 ? nodes[focusSafe] : null
-  const neighbors = useMemo(() => {
-    if (focusSafe < 0) return []
-    return (idx.adj[focusSafe] || [])
-      .map((a) => ({ node: nodes[a.n], edge: edges[a.e] }))
-      .sort((x, y) => x.node.tier - y.node.tier || x.node.name.localeCompare(y.node.name))
-  }, [focusSafe, idx, nodes, edges])
-
-  const nbCols = useMemo(() => [
-    {
-      title: t('ipranTopo.col.peer'), key: 'peer',
-      render: (_: unknown, r: NbRow) => (
-        <a onClick={() => setFocus(idx.byId[r.node.id])}>{r.node.name}</a>
-      ),
-    },
-    {
-      title: t('ipranTopo.col.tier'), key: 'tier', width: 120,
-      render: (_: unknown, r: NbRow) => tierName(r.node.tier),
-    },
-    {
-      title: t('ipranTopo.col.physLinks'), key: 'n', width: 110,
-      render: (_: unknown, r: NbRow) => r.edge.n,
-    },
-    {
-      title: t('ipranTopo.col.gb'), key: 'gb', width: 100,
-      render: (_: unknown, r: NbRow) => (r.edge.gb == null ? '-' : `${r.edge.gb}G`),
-    },
-    {
-      title: t('ipranTopo.col.downLinks'), key: 'down', width: 110,
-      render: (_: unknown, r: NbRow) => (r.edge.down
-        ? <span style={{ color: WH.danger }}>{r.edge.down}</span> : '0'),
-    },
-  ], [t, idx])
+  const inLayer = useMemo(() => nodes.filter((v) => v.tier > 0).length, [nodes])
 
   /* ---- 导出：网元 + 链路两张 sheet（统一走 excelReport） ---- */
   const doExport = useCallback(() => {
@@ -290,156 +302,268 @@ export default function IpranTopo() {
   const openDrill = (kind: DrillKind) => (e: ReactMouseEvent<HTMLDivElement>) =>
     setDrill({ kind, anchor: { x: e.clientX, y: e.clientY } })
 
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--wh-space-md)' }}>
-
-      {/* 拓扑层页签：四层共用同一份画布 / 统计卡 / 下钻 / 导出，切层只换数据源 */}
-      <CardBase bodyStyle={{ padding: 'var(--wh-space-sm) var(--wh-space-md)' }}>
-        <Space wrap size={12} align="center">
-          <span style={{ color: WH.textMuted, fontSize: 13 }}>{t('ipranTopo.toolbar.layer')}</span>
-          <Segmented className="wh-seg" size="small" value={layer}
-            onChange={(v) => changeLayer(v as LayerKey)}
-            options={LAYER_KEYS.map((k) => ({ label: t(LAYER_LABEL_KEY[k]), value: k }))} />
-          <span style={{ color: WH.textDim, fontSize: 12 }}>{t('ipranTopo.layer.hint')}</span>
-        </Space>
-      </CardBase>
-
-      {/* ① 工具条：布局 / 着色 / 开关 / 重新取数 / 导出 */}
-      <CardBase bodyStyle={{ padding: 'var(--wh-space-sm) var(--wh-space-md)' }}>
-        <Space wrap size={12} align="center">
-          <span style={{ color: WH.textMuted, fontSize: 13 }}>{t('ipranTopo.toolbar.layout')}</span>
-          <Segmented className="wh-seg" size="small" value={layoutKey}
-            onChange={(v) => setLayoutKey(v as LayoutKey)}
-            options={[
-              { label: t('ipranTopo.layout.force'), value: 'force' },
-              { label: t('ipranTopo.layout.geo'), value: 'geo' },
-              { label: t('ipranTopo.layout.tier'), value: 'tier' },
-            ]} />
-          <span style={{ color: WH.textMuted, fontSize: 13 }}>{t('ipranTopo.toolbar.color')}</span>
-          <Segmented className="wh-seg" size="small" value={colorMode}
-            onChange={(v) => setColorMode(v as ColorMode)}
-            options={[
-              { label: t('ipranTopo.color.tier'), value: 'tier' },
-              { label: t('ipranTopo.color.up'), value: 'up' },
-              { label: t('ipranTopo.color.sev'), value: 'sev' },
-            ]} />
-          <Switch size="small" checked={showAllLabels} onChange={setShowAllLabels}
-            checkedChildren={t('ipranTopo.opt.allLabels')} unCheckedChildren={t('ipranTopo.opt.allLabels')} />
-          <Switch size="small" checked={foldParallel} onChange={setFoldParallel}
-            checkedChildren={t('ipranTopo.opt.fold')} unCheckedChildren={t('ipranTopo.opt.fold')} />
-          <Button icon={<ReloadOutlined />} loading={loading}
-            onClick={() => void load({ force: true })}>{t('ipranTopo.btn.refresh')}</Button>
-          <Button icon={<DownloadOutlined />} disabled={!resp?.nodes.length}
-            onClick={doExport}>{t('ipranTopo.btn.export')}</Button>
-          {meta && (
-            <span style={{ color: WH.textDim, fontSize: 12 }}>
-              {t('ipranTopo.meta.line', {
-                sec: (meta.elapsedSec ?? 0).toFixed(2),
-                at: formatDateTime(meta.fetchedAt),
-                cached: meta.cached ? t('ipranTopo.meta.cached') : '',
-              })}
-            </span>
+  /* 门户 IP 页签：只留网络拓扑。工具条、KPI、口径、告警榜都不画。
+     缩放钮留在画布上，因为门户默认锁住滚轮（跟 Person 的 Leaflet +/- 一样）。
+     点节点/链路仍开右侧详情，那是画布自己的交互，不是页面上的另一块。 */
+  if (mapOnly) {
+    const zoomBtn: CSSProperties = {
+      width: 30, height: 30, padding: 0, cursor: 'pointer',
+      border: `1px solid ${WH.cardBorder}`, borderRadius: 4,
+      background: WH.cardBg, color: WH.text, fontSize: 16, lineHeight: '28px',
+    }
+    return (
+      <div style={{ flex: '1 1 auto', height: '100%', minHeight: 0, position: 'relative', overflow: 'hidden' }}>
+        {error && <Alert type="error" showIcon message={error} style={{ margin: 8 }} />}
+        {meta?.stale && !error && (
+          <Alert type="warning" showIcon message={t('ipranTopo.warn.stale')} style={{ margin: 8 }} />
+        )}
+        {loading && !resp ? (
+          <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Spin /></div>
+        ) : nodes.length === 0 ? (
+          <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <Empty description={t('ipranTopo.empty')} />
+          </div>
+        ) : (
+          <TopoCanvas
+            fill
+            nodes={nodes} edges={edges} idx={idx} layout={layout}
+            colorMode={colorMode} focus={focusSafe}
+            showAllLabels={showAllLabels} foldParallel={foldParallel}
+            dimmed={dimmed} impacted={impacted} selectedEdge={selectedEdge}
+            viewCmd={viewCmd} resetKey={`${layer}:${layoutKey}`}
+            markGeo={layoutKey === 'geo'}
+            onToggleFocus={(i) => { setFocus((prev) => (prev === i ? -1 : i)); setSelectedEdge(-1) }}
+            onSelectEdge={(i) => { setSelectedEdge(i); setFocus(-1) }}
+            onBackgroundClick={() => { setFocus(-1); setSelectedEdge(-1) }}
+          />
+        )}
+        <div style={{ position: 'absolute', left: 12, right: 56, bottom: 8, zIndex: 2, pointerEvents: 'none' }}>
+          <TopologyLegend colorMode={colorMode} tierCounts={meta?.tierCounts} />
+        </div>
+        <div style={{ position: 'absolute', top: 12, right: 12, display: 'flex', flexDirection: 'column', gap: 4, zIndex: 2 }}>
+          <button type="button" style={zoomBtn} title={t('ipranTopo.btn.zoomIn')} onClick={() => bumpView('in')}>+</button>
+          <button type="button" style={zoomBtn} title={t('ipranTopo.btn.zoomOut')} onClick={() => bumpView('out')}>−</button>
+          <button type="button" style={zoomBtn} title={t('ipranTopo.btn.fit')} onClick={() => bumpView('fit')}>⛶</button>
+        </div>
+        <Drawer
+          placement="right"
+          width="min(95vw, 45rem)"
+          open={focusSafe >= 0 || selectedEdge >= 0}
+          onClose={() => { setFocus(-1); setSelectedEdge(-1) }}
+          title={focusSafe >= 0
+            ? t('ipranTopo.focus.title', { name: nodes[focusSafe]?.name ?? '' })
+            : t('ipranTopo.detail.linkTitle')}
+          destroyOnClose
+        >
+          {(focusSafe >= 0 || selectedEdge >= 0) && (
+            <TopologyDetails
+              nodes={nodes} edges={edges} idx={idx} fault={fault}
+              focus={focusSafe} selectedEdge={selectedEdge}
+              onFocus={(i) => { setFocus(i); setSelectedEdge(-1) }}
+            />
           )}
-        </Space>
-      </CardBase>
+        </Drawer>
+      </div>
+    )
+  }
 
-      {/* ② 异常必须常驻可见：取数降级、无坐标、近似匹配、告警饱和 */}
+  return (
+    <div style={{
+      display: 'flex', flexDirection: 'column', gap: 'var(--wh-space-md)',
+      /* flex:1 认领内容区剩余高度，下面的画布行才能把「工具条之下」吃满。
+         父级 #main-content 是 flex 列，不写这个只按内容高度排，地图底下会空一截。 */
+      flex: 1, minHeight: 0,
+    }}>
+
+      <div style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 'var(--wh-space-md)' }}>
+      <TopologyControls
+        layer={layer} onLayer={changeLayer}
+        layoutKey={layoutKey} onLayout={setLayoutKey}
+        colorMode={colorMode} onColor={setColorMode}
+        showAllLabels={showAllLabels} onAllLabels={setShowAllLabels}
+        foldParallel={foldParallel} onFold={setFoldParallel}
+        loading={loading} onRefresh={() => void load({ force: true })}
+        onExport={doExport} canExport={!!resp?.nodes.length}
+        metaLine={meta ? t('ipranTopo.meta.line', {
+          sec: (meta.elapsedSec ?? 0).toFixed(2),
+          at: formatDateTime(meta.fetchedAt),
+          cached: meta.cached ? t('ipranTopo.meta.cached') : '',
+        }) : null}
+        query={query} onQuery={setQuery} onLocate={locate}
+        tierFilter={tierFilter} onTier={setTierFilter}
+        statusFilter={statusFilter} onStatus={setStatusFilter}
+        onZoomIn={() => bumpView('in')} onZoomOut={() => bumpView('out')} onFit={() => bumpView('fit')}
+      />
+
+      {/* 取数失败 / 降级留在工具条下：用户正在看的数可能不是本次结果。 */}
       {error && <Alert type="error" showIcon message={error} />}
-      {warnLines.length > 0 && (
+      {topWarns.length > 0 && (
         <Alert type="warning" showIcon message={
-          <div>{warnLines.map((w, i) => <div key={i}>{w}</div>)}</div>
+          <div>{topWarns.map((w, i) => <div key={i}>{w}</div>)}</div>
         } />
       )}
+      </div>
 
-      {/* ③ 统计卡：点开是「构成这个数的那些行」 */}
-      <Row gutter={[12, 12]}>
-        <Col xs={24} sm={12} lg={6}>
-          <StatCard title={t('ipranTopo.kpi.ne')} value={ne} accentColor={WH.teal}
-            subText={t('ipranTopo.kpi.neSub', { n: ext })}
-            explainText={t(explain.ne)} onClick={openDrill('ne')} />
-        </Col>
-        <Col xs={24} sm={12} lg={6}>
-          <StatCard title={t('ipranTopo.kpi.links')} value={folded} accentColor={colors[1]}
-            subText={t('ipranTopo.kpi.linksSub', { n: rawLinks })}
-            explainText={t(explain.links)} onClick={openDrill('links')} />
-        </Col>
-        <Col xs={24} sm={12} lg={6}>
-          <StatCard title={t('ipranTopo.kpi.down')} value={downNe}
-            accentColor={downNe ? WH.danger : WH.ok}
-            subText={t('ipranTopo.kpi.downSub')}
-            explainText={t(explain.down)} onClick={openDrill('down')} />
-        </Col>
-        <Col xs={24} sm={12} lg={6}>
-          <StatCard title={t('ipranTopo.kpi.crit')} value={critNe}
-            accentColor={WH.sev.Major}
-            subText={t('ipranTopo.kpi.critSub', { pct: critPct })}
-            explainText={t(explain.crit)} onClick={openDrill('crit')} />
-        </Col>
-      </Row>
-
-      {/* ④ 口径说明：默认收起（异常已在 ② 常驻） */}
-      <CalcChainNote title={t('ipranTopo.calc.title')} sections={calcSections} />
-
-      {/* ⑤ 画布 */}
-      <CardBase title={t('ipranTopo.canvas.title')}
-        extra={<span style={{ color: WH.textDim, fontSize: 12 }}>{t('ipranTopo.canvas.hint')}</span>}>
-        {loading && !resp ? <Spin /> : nodes.length === 0 ? <Empty description={t('ipranTopo.empty')} /> : (
-          <>
-            <TopoCanvas
-              nodes={nodes} edges={edges} idx={idx} layout={layout}
-              colorMode={colorMode} focus={focusSafe}
-              showAllLabels={showAllLabels} foldParallel={foldParallel}
-              onToggleFocus={(i) => setFocus((prev) => (prev === i ? -1 : i))}
-            />
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'center',
-              marginTop: 'var(--wh-space-sm)', fontSize: 12, color: WH.textMuted }}>
-              {legendItems.map((it, i) => (
-                <span key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                  <span style={{ width: 10, height: 10, borderRadius: 5, background: it.c,
-                    border: `1px solid ${WH.cardBorder}`, display: 'inline-block' }} />
-                  {it.label}
-                </span>
-              ))}
-              <span style={{ color: WH.textDim }}>{t('ipranTopo.legend.line')}</span>
+      {/* ⑤ 画布左 75% + 右栏 25%。右栏先排统计卡，再排告警榜，两块同宽。
+          画布行 flex:1 吃掉工具条之下、页底说明之上的高度。
+          窄屏（两栏 basis 加起来放不下）自动换行，右栏落到画布下面。 */}
+      <div style={{
+        display: 'flex', gap: 12, alignItems: 'stretch', flexWrap: 'wrap',
+        flex: 1, minHeight: 0,
+      }}>
+        <div style={{
+          flex: '3 1 640px', minWidth: 0, minHeight: 0,
+          display: 'flex', flexDirection: 'column',
+        }}>
+          <CardBase title={t('ipranTopo.canvas.title')}
+            extra={<ExplainIcon text={t('ipranTopo.canvas.hint')} placement="bottomLeft" icon="question" />}
+            style={{
+              flex: 1, minHeight: 360, minWidth: 0,
+              display: 'flex', flexDirection: 'column', overflow: 'hidden',
+            }}
+            bodyStyle={{
+              flex: '1 1 0%', minHeight: 0, height: 'auto',
+              display: 'flex', flexDirection: 'column', overflow: 'hidden',
+            }}>
+            {loading && !resp ? <Spin /> : nodes.length === 0 ? <Empty description={t('ipranTopo.empty')} /> : (
+              <>
+                {/* 绝对定位铺满卡片剩余高度。不能靠 svg 的 height:100%：
+                    flex 分到的高度对百分比是不确定的，画布会塌成 0。 */}
+                <div style={{ flex: '1 1 0%', minHeight: 0, position: 'relative' }}>
+                  <div style={{ position: 'absolute', inset: 0 }}>
+                    <TopoCanvas
+                      fill
+                      nodes={nodes} edges={edges} idx={idx} layout={layout}
+                      colorMode={colorMode} focus={focusSafe}
+                      showAllLabels={showAllLabels} foldParallel={foldParallel}
+                      dimmed={dimmed} impacted={impacted} selectedEdge={selectedEdge}
+                      markGeo={layoutKey === 'geo'}
+                      viewCmd={viewCmd} resetKey={`${layer}:${layoutKey}`}
+                      onToggleFocus={(i) => { setFocus((prev) => (prev === i ? -1 : i)); setSelectedEdge(-1) }}
+                      onSelectEdge={(i) => { setSelectedEdge(i); setFocus(-1) }}
+                      onBackgroundClick={() => { setFocus(-1); setSelectedEdge(-1) }}
+                    />
+                  </div>
+                </div>
+                <div style={{ flexShrink: 0 }}>
+                  <TopologyLegend colorMode={colorMode} tierCounts={meta?.tierCounts} />
+                </div>
+              </>
+            )}
+          </CardBase>
+          {layoutKey === 'geo' && nodes.length > 0 && (
+            <div style={{ marginTop: 12, flexShrink: 0 }}>
+              <TopoGeoMap nodes={nodes} impacted={impacted}
+                onFocus={(i) => { setFocus(i); setSelectedEdge(-1) }} />
             </div>
-          </>
-        )}
-      </CardBase>
-
-      {/* ⑥ 聚焦面板 + 告警 Top 10 */}
-      <Row gutter={[12, 12]}>
-        {focusNode && (
-          <Col xs={24} lg={12}>
-            <CardBase title={t('ipranTopo.focus.title', { name: focusNode.name })}
-              extra={<Button size="small" type="link"
-                onClick={() => setFocus(-1)}>{t('ipranTopo.focus.clear')}</Button>}>
-              <div style={{ fontSize: 12, color: WH.textMuted, marginBottom: 8, lineHeight: 1.8 }}>
-                <div>{t('ipranTopo.focus.info', {
-                  tier: tierName(focusNode.tier), model: focusNode.model || '-', ip: focusNode.ip || '-',
-                })}</div>
-                <div>{t('ipranTopo.focus.alarms', {
-                  crit: focusNode.crit, major: focusNode.major,
-                  minor: focusNode.minor, warn: focusNode.warn,
-                })}</div>
-                {focusNode.tier === 3 && idx.parent[focusSafe] >= 0 && (
-                  <div>{t('ipranTopo.focus.parent', { name: nodes[idx.parent[focusSafe]].name })}</div>
-                )}
-              </div>
-              <Table rowKey={(r: NbRow) => r.node.id} size="small" columns={nbCols}
-                dataSource={neighbors} pagination={false} scroll={{ y: 260 }} />
-            </CardBase>
-          </Col>
-        )}
-        <Col xs={24} lg={focusNode ? 12 : 24}>
-          <CardBase title={t('ipranTopo.alarmTitle')}
-            extra={<span style={{ color: WH.textDim, fontSize: 12 }}>{t('ipranTopo.alarmHint')}</span>}>
+          )}
+        </div>
+        <div style={{
+          flex: '1 1 260px', minWidth: 260, maxWidth: '100%',
+          minHeight: 0, alignSelf: 'stretch', overflow: 'hidden',
+          display: 'flex', flexDirection: 'column', gap: 12,
+        }}>
+          <TopologyMetrics
+            ne={ne} ext={ext} folded={folded} rawLinks={rawLinks}
+            downNe={downNe} critNe={critNe} critPct={critPct}
+            inLayer={inLayer} edges={edges} explain={explain} onDrill={openDrill}
+          />
+          {/* flex:1 把告警榜接到统计卡下面，两块加起来正好等于左侧地图的高度。
+              名单超出时只在这张卡里滚动，不把地图顶高。 */}
+          <CardBase
+            style={{
+              flex: '1 1 0%', minHeight: 0,
+              display: 'flex', flexDirection: 'column', overflow: 'hidden',
+            }}
+            bodyStyle={{ flex: '1 1 0%', minHeight: 0, height: 'auto', overflow: 'auto' }}
+            title={
+            <span style={{ whiteSpace: 'normal', lineHeight: 1.35 }}>{t('ipranTopo.alarmTitle')}</span>
+          }>
             {topRows.length
-              ? <Table rowKey="id" size="small" columns={topCols} dataSource={topRows}
-                  pagination={false} scroll={{ x: 760 }} />
+              ? (
+                <>
+                  <div style={{ fontSize: 12, color: WH.textDim, marginBottom: 6 }}>
+                    {t('ipranTopo.alarmHint')}
+                  </div>
+                  <div style={{
+                    display: 'flex', alignItems: 'center', gap: 8,
+                    fontSize: 12, color: WH.textDim, padding: '0 4px 4px',
+                  }}>
+                    <span style={{ flex: 1, minWidth: 0 }}>{t('ipranTopo.col.name')}</span>
+                    <span>{t('ipranTopo.col.crit')} <ExplainIcon text={t('ipranTopo.critExplain')} /></span>
+                  </div>
+                  {topRows.map((r) => {
+                    const sub = `${tierName(r.tier)} · ${r.site || '—'} · ${t('ipranTopo.col.major')} ${r.major} · ${t('ipranTopo.col.minor')} ${r.minor} · ${t('ipranTopo.col.warn')} ${r.warn}`
+                    return (
+                      <div key={r.id} style={{
+                        display: 'flex', alignItems: 'center', gap: 8,
+                        height: '3rem', padding: '0 4px', overflow: 'hidden',
+                        borderTop: 'var(--wh-card-border)',
+                      }}>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <a
+                            title={r.name}
+                            onClick={() => setFocus(idx.byId[r.id])}
+                            style={{
+                              display: 'block', fontWeight: 600, fontSize: 12, lineHeight: '1.1rem',
+                              whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                            }}
+                          >{r.name}</a>
+                          <div title={sub} style={{
+                            color: WH.textDim, fontSize: 11, lineHeight: '1rem',
+                            whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                          }}>{sub}</div>
+                        </div>
+                        <ExplainPopover text={t('ipranTopo.critTip', {
+                          name: r.name, crit: r.crit, major: r.major, minor: r.minor, warn: r.warn,
+                        })}>
+                          <b style={{
+                            fontVariantNumeric: 'tabular-nums', fontSize: 16, lineHeight: 1,
+                            color: r.crit > 0 ? WH.sev.Critical : WH.textMuted,
+                          }}>{r.crit}</b>
+                        </ExplainPopover>
+                      </div>
+                    )
+                  })}
+                </>
+              )
               : <Empty description={t('ipranTopo.alarmEmpty')} />}
           </CardBase>
-        </Col>
-      </Row>
+        </div>
+      </div>
+
+      {/* 缺坐标、近似匹配、告警饱和和口径说明都是解释，不是本次取数失败。
+          放在画布下面，避免占掉工具条和地图之间的高度。内容仍常驻，不收进折叠区。 */}
+      <div style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {footWarns.length > 0 && (
+          <Alert type="warning" showIcon style={{ padding: '4px 12px' }} message={
+            <div style={{ fontSize: 12, lineHeight: 1.45 }}>
+              {footWarns.map((w, i) => <div key={i}>{w}</div>)}
+            </div>
+          } />
+        )}
+        <CalcChainNote title={t('ipranTopo.calc.title')} sections={calcSections} />
+      </div>
+
+      {/* 点节点 / 点链路后从右侧滑出，不占分栏。宽度与微波实时页、GIS 下钻抽屉一致。 */}
+      <Drawer
+        placement="right"
+        width="min(95vw, 45rem)"
+        open={focusSafe >= 0 || selectedEdge >= 0}
+        onClose={() => { setFocus(-1); setSelectedEdge(-1) }}
+        title={focusSafe >= 0
+          ? t('ipranTopo.focus.title', { name: nodes[focusSafe]?.name ?? '' })
+          : t('ipranTopo.detail.linkTitle')}
+        destroyOnClose
+      >
+        {(focusSafe >= 0 || selectedEdge >= 0) && (
+          <TopologyDetails
+            nodes={nodes} edges={edges} idx={idx} fault={fault}
+            focus={focusSafe} selectedEdge={selectedEdge}
+            onFocus={(i) => { setFocus(i); setSelectedEdge(-1) }}
+          />
+        )}
+      </Drawer>
 
       <TopoDrillModal
         kind={drill?.kind ?? null}

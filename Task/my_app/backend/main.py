@@ -419,6 +419,11 @@ _PUBLIC_API = (
     "/api/auth/",          # 登录/注销/会话查询（引导流程必须全开）
     "/api/health",         # 健康检查
     "/api/ui/menu-layout", # 侧栏菜单结构只读（首屏渲染依赖，且 PUT/DELETE 另有 require_protected）
+    # eFlow Q&A 工具块：顺序与显示/隐藏都是「全局默认、人人读同一份」，首屏渲染依赖。
+    # 不进白名单时，未登录的局域网访客 GET 会 401 → 前端静默回落各人本机值，
+    # 表现为「本机隐藏了、其他电脑还是全部」。PUT/DELETE 仍有 require_protected 兜底。
+    "/api/ui/tool-order",
+    "/api/ui/tool-visibility",
     # 浏览器扩展消费由已登录网页签发的 45 秒一次性票据；接口本身不接受 Cookie 以外的
     # 身份替代物，票据随机且单次失效，故只能放行此精确子路径。
     "/api/portals/client-login/consume",

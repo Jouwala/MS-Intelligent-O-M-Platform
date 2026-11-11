@@ -951,3 +951,34 @@ def query_flow(keyword: str, lang: str = "zh") -> Dict[str, Any]:
         "message": "",
         "message_en": "",
     }
+
+
+def simulate_flow(conditions: Dict[str, Any], lang: str = "zh") -> Dict[str, Any]:
+    """多条件模拟：不给具体单子，直接给一组取值帧字段值，评估全部规则会怎么判。
+
+    与 query_flow 的规则标注**共用同一套引擎**（eflow_flow_rules 的求值循环），
+    区别只是取值帧来自用户输入而非数据库里的真实 TT —— 用于「这类告警会怎么
+    派单/定级」的推演。条件归一化（YES→1、大小写等）全部在 build_value_frame
+    内完成，与真实单子逐字段同口径。
+
+    返回结构与 query_flow 一致，但不带 tt / wo / alarms / reached（模拟没有单据）：
+      query_type = "simulate"，query 为非空条件的原文回显（供界面与导出标题）。
+    """
+    graph = build_flow_graph(lang=lang)
+    from backend.services.eflow_flow_rules import annotate_graph_with_frame, build_sim_frame
+
+    conds = {k: v for k, v in (conditions or {}).items() if _s(v)}
+    label = ", ".join(f"{k}={v}" for k, v in conds.items()) if conds else "(no condition)"
+    vf, _fields = build_sim_frame(conds)
+    graph, uniq_hits, match_meta = annotate_graph_with_frame(graph, vf)
+
+    return {
+        "found": True,
+        "query": label,
+        "query_type": "simulate",
+        "graph": graph,
+        "rule_hits": uniq_hits,
+        "rule_match_meta": match_meta,
+        "message": "",
+        "message_en": "",
+    }

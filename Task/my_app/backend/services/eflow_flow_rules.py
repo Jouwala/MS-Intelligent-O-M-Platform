@@ -130,7 +130,7 @@ def _condition_index() -> Dict[Tuple[str, str], Dict[str, str]]:
 
 
 def annotate_graph(graph: Dict[str, Any], tt_no: str) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Dict[str, Any]]:
-    """给图上每条规则标注与本单的相关性，返回 (graph, rule_hits, meta)。
+    """按查询单（tt_no）给图上每条规则标注与本单的相关性，返回 (graph, rule_hits, meta)。
 
     match_state：
       matched      条件对本单求值为 True
@@ -139,6 +139,7 @@ def annotate_graph(graph: Dict[str, Any], tt_no: str) -> Tuple[Dict[str, Any], L
       undecidable  条件引用本地取不到的字段，无法判定
       no_data      采集表里没有这条规则（无条件原文）
 
+    取值帧来自数据库里的真实 TT；求值循环在 annotate_graph_with_frame（多条件模拟共用）。
     任何异常不抛出：meta.available=False，graph 保持原样，页面降级为全部规则。
     """
     t0 = time.perf_counter()
@@ -147,7 +148,6 @@ def annotate_graph(graph: Dict[str, Any], tt_no: str) -> Tuple[Dict[str, Any], L
     try:
         import pandas as pd
         from backend.services.eflow_rules import eflow_rules_matcher as M
-        from backend.services.eflow_rules import tt_rule_evidence as E
 
         with get_raw_connection() as conn:
             row = conn.execute(
@@ -161,6 +161,31 @@ def annotate_graph(graph: Dict[str, Any], tt_no: str) -> Tuple[Dict[str, Any], L
             attrs = _load_site_attrs(conn, tt_row.get("site_id"))
 
         vf = M.build_value_frame(pd.DataFrame([tt_row]), attrs={_s(tt_row.get("site_id")): attrs})
+        return annotate_graph_with_frame(graph, vf, meta)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[eflow_flow_rules] 规则相关性标注失败：%s", e, exc_info=True)
+        meta["error"] = f"{type(e).__name__}: {e}"
+        return graph, [], meta
+    finally:
+        meta["elapsed_sec"] = round(time.perf_counter() - t0, 2)
+
+
+def annotate_graph_with_frame(
+    graph: Dict[str, Any], vf: Any, meta: Optional[Dict[str, Any]] = None,
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Dict[str, Any]]:
+    """对**已构造好**的取值帧逐规则求值（真实单与多条件模拟共用，口径单一来源）。
+
+    match_state / 证据 / 节点相关计数 / hits 的语义与 annotate_graph 完全一致；
+    区别只在取值帧来源：那里来自数据库 TT 行，这里由调用方构造（模拟 = 用户输入）。
+    """
+    t0 = time.perf_counter()
+    if meta is None:
+        meta = {"available": False, "error": "", "tt_no": "",
+                "fields": {}, "evaluated": 0, "undecidable": 0}
+    try:
+        from backend.services.eflow_rules import eflow_rules_matcher as M
+        from backend.services.eflow_rules import tt_rule_evidence as E
+
         meta["fields"] = {c: _s(vf[c].iloc[0]) for c in vf.columns}
         idx = _condition_index()
         try:
@@ -212,7 +237,7 @@ def annotate_graph(graph: Dict[str, Any], tt_no: str) -> Tuple[Dict[str, Any], L
                     related += 1
             n["related_rule_count"] = related
 
-        # 命中该单的规则 = 条件求值 True（含兜底），与页面「仅相关」同一口径
+        # 命中该帧的规则 = 条件求值 True（含兜底），与页面「仅相关」同一口径
         hits: List[Dict[str, Any]] = []
         seen: set = set()
         for n in graph.get("nodes", []):
@@ -233,8 +258,54 @@ def annotate_graph(graph: Dict[str, Any], tt_no: str) -> Tuple[Dict[str, Any], L
         meta.update({"available": True, "evaluated": evaluated, "undecidable": undecidable})
         return graph, hits, meta
     except Exception as e:  # noqa: BLE001
-        logger.warning("[eflow_flow_rules] 规则相关性标注失败：%s", e, exc_info=True)
+        logger.warning("[eflow_flow_rules] 取值帧规则标注失败：%s", e, exc_info=True)
         meta["error"] = f"{type(e).__name__}: {e}"
         return graph, [], meta
     finally:
         meta["elapsed_sec"] = round(time.perf_counter() - t0, 2)
+
+
+def build_sim_frame(conditions: Dict[str, Any]) -> Tuple[Any, Dict[str, str]]:
+    """把用户输入的多条件构造成单行取值帧（多条件模拟入口）。
+
+    ⚠ **不在本函数里做任何字段归一化** —— 构造成合成 TT 行 + 站点属性后
+    原样交给 `eflow_rules_matcher.build_value_frame`，YES/NO→1/0、大小写、
+    数值列等全部走与真实单子**同一条**归一化路径，杜绝「模拟口径 ≠ 实单口径」。
+
+    conditions 的键与取值帧字段对应（全部可选）：
+      alarmCode→alarm_code  vipSite→vip_site  hubSite→hub_site
+      netWorkType→domain    downSiteCount→down_site_count
+      alarmDescription→alarm_description  reasonType→root_cause
+      ticketSeverity→ticket_severity
+      siteSubType/assetType/downstreamSites → attrs["__sim__"]（站点属性三件套）
+    """
+    import pandas as pd
+    from backend.services.eflow_rules import eflow_rules_matcher as M
+
+    c = {k: _s(v) for k, v in (conditions or {}).items()}
+    row = {
+        "tt_no": "(simulate)",
+        "alarm_code": c.get("alarmCode", ""),
+        "vip_site": c.get("vipSite", ""),
+        "hub_site": c.get("hubSite", ""),
+        # attrs 生效的前提是 site_id 列存在；用固定占位键，避免与真实站点混淆
+        "site_id": "__sim__",
+        "site_type": "",
+        "site_information": "",
+        "domain": c.get("netWorkType", ""),
+        "down_site_count": c.get("downSiteCount", ""),
+        "alarm_description": c.get("alarmDescription", ""),
+        "root_cause": c.get("reasonType", ""),
+        "ticket_severity": c.get("ticketSeverity", ""),
+    }
+    attrs: Dict[str, Any] = {"__sim__": {}}
+    if c.get("siteSubType"):
+        attrs["__sim__"]["siteSubType"] = c["siteSubType"]
+    if c.get("assetType"):
+        attrs["__sim__"]["assetType"] = c["assetType"]
+    if c.get("downstreamSites"):
+        attrs["__sim__"]["downstreamSites"] = c["downstreamSites"]
+
+    vf = M.build_value_frame(pd.DataFrame([row]), attrs=attrs)
+    fields = {col: _s(vf[col].iloc[0]) for col in vf.columns}
+    return vf, fields

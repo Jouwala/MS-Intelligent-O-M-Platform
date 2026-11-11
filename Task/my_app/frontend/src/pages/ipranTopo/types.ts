@@ -47,6 +47,12 @@ export interface TopoEdge {
   major: number
   /** 最多 12 条链路名，供悬停明细 */
   ports: string[]
+  /**
+   * 接收/发送利用率（%）。当前 graph 接口不返回这两项，缺省即界面显示 N/A。
+   * 禁止用端口速率 gb 去填。
+   */
+  rxUtil?: number | null
+  txUtil?: number | null
 }
 
 export interface TopoMeta {
@@ -100,8 +106,10 @@ export type ColorMode = 'tier' | 'up' | 'sev'
 /** 邻接索引：adj[i] = [{ n: 邻居下标, e: 边下标 }] */
 export interface TopoIndex {
   adj: { n: number; e: number }[][]
-  /** 接入点的主归属汇聚下标（-1 表示无） */
+  /** 接入点的主归属汇聚下标（-1 表示无）。仅用于布局排序，不代表唯一上游 */
   parent: number[]
+  /** 每个节点的全部上游邻居（去重）：双归属设备会同时保留两个上游 */
+  upstream: number[][]
   /** 核心+汇聚节点，按「层级 → 度数」排序 */
   hubs: number[]
   hubOrder: Record<number, number>

@@ -6,7 +6,7 @@ REM  ASCII-only + CRLF on purpose; non-ASCII breaks cmd parsing.
 REM ============================================================
 setlocal
 cd /d "%~dp0.."
-call "%~dp0..\stop.bat"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\my_portal_ctl.ps1" 9-stop-all
 
 echo.
 echo ---- done. Press any key to close. ----
