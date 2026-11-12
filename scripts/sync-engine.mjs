@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { GROUPS, ROOT_FILES, STATE, FIX_TARGETS, groupFor, allowedFile, allowedDirectory, relativeName, portableContent, deploymentNeeds } from './sync-policy.mjs';
+import { GROUPS, ROOT_FILES, STATE, FIX_TARGETS, groupFor, allowedFile, allowedDirectory, relativeName, portableContent, deploymentNeeds, runtimeOwned } from './sync-policy.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const argv = process.argv.slice(2);
@@ -81,7 +81,7 @@ for (const f of ROOT_FILES) {
 const currentSet = new Set(sourceRels);
 
 // ---- 生成计划 ----
-const writes = [], deletes = [], conflicts = [], localDeletions = [], accepted = [];
+const writes = [], deletes = [], conflicts = [], localDeletions = [], accepted = [], keptRuntime = [];
 const newState = {};
 let unchanged = 0;
 for (const rel of sourceRels) {
@@ -89,6 +89,14 @@ for (const rel of sourceRels) {
   const desired = portableContent(rel, srcBytes, target, httpPort);
   const desiredSha = sha(desired);
   const dst = path.join(target, rel);
+  // 运行时产物：副本任务会重写。已存在则保留今天的内容，不当冲突、也不用源快照覆盖。
+  if (runtimeOwned(rel) && fs.existsSync(dst)) {
+    const dstSha = sha(fs.readFileSync(dst));
+    newState[rel] = dstSha;
+    if (dstSha === desiredSha) unchanged++;
+    else keptRuntime.push(rel);
+    continue;
+  }
   const derived = FIX_TARGETS.includes(rel); // 机器派生产物：始终按源+副本根重写，不受状态保护
   if (fs.existsSync(dst)) {
     const dstSha = sha(fs.readFileSync(dst));
@@ -108,6 +116,7 @@ for (const rel of Object.keys(state)) {
   const g = groupFor(rel);
   // 根级文档没有 GROUP，但同样要参与「源已删除」的处理（见 ROOT_FILES 注释）。
   if ((!g && !ROOT_FILES.includes(rel)) || !allowedFile(rel)) continue;
+  if (runtimeOwned(rel)) continue; // 源快照消失也不隔离副本上的运行时文件
   const dst = path.join(target, rel);
   if (!fs.existsSync(dst)) continue;
   if (sha(fs.readFileSync(dst)) === state[rel]) deletes.push({ rel, dst });
@@ -120,7 +129,9 @@ log('=== 源同步（增量 / 白名单 / 事务） ===');
 log(`源(只读): ${source}`);
 log(`副本    : ${target}`);
 log(`干跑    : ${dryRun}   接受源版本: ${acceptSource}   受管源文件: ${sourceRels.length}   旧状态: ${Object.keys(state).length}`);
-log(`不变 ${unchanged} | 写入 ${writes.length} | 隔离删除 ${deletes.length} | 尊重本地删除 ${localDeletions.length} | 冲突 ${conflicts.length} | 显式接受 ${accepted.length}`);
+log(`不变 ${unchanged} | 写入 ${writes.length} | 隔离删除 ${deletes.length} | 尊重本地删除 ${localDeletions.length} | 保留运行时 ${keptRuntime.length} | 冲突 ${conflicts.length} | 显式接受 ${accepted.length}`);
+if (keptRuntime.length) { log('--- 保留副本运行时产物（源快照不覆盖） ---'); keptRuntime.forEach(r => log('  [KEEP] ' + r)); }
+if (localDeletions.length) { log('--- 尊重副本本地删除（不从源重建） ---'); localDeletions.forEach(r => log('  [KEEP-DELETED] ' + r)); }
 if (accepted.length) { log('--- 显式接受源版本（已备份，可回滚） ---'); accepted.forEach(r => log('  [ACCEPT] ' + r)); }
 if (conflicts.length) {
   log('--- 冲突（整体停止，未写任何文件） ---');

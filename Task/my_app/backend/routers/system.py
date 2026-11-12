@@ -6,6 +6,8 @@
 - /api/db/info                    数据库概览信息
 """
 import logging
+import threading
+import time
 
 from fastapi import APIRouter
 
@@ -26,8 +28,15 @@ def health_check():
     return {"status": "ok", "db_mode": "sqlite", "database": str(DB_PATH), "db_exists": DB_PATH.exists()}
 
 
-@router.get("/api/data-source/timestamps")
-def get_data_timestamps():
+# 同步时间只用于页头展示，允许落后最多 60 秒。MAX(created_time) 在大表上
+# 偶发要数秒（2026-11-12 access log 里 /api/data-source/timestamps 到过 8.5s），
+# 不能让每个打开 Dashboard 的人各自再扫一遍。
+_TS_TTL = 60
+_ts_cache = {"at": 0.0, "data": None}
+_ts_lock = threading.Lock()
+
+
+def _compute_data_timestamps():
     """数据源时间信息：eFlow 同步时间 + 告警同步时间 + 数据最新时间"""
     # eFlow 最近一次成功同步时间
     last_sync = None
@@ -93,9 +102,29 @@ def get_data_timestamps():
         }
 
 
-@router.get("/api/db/info")
-def db_info():
-    """数据库概览信息"""
+@router.get("/api/data-source/timestamps")
+def get_data_timestamps():
+    """数据源时间信息（60 秒进程内缓存）。"""
+    now = time.time()
+    with _ts_lock:
+        cached = _ts_cache["data"]
+        if cached is not None and now - _ts_cache["at"] < _TS_TTL:
+            return cached
+        data = _compute_data_timestamps()
+        _ts_cache["at"] = time.time()
+        _ts_cache["data"] = data
+        return data
+# /api/db/info 会逐表 COUNT(*)：PG 模式实测 118 张表 / 1072 万行要 30s+，
+# 首页每个访客都触发一次既拖垮首屏也压数据库。这里做进程内 TTL 缓存：
+# 首次仍然慢（无历史数据），之后 10 分钟内直接返回快照。行数统计只是概览，
+# 允许分钟级滞后；不缓存到磁盘，重启即失效，不会留下陈旧数据。
+_DB_INFO_TTL = 600
+_db_info_cache = {"at": 0.0, "data": None}
+_db_info_lock = threading.Lock()
+
+
+def _compute_db_info():
+    """真正执行逐表统计（缓存未命中时调用）。"""
     with get_raw_connection(str(DB_PATH)) as conn:
         if DB_MODE == "pg":
             rows = conn.execute(
@@ -126,3 +155,21 @@ def db_info():
             "total_rows": total_rows,
             "tables": table_info,
         }
+
+
+@router.get("/api/db/info")
+def db_info():
+    """数据库概览信息（10 分钟进程内缓存，避免每次逐表 COUNT(*) 拖 30 秒）。
+
+    锁内计算是为了让并发首访只做一次统计；持锁期间其它 API 不受影响
+    （FastAPI 的同步端点各自跑在线程池里）。
+    """
+    now = time.time()
+    with _db_info_lock:
+        cached = _db_info_cache["data"]
+        if cached is not None and now - _db_info_cache["at"] < _DB_INFO_TTL:
+            return cached
+        data = _compute_db_info()
+        _db_info_cache["at"] = time.time()
+        _db_info_cache["data"] = data
+        return data

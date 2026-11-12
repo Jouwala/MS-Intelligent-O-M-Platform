@@ -135,7 +135,9 @@ sync-now.bat -AcceptSource    REM 显式接受源版本覆盖冲突文件（先�
    的 `$Prefix`），匹配数必须恰为 1 否则报错停止 —— 不再依赖 `post_sync_fix_paths.ps1`。
 5. **事务式应用**：逐文件备份到 `TMP\_pre_sync_<时间戳>`、原子改名，任一步失败整体回滚；状态最后原子落盘
    （`TMP\_sync_state.json`，SHA256 内容真相）。源已删除的受管文件隔离到 `TMP\_sync_removed_<时间戳>`。
-6. **冲突保护**：副本本地改过（哈希≠状态）的文件默认整体停止并列出；`-AcceptSource` 才覆盖（仍备份）。
+6. **冲突保护**：副本本地改过（哈希≠状态）的**源码**默认整体停止并列出；`-AcceptSource` 才覆盖（仍备份）。
+   定时任务重写的运行时产物（`daily_raw.json`、三份 eflow 规则 xlsx、`*_rules_check_latest.json`、`MATCHING_REPORT.md`）
+   不算冲突：副本上已有就保留，没有才从源播种。不要用 `-AcceptSource` 去盖这些文件，那会把今天的规则和日报退回源上的旧快照。
 7. **同步 ≠ 部署完成**：前端输入/依赖清单/迁移变化时引擎会打印部署提示，需另行构建/核对依赖/评估迁移。
 
 ### 换机器 clone 后必做一步

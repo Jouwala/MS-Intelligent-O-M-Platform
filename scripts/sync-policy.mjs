@@ -33,6 +33,25 @@ const resources = new Set([
   'Task/whatsapp-kb-bot/certs/liberia-noc-ca.pem',
   ...['eflow_TT_rules.xlsx', 'eflow_push_rules.xlsx', 'eflow_alarm_rules.xlsx'].map(n => `${APP}/backend/services/eflow_rules/${n}`),
 ].map(x => x.toLowerCase()));
+// 副本定时任务会重写这些文件。源上那份只是上次落盘的快照：
+//   - cn_ems/daily_raw.json、kpi_result*.json：EMS 日聚合 / 查询落盘
+//   - eflow_*_rules.xlsx：收集器从 eFlow 拉取（TT 每天 04:20，告警/推单每 3 天）
+//   - *_rules_check_latest.json、MATCHING_REPORT.md：检查任务的摘要与报告
+// 副本上已经有就保留（不覆盖、不报冲突）；还没有才从源播种，换机第一次同步仍能起步。
+export const RUNTIME_OWNED = new Set([
+  `${EMS}/daily_raw.json`,
+  `${EMS}/kpi_result.json`,
+  `${EMS}/kpi_result_raw.json`,
+  `${APP}/backend/services/eflow_rules/eflow_TT_rules.xlsx`,
+  `${APP}/backend/services/eflow_rules/eflow_alarm_rules.xlsx`,
+  `${APP}/backend/services/eflow_rules/eflow_push_rules.xlsx`,
+  `${APP}/backend/services/eflow_rules/eflow_tt_rules_check_latest.json`,
+  `${APP}/backend/services/eflow_rules/eflow_push_rules_check_latest.json`,
+  `${APP}/backend/services/eflow_rules/MATCHING_REPORT.md`,
+].map(x => x.toLowerCase()));
+export function runtimeOwned(rel) {
+  return RUNTIME_OWNED.has(String(rel).toLowerCase());
+}
 
 export function relativeName(value) {
   if (typeof value !== 'string' || !value || /[\x00-\x1f:*?"<>|]/.test(value)) throw new Error(`非法相对路径: ${value}`);
