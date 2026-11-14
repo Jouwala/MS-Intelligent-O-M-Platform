@@ -85,6 +85,18 @@ def scheduler_module():
     return _scheduler_cache
 
 
+def scheduler_factory():
+    """延迟加载 `scheduler.factory`（ADR-7 §五：PR-5 起 Worker 只接 GitHub 权威）。
+
+    必须等 `scheduler_module()` 把 `apps/control-plane/backend` 放进 sys.path 之后
+    才能按标准包导入子模块，因此单独封装，不在模块顶层 import。
+    """
+    scheduler_module()
+    from scheduler import factory  # noqa: PLC0415 - 依赖上方 sys.path 就绪
+
+    return factory
+
+
 @dataclass
 class WorkerConfig:
     agent_id: str = "muse-2"
@@ -425,29 +437,27 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--repo", default=os.environ.get("GITHUB_REPO", "noc-soc-intelligent-platform")
     )
     parser.add_argument("--registry-issue", type=int, default=None)
-    parser.add_argument("--scheduler-db", default=os.environ.get("AGENT_SCHEDULER_DB", ""))
     parser.add_argument("--once", action="store_true", help="只跑一个轮询周期")
     args = parser.parse_args(argv)
 
-    sched = scheduler_module()
-    service_cls = getattr(sched, "SchedulerService", None)
-    if service_cls is None:
-        print("[worker] 调度器实现层不可用（scheduler.SchedulerService 未就绪）", file=sys.stderr)
-        return 2
-    scheduler = service_cls(args.scheduler_db or None)
-    mirror_cls = getattr(sched, "GitHubMirror", None)
-
     repo_root = Path(args.repo_root).resolve()
+    config = WorkerConfig(agent_id=args.agent, repo=f"{args.owner}/{args.repo}")
+    # ADR-7 §零：GitHub refs 是唯一权威。先建 GitHub 传输层，再交给工厂组装
+    # GitHubRefScheduler；PR-5 起不再有 SQLite 回退分支（回滚靠 revert PR）。
     transport = RestGitHubTransport(args.owner, args.repo)
+    try:
+        scheduler = scheduler_factory().make_scheduler(
+            transport=transport,
+            repo=config.repo,
+            lease_ttl=timedelta(seconds=config.lease_ttl_s),
+            registry_issue=args.registry_issue,
+        )
+    except (ValueError, RuntimeError) as exc:
+        print(f"[worker] 调度器初始化失败：{exc}", file=sys.stderr)
+        return 2
     adapter = GitHubIssueAdapter(transport, args.agent, registry_issue=args.registry_issue)
-    mirror = mirror_cls(transport) if mirror_cls is not None else None
     worker = AgentWorker(
-        adapter,
-        WorktreeAllocator(repo_root),
-        Executor(),
-        WorkerConfig(agent_id=args.agent, repo=f"{args.owner}/{args.repo}"),
-        scheduler,
-        mirror=mirror,
+        adapter, WorktreeAllocator(repo_root), Executor(), config, scheduler
     )
     if args.once:
         worker.register()

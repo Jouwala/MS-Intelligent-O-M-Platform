@@ -221,16 +221,27 @@ class TaskLifecycle:
         return True
 
     def renew(self, active, S) -> bool:
-        """执行期续租；返回 False 表示租约已丢失（调用方应停止执行）。"""
+        """执行期续租；返回 False 表示租约已丢失（调用方应停止执行）。
+
+        GitHub ref 权威层（ADR-7 §3.4）续租 = **推进 fencing token**，返回的
+        `Lease.fencing_token` 才是后续写操作要用的代次；因此这里必须采纳返回值。
+        返回同 token 的实现下，采纳返回值是无副作用的同值赋值。
+        """
         if not active.lease_held:
             return False
         try:
-            self.scheduler.renew(
+            lease = self.scheduler.renew(
                 active.task_id,
                 attempt_id=active.attempt_id,
                 fencing_token=active.fencing_token,
                 lease_ttl=timedelta(seconds=self.config.lease_ttl_s),
             )
+            new_token = int(getattr(lease, "fencing_token", 0) or 0)
+            if new_token > 0 and new_token != active.fencing_token:
+                self.log(
+                    f"[worker] 续租推进代次：token {active.fencing_token} → {new_token}"
+                )
+                active.fencing_token = new_token
             return True
         except S.StaleFencing as exc:
             self.log(f"[worker] 续租被拒（租约已丢失）：{exc}")

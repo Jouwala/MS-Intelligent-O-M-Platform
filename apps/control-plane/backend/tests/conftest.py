@@ -114,3 +114,16 @@ def ref_transport(fake_github: "object") -> "object":
         max_retries=1,
         sleep=lambda _seconds: None,
     )
+
+
+@pytest.fixture()
+def ref_scheduler(ref_store: "object", ref_transport: "object", ref_clock: tk.FakeClock):
+    from scheduler.ref_service import GitHubRefScheduler
+
+    return GitHubRefScheduler(
+        ref_store,
+        ref_transport,
+        repo="o/r",
+        clock=ref_clock,
+    )
+

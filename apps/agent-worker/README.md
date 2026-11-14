@@ -38,18 +38,34 @@ Worker 不再自己发 `TASK_COMPLETED`（避免双写与重复评论）。
 
 ## 运行
 
-> ⚠️ **多 VM 部署门槛（2026-11-14）**：当前调度器权威层是**单机 SQLite**，只在同一台主机
-> 的多个 Worker 实例之间保证互斥；**多台 VM 各自跑 Worker 会重复认领/重复执行**。
-> 生产拓扑是多 VM，因此在 GitHub 原生 ref-CAS 权威层合入前，**禁止把 Worker 部署到多台 VM**
-> （允许同机多实例）。详见 `docs/workspace/multi-worker-scheduler-design.md` 第十三节。
-
-
 ```powershell
-# 环境变量：GITHUB_TOKEN（Worker 自身身份）、GITHUB_OWNER、GITHUB_REPO；
-# 可选 AGENT_SCHEDULER_DB 指定调度器 SQLite 路径（默认走 store 的默认路径）
+# 环境变量：GITHUB_TOKEN（Worker 自身身份，需 contents:write 建/删 refs、
+# issues:write 评论/标签）、GITHUB_OWNER、GITHUB_REPO
 python apps\agent-worker\worker.py --agent muse-2 --repo-root D:\02_olbr_portal --once   # 单周期
 python apps\agent-worker\watchdog.py --agent muse-2 --repo-root D:\02_olbr_portal          # 常驻（看门狗托管）
 ```
+
+## 权威层与多 VM 语义（ADR-7）
+
+**GitHub refs 是唯一权威**（ADR-7 §零）：认领/租约/fencing/范围锁/完成幂等的状态
+全部落在 GitHub（ref + 带幂等标记的评论），不存在本地权威或第二真相源。
+`scheduler/api.py` 的 `Scheduler` 协议不变，Worker 代码只走协议；`main()` 经
+`scheduler/factory.py` 组装 `GitHubRefScheduler`，**不再有 SQLite 后端回退**
+（SQLite 权威实现按 PR-6 退场；要回滚就 revert PR，不做运行时切换权威）。
+
+多 VM 运行要点：
+
+- 每台 VM 用同一个 `--agent`（逻辑身份）+ 各自的 `instance_id`（默认随机 hex，也可由
+  `WorkerConfig.instance_id` 固定）运行；认领/租约按 `instance_id` 区分。
+- 执行期续租（`task_lifecycle.renew`）会**推进 `fencing_token`**，Worker 采纳返回值
+  更新 `active.fencing_token`，后续 complete/release 都用新代次；旧代次的写操作一律
+  `StaleFencing`（结果作废，不覆盖新实例）。
+- 过期租约由 `.github/workflows/lease-reaper.yml`（cron 每 5 分钟 / 手动 dispatch）
+  调用 `apps/control-plane/backend/dispatch/lease_reaper.py` 回收：Reaper 先按
+  `(issue, token)` 用 ref-CAS 抢「回收认领权」（`agent-reap/issue-<N>/<token:08d>`，
+  全局唯一，防两个 Reaper 同时收；输家 422 放弃），再删过期 lease ref，并清理孤儿
+  scope ref；**HWM ref 永不删除**（token 单调，不因回收被重用）。
+- 范围锁是「创建后校验」：冲突时 Worker 按现有等待循环退让重试，超时转 blocked。
 
 任务的可执行内容来自 Issue 正文「执行命令」一节：优先 `json` 代码块里的字符串数组，
 否则取代码块第一行按平台 shlex 解析；没有该节的任务会被标记阻塞等待补充，不会臆测执行。
