@@ -55,3 +55,8 @@ liberia-noc_soc-数据看板统一门户/rotate_nginx_logs.ps1  text eol=lf
 .githooks/*   text eol=lf
 
 # 其余文本类型交给 git 默认规则即可。
+# 冒烟脚本必须保留 UTF-8 BOM + CRLF 的入库字节（PS 5.1 无 BOM 会解析失败；
+# cmd.exe 遇到纯 LF 会吞行首字符）。-text 关闭行尾转换，避免 blob 被归一成 LF。
+ops/deploy/smoke-local.ps1  -text eol=crlf
+ops/smoke/*.ps1             -text eol=crlf
+ops/smoke/*.cmd             -text eol=crlf

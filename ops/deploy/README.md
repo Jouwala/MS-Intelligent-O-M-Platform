@@ -12,13 +12,23 @@
 - `local_authority_tools.py`：迁移时校验 / 复制 SQLite 本地权威三表
   （`credentials`、`task_schedule_config`、`email_recipients`）
 - `ensure_portal.ps1`：门户保活（计划任务调用）
-- `smoke-local.ps1` + `smoke-watcher.ps1`：D:\02 本机冒烟（替代 Grok
-  Routine 的冒烟 + 回写，0 token）。watcher 每 60 秒轮询 GitHub，CI
-  变绿且无 `smoke-passed` 的 open PR 就地跑 §8.2–§8.4 + 离线 pytest，
-  贴回评论、通过才打标签；贴标签前重读 PR，head 变了就作废重跑。
-  Token 放环境变量 `SMOKE_GITHUB_TOKEN`（细粒度 PAT，本仓库 Issues
-  读写即可）。先在 MSNOC1 上 `-DryRun` 跑一遍，再与 Grok 同 PR 对照
-  一次，对上才能停 Grok；停 Grok 前不要动 agent-orchestrator 的 webhook。
+- `ops/smoke/smoke.ps1`：真正的检查引擎（§8.1–§8.4 + 离线 pytest，PR #26–#43
+  已反复使用）。`smoke-local.ps1` 只是薄壳：UTF-8 BOM 让 PS 5.1 能解析、
+  `TMP\smoke.lock` 防并发、校验 HEAD == `-HeadSha`、写
+  `TMP\smoke-pr-<PR>-<sha7>.md`（干跑写 `.dryrun.md`，不覆盖真跑报告）。
+- `smoke-watcher.ps1`：每 60 秒轮询 GitHub，CI 变绿且无 `smoke-passed` 的
+  open PR 就地冒烟、贴评论、通过才打标签；贴前重读 PR，head 变了就作废。
+  **冒烟前 `git fetch` 并 `checkout --detach` 到该 PR head，finally 切回原分支**
+  （Grok 当年的 checkout 由它接管）；工作树有未提交的已跟踪改动时跳过该 PR，
+  不覆盖他人在途工作。Token 依次取 `SMOKE_GITHUB_TOKEN`/`GITHUB_TOKEN`/
+  `GH_TOKEN`，都没有时回落本机 `gh auth token`（只在内存，不落盘）。
+  开头有硬守卫：推导出的根目录落在 `D:\01_olbr_portal` 下直接拒绝执行（生产只读）。
+- `install-smoke-watcher.ps1`：把 watcher 注册成常驻计划任务 `OLBR_SmokeWatcher`
+  （登录自启、崩溃每分钟重启、单实例）；`-Status` 查、`-Uninstall` 卸。
+  日志 `TMP\smoke-watcher.log`。
+- **2026-11-14 已与 Grok 对齐**：PR #44 同 head 下本地链路 18/18 逐项一致
+  （见 `TMP\smoke-pr-44-vs-grok.md`）。对齐后方可停 Grok；停之前不要动
+  agent-orchestrator 的 webhook。
 - `bundle_data.ps1`：把生产 PostgreSQL 快照灌进副本便携实例
 - `my_portal_ctl.ps1`、`write_nginx_conf.ps1`：§11-5 自仓库根归位至此；
   两者都按自身位置向上推导仓库根，`ops/shortcuts/` 的 bat 已指向新位置

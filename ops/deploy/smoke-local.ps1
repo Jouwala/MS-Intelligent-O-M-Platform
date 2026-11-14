@@ -1,25 +1,25 @@
-<#
+﻿<#
   smoke-local.ps1 — D:\02 本机冒烟（替代 Grok Routine 的冒烟部分）
   ============================================================================
-  目标：把 Grok 每次在 D:\02 上手工跑的 §8.2–§8.4 + 离线 pytest，变成
-  一条确定性脚本，0 token、0 LLM 判断。结果格式与 Grok 在 PR #43 的
-  回帖一致（§8.1–§8.4 + pytest + 标签），下游 auto-merge 只认
-  `smoke-passed` 标签，不认是谁贴的，所以脚本贴回的结果能直接进
-  自动合入链。
+  目标：把 Grok 每次在 D:\02 上手工跑的 §8.1–§8.4 + 离线 pytest，变成
+  一条确定性脚本，0 token、0 LLM 判断。结果格式与 Grok 在 PR 下的
+  回帖一致，下游 auto-merge 只认 `smoke-passed` 标签（由 watcher
+  在通过后打，本脚本只写报告，不打标签）。
 
-  只在 D:\02_olbr_portal 里跑；任何一步失败都走 finally 停服务、
-  恢复 git 分支，绝不把 02 的服务留在后台、绝不动 D:\01。
+  只在 D:\02_olbr_portal 里跑。真正的检查委托给已验证的
+  ops\smoke\smoke.ps1（隐藏控制台、隔离等待 start_all/stop_all、
+  注册表 Delegation 用完即恢复）。本脚本负责：UTF-8 BOM 可被
+  PS 5.1 解析、TMP\smoke.lock、校验当前 HEAD 与 -HeadSha 一致
+  （不 checkout / 不删分支；checkout 由调用方负责，watcher 会在
+  冒烟前切到 PR head 并在 finally 里切回）、把结果写成
+  TMP\smoke-pr-<PR>-<sha7>.md（干跑写 .dryrun.md，不覆盖真跑报告）。
 
-  用法（必须在 D:\02_olbr_portal 根目录）：
-    powershell -NoProfile -File ops\deploy\smoke-local.ps1 -PrNumber 44 -HeadSha <40位>
-    powershell -NoProfile -File ops\deploy\smoke-local.ps1 -PrNumber 44 -HeadSha <40位> -DryRun
-    powershell -NoProfile -File ops\deploy\smoke-local.ps1 -PrNumber 44 -HeadSha <40位> -IssueNumber 19
+  用法（必须在 D:\02_olbr_portal 根目录，或用 -File 绝对路径）：
+    powershell -NoProfile -ExecutionPolicy Bypass -File ops\deploy\smoke-local.ps1 -PrNumber 44 -HeadSha <40位>
+    powershell -NoProfile -ExecutionPolicy Bypass -File ops\deploy\smoke-local.ps1 -PrNumber 44 -HeadSha <40位> -DryRun
 
-  退出码：0 通过；1 冒烟失败；2 前置条件不满足（blocked，如目录不对、
-  PG 已被他人占用、取不到 PR 的 head）。
-
-  注意：本机没有 pwsh 校验环境，改完后先在 MSNOC1 上跑 -DryRun，
-  再跑一次真 PR 与 Grok 结果对照，对上才算替换完成。
+  退出码：0 通过（含「仅已知 NUR 失败被忽略」）；1 冒烟失败；
+          2 前置条件不满足（blocked：目录不对、HEAD 不匹配、锁被占用等）。
 #>
 [CmdletBinding()]
 param(
@@ -31,342 +31,423 @@ param(
     [switch]$SkipFrontendBuild
 )
 
-$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'Continue'
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 
-$ScriptVersion = 'smoke-local.ps1 v1.0.0'
+$ScriptVersion = 'smoke-local.ps1 v1.1.0'
 $StartedAt = Get-Date
 $Root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
 $TmpDir = Join-Path $Root 'TMP'
-$ShortSha = $HeadSha.Substring(0, 7)
+$HeadSha = $HeadSha.Trim().ToLowerInvariant()
+if ($HeadSha.Length -ge 7) { $ShortSha = $HeadSha.Substring(0, 7) } else { $ShortSha = $HeadSha }
 $ReportFile = Join-Path $TmpDir ("smoke-pr-{0}-{1}.md" -f $PrNumber, $ShortSha)
 $LogFile = Join-Path $TmpDir ("smoke-pr-{0}-{1}.log" -f $PrNumber, $ShortSha)
+if ($DryRun) {
+    # 干跑不得覆盖同 PR/同 SHA 的真跑报告与日志：加 .dryrun 后缀区分。
+    # （原先两者同名，跑一次 dry run 就把上一次真跑的证据冲掉了。）
+    $ReportFile = Join-Path $TmpDir ("smoke-pr-{0}-{1}.dryrun.md" -f $PrNumber, $ShortSha)
+    $LogFile = Join-Path $TmpDir ("smoke-pr-{0}-{1}.dryrun.log" -f $PrNumber, $ShortSha)
+}
+$LockPath = Join-Path $TmpDir 'smoke.lock'
+$SmokePs1 = Join-Path $Root 'ops\smoke\smoke.ps1'
 $Results = @{}
 $Notes = @()
-$StartedServices = $false
-$OriginalBranch = ''
-$OriginalCommit = ''
+$script:LockOwned = $false
+$script:LockStream = $null
+$script:ExitCode = 1
 
 function Write-Log {
     param([string]$Message)
     $line = "[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $Message
     Write-Host $line
-    Add-Content -LiteralPath $LogFile -Value $line -Encoding UTF8 -ErrorAction SilentlyContinue
+    try { Add-Content -LiteralPath $LogFile -Value $line -Encoding UTF8 -ErrorAction SilentlyContinue } catch { }
 }
 
-function Fail-Step {
-    param([string]$Section, [string]$Message)
-    $Results[$Section] = "失败：$Message"
-    throw "$Section $Message"
+function Get-HeadShaFull {
+    try { return ((& git -C $Root rev-parse HEAD 2>$null) | Out-String).Trim().ToLowerInvariant() } catch { return '' }
 }
 
-function Get-DotEnvValue {
-    param([string]$Key, [string]$Default = '')
-    $envFile = Join-Path $Root '.env'
-    if (-not (Test-Path -LiteralPath $envFile)) { return $Default }
-    foreach ($line in (Get-Content -LiteralPath $envFile)) {
-        if ($line -match '^\s*#') { continue }
-        if ($line -match ("^\s*{0}\s*=\s*(.+?)\s*$" -f [regex]::Escape($Key))) {
-            return $Matches[1].Trim().Trim('"').Trim("'")
+function Resolve-BaseRef {
+    $candidates = @()
+    $candidates += @('platform/main', 'origin/main', 'main')
+    foreach ($c in $candidates) {
+        & git -C $Root rev-parse --verify $c 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) { return $c }
+    }
+    return ''
+}
+
+function Get-ChangedPaths {
+    param([string]$Base)
+    $result = New-Object psobject -Property @{ Ok = $false; Paths = @(); Detail = '' }
+    if (-not $Base) { return $result }
+    $raw = & git -C $Root diff --name-only "$Base...HEAD" 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        $result.Detail = "exit=$LASTEXITCODE out=$raw"
+        return $result
+    }
+    $out = @()
+    foreach ($p in @($raw)) {
+        $n = ("$p".Trim() -replace '\\', '/')
+        if ($n) { $out += $n }
+    }
+    $result.Ok = $true
+    $result.Paths = $out
+    return $result
+}
+
+function Test-PathMatchFe {
+    param([string]$Path)
+    return $Path -like 'apps/my_app/frontend/*'
+}
+
+function Test-PathMatchPortal {
+    param([string]$Path)
+    if ($Path -notlike 'apps/portal/*') { return $false }
+    if ($Path -like 'apps/portal/docs/*') { return $false }
+    if ($Path -like 'apps/portal/scripts/whatsapp_analysis/*') { return $false }
+    $leaf = ($Path -split '/')[-1]
+    if ($leaf -in @('package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'npm-shrinkwrap.json', 'package.json', 'index.html')) { return $true }
+    if ($leaf -like 'vite.config.*' -or $leaf -like 'tsconfig*') { return $true }
+    if ($Path -like 'apps/portal/src/*' -or $Path -like 'apps/portal/public/*' -or $Path -like 'apps/portal/server/*') { return $true }
+    return $false
+}
+
+function Get-FeProbeText {
+    # 干跑也做真实比较，但措辞必须标明这是探测，不得写成「已经无需重建」。
+    if ($SkipFrontendBuild) {
+        return '干跑：传入了 -SkipFrontendBuild，真跑将跳过前端重建。'
+    }
+    $baseUsed = Resolve-BaseRef
+    if (-not $baseUsed) {
+        return '干跑：找不到 platform/main、origin/main 或 main，无法比较前端改动；真跑将因基线缺失而失败（除非强制构建）。'
+    }
+    $diff = Get-ChangedPaths -Base $baseUsed
+    if (-not $diff.Ok) {
+        return "干跑：git diff $baseUsed...HEAD 失败，无法判断是否要重建。$($diff.Detail)"
+    }
+    $feHits = @($diff.Paths | Where-Object { Test-PathMatchFe $_ })
+    $portalHits = @($diff.Paths | Where-Object { Test-PathMatchPortal $_ })
+    $detail = "base=$baseUsed changed=$($diff.Paths.Count) feHits=$($feHits.Count) portalHits=$($portalHits.Count)"
+    if ($feHits.Count -gt 0 -or $portalHits.Count -gt 0) {
+        return "干跑：已相对 $baseUsed 比较，$detail。真跑将执行 npm run build（前端/lockfile 有改动）。"
+    }
+    return "干跑：已相对 $baseUsed 比较，$detail。真跑将沿用现有 apps\_fe_dist（前端与 lockfile 无改动）。"
+}
+
+function Test-SmokeHolderAlive {
+    param([int]$OwnerPid = 0)
+    if ($OwnerPid -gt 0 -and $OwnerPid -ne $PID) {
+        $op = Get-CimInstance Win32_Process -Filter "ProcessId=$OwnerPid" -ErrorAction SilentlyContinue
+        if ($op -and ("$($op.CommandLine)" -match 'smoke\.ps1|smoke-local\.ps1|start_all\.ps1|stop_all\.ps1')) {
+            return $true
         }
     }
-    return $Default
+    $mine = $PID
+    $hits = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.CommandLine -and ($_.ProcessId -ne $mine) -and ($_.ParentProcessId -ne $mine) -and (
+            $_.CommandLine -match 'ops\\smoke\\smoke\.ps1|ops\\deploy\\smoke-local\.ps1'
+        )
+    }
+    return [bool]$hits
 }
 
-function Test-HttpOk {
-    param([string]$Url, [string]$MustContain = '')
-    try {
-        $resp = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 30
-        if ($resp.StatusCode -ne 200) { return "HTTP $($resp.StatusCode)" }
-        if ($MustContain -and ($resp.Content -notmatch [regex]::Escape($MustContain))) {
-            return "返回 200 但不含期望内容：$MustContain"
+function Read-LockInfo {
+    $info = @{ Text = ''; OwnerPid = 0; Owner = '' }
+    if (-not (Test-Path -LiteralPath $LockPath)) { return $info }
+    try { $info.Text = [IO.File]::ReadAllText($LockPath).Trim() } catch { $info.Text = '' }
+    $owner = 0
+    if ($info.Text -match 'pid=(\d+)') { [void][int]::TryParse($Matches[1], [ref]$owner) }
+    $info.OwnerPid = $owner
+    if ($info.Text -match 'owner=(\S+)') { $info.Owner = $Matches[1] }
+    return $info
+}
+
+function New-SmokeLock {
+    param([int]$WaitSec = 1800)
+    $deadline = (Get-Date).AddSeconds($WaitSec)
+    while ($true) {
+        if (Test-Path -LiteralPath $LockPath) {
+            $info = Read-LockInfo
+            $held = Test-SmokeHolderAlive -OwnerPid $info.OwnerPid
+            if ($held) {
+                if ((Get-Date) -ge $deadline) {
+                    throw "TMP\smoke.lock 仍被占用（$($info.Text)），等待 ${WaitSec}s 后放弃。"
+                }
+                Write-Log "锁被占用，等待中：$($info.Text)"
+                Start-Sleep -Seconds 10
+                continue
+            }
+            throw "TMP\smoke.lock 已存在但没有活动持有者（可能是残留）。内容：$($info.Text)。本脚本不删除他人的锁，退出码 2。请确认无冒烟后再删除该文件。"
         }
-        return ''
-    } catch {
-        return $_.Exception.Message
+        try {
+            $fs = [IO.File]::Open($LockPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+            $msg = "PR=$PrNumber sha=$ShortSha owner=smoke-local pid=$PID created=$(Get-Date -Format 'yyyy-MM-ddTHH:mm:ss') purpose=smoke-local"
+            $bytes = [Text.Encoding]::UTF8.GetBytes($msg)
+            $fs.Write($bytes, 0, $bytes.Length)
+            $fs.Flush()
+            $script:LockStream = $fs
+            $script:LockOwned = $true
+            Write-Log "已创建锁：$msg"
+            return
+        } catch [System.IO.IOException] {
+            Start-Sleep -Seconds 2
+            if ((Get-Date) -ge $deadline) {
+                throw "无法创建 TMP\smoke.lock（CreateNew 失败）：$($_.Exception.Message)"
+            }
+        }
     }
 }
 
-function Test-PortFree {
-    param([int]$Port)
-    $conns = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
-    return ($null -eq $conns)
+function Remove-SmokeLockIfOwned {
+    if (-not $script:LockOwned) { return }
+    try { if ($script:LockStream) { $script:LockStream.Close(); $script:LockStream.Dispose() } } catch { }
+    $script:LockStream = $null
+    if (Test-Path -LiteralPath $LockPath) {
+        $info = Read-LockInfo
+        if ($info.Text -match 'owner=smoke-local' -and $info.Text -match ("pid=$PID")) {
+            try {
+                Remove-Item -LiteralPath $LockPath -Force -ErrorAction Stop
+                Write-Log "已删除本脚本持有的锁 $LockPath"
+            } catch {
+                Write-Log "删除本脚本的锁失败：$($_.Exception.Message)"
+            }
+        } else {
+            Write-Log "锁内容已不是本脚本所写，不删除：$($info.Text)"
+        }
+    }
+    $script:LockOwned = $false
 }
 
-function Get-ListeningProcessPath {
-    param([int]$Port)
-    $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (-not $conn) { return '' }
-    $proc = Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue
-    if (-not $proc) { return '' }
-    try { return $proc.Path } catch { return $proc.ProcessName }
+function Get-MdCell {
+    param([string]$Text, [string]$CheckNeedle)
+    $lines = $Text -split "`r?`n"
+    $inTable = $false
+    foreach ($ln in $lines) {
+        if ($ln -match '^\|.*\|.*\|') {
+            if ($ln -match '^\|[-| ]+\|$') { $inTable = $true; continue }
+            $cols = @($ln.Split('|') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+            if ($cols.Count -ge 3 -and ($cols[1] -like "*$CheckNeedle*")) {
+                return @{ Result = $cols[0]; Check = $cols[1]; Detail = $cols[2] }
+            }
+        }
+    }
+    return $null
 }
 
-# ---------- 前置守卫：只在 02 跑，绝不动生产 ----------
+function Convert-SmokeResultToReport {
+    param([string]$ResultMdPath, [string]$VerdictHint)
+    $txt = ''
+    if (Test-Path -LiteralPath $ResultMdPath) {
+        try { $txt = [IO.File]::ReadAllText($ResultMdPath) } catch { $txt = '' }
+    }
+    $row81 = Get-MdCell $txt '§8.1'
+    $row81b = Get-MdCell $txt '前端无需重建'
+    $row81c = Get-MdCell $txt 'npm run build (apps\my_app\frontend'
+    $row82dir = Get-MdCell $txt 'SHOW data_directory'
+    $row82auth = Get-MdCell $txt 'local_authority_tools'
+    $rowH = Get-MdCell $txt '/api/health'
+    $rowWo = Get-MdCell $txt 'wo-dashboard/overview'
+    $rowPortal = Get-MdCell $txt '9277'
+    $row8080 = Get-MdCell $txt '8080/myapp'
+    $row8443 = Get-MdCell $txt '8443/myapp'
+    $rowHash = Get-MdCell $txt 'sha256'
+    $rowNt = Get-MdCell $txt 'nginx -t'
+    $rowStop = Get-MdCell $txt 'stop_all'
+    $row80443 = Get-MdCell $txt '80/443'
+    $rowFree = Get-MdCell $txt '已释放'
+    $rowPy = Get-MdCell $txt 'pytest'
+
+    $fe = @()
+    if ($row81) { $fe += ($row81.Detail) }
+    if ($row81b) { $fe += $row81b.Check + '：' + $row81b.Detail }
+    elseif ($row81c) { $fe += $row81c.Check + '：' + $row81c.Detail }
+    if ($fe.Count -eq 0) { $fe += '见 smoke.ps1 报告。' }
+    $Results['8.1'] = "通过。" + ($fe -join '；')
+    if ($row81b -and $row81b.Result -eq 'FAIL') { $Results['8.1'] = "失败。" + ($fe -join '；') }
+    if ($row81c -and $row81c.Result -eq 'FAIL') { $Results['8.1'] = "失败。" + ($fe -join '；') }
+
+    $d2 = @()
+    if ($row82dir) { $d2 += $row82dir.Detail }
+    if ($row82auth) { $d2 += $row82auth.Detail }
+    $ok82 = $true
+    if ($row82dir -and $row82dir.Result -ne 'PASS') { $ok82 = $false }
+    if ($row82auth -and $row82auth.Result -ne 'PASS') { $ok82 = $false }
+    $Results['8.2'] = ($(if ($ok82) { '通过。' } else { '失败。' }) + ($d2 -join '；'))
+
+    $hashLine = ''
+    if ($rowHash -and $rowHash.Detail -match '([0-9A-Fa-f]{16,})') { $hashLine = "；index.html sha256 ``$($Matches[1])``" }
+    $ok83 = $true
+    foreach ($r in @($rowH, $rowWo, $rowPortal, $row8080, $row8443, $rowHash, $rowNt)) {
+        if ($r -and $r.Result -ne 'PASS') { $ok83 = $false }
+    }
+    $healthBit = '1. /api/health：见报告'
+    if ($rowH) { $healthBit = '1. /api/health：' + $rowH.Detail }
+    $woBit = '2. 只读业务接口：见报告'
+    if ($rowWo) { $woBit = '2. 只读业务接口返回非空：' + $rowWo.Detail }
+    $Results['8.3'] = "$(if ($ok83) { '全部通过。' } else { '失败。' })$healthBit；$woBit；3. 门户 9277：$(if ($rowPortal) { $rowPortal.Detail } else { '?' })；4. nginx 8080/8443：$(if ($row8080) { $row8080.Detail } else { '?' }) / $(if ($row8443) { $row8443.Detail } else { '?' })；5. index.html sha256 一致$hashLine；6. nginx -t：$(if ($rowNt) { $rowNt.Detail } else { '?' })"
+
+    $s4 = @()
+    if ($rowStop) { $s4 += $rowStop.Check + '：' + $rowStop.Detail }
+    if ($rowFree) { $s4 += $rowFree.Detail }
+    if ($row80443) { $s4 += $row80443.Detail }
+    $s4 += '预先存在的 realtime_proxy 8887/8890 未动。'
+    $Results['8.4'] = ($s4 -join ' ')
+
+    if ($rowPy) { $Results['pytest'] = "``$($rowPy.Detail)``" }
+    else { $Results['pytest'] = '未解析到 pytest 摘要。' }
+
+    $passLine = ''
+    if ($txt -match 'RESULT:\s*(PASS|FAIL|REFUSED)') { $passLine = $Matches[1] }
+    elseif ($txt -match 'TOTAL=\d+\s+FAIL=(\d+)') { if ($Matches[1] -eq '0') { $passLine = 'PASS' } else { $passLine = 'FAIL' } }
+    if ($VerdictHint) { $Results['结论源'] = $VerdictHint }
+    if ($passLine -eq 'PASS') { $Results['结论'] = '通过' }
+    elseif ($passLine -eq 'REFUSED') { $Results['结论'] = '失败：预检拒绝' }
+    else { $Results['结论'] = '失败' }
+
+    $noteBlock = $false
+    foreach ($ln in ($txt -split "`r?`n")) {
+        if ($ln -match '^## 备注') { $noteBlock = $true; continue }
+        if ($noteBlock) {
+            if ($ln -match '^##' -or $ln -match '^TOTAL=') { break }
+            if ($ln -match '^\s*-\s*(.+)$') { $Notes += $Matches[1] }
+        }
+    }
+}
+
+function Write-SmokeReport {
+    $EndedAt = Get-Date
+    $Duration = [math]::Round(($EndedAt - $StartedAt).TotalSeconds, 1)
+    $passed = ($Results['结论'] -eq '通过')
+    $verdict = $(if ($passed) { '通过' } else { '失败' })
+    if ($DryRun) { $verdict = '干跑' }
+    $report = @()
+    $report += "## D:\02 冒烟结果：$verdict"
+    $report += ''
+    $report += "- 测试提交：``$HeadSha``"
+    $report += "- 由本地冒烟脚本运行（$ScriptVersion），实际检查委托 ops\smoke\smoke.ps1（-Pytest）；无 LLM 参与"
+    $report += "- 运行时间：$($StartedAt.ToString('yyyy-MM-dd HH:mm:ss'))–$($EndedAt.ToString('HH:mm:ss'))（Atlantic/Reykjavik，UTC+0），合计 $Duration 秒"
+    if ($IssueNumber -gt 0) { $report += "- 关联 Issue：#$IssueNumber" }
+    $report += ''
+    $report += '### §8.1 前端构建'
+    $report += $Results['8.1']
+    $report += ''
+    $report += '### §8.2 数据库'
+    $report += $Results['8.2']
+    $report += ''
+    $report += '### §8.3 服务检查 1–6'
+    $report += $Results['8.3']
+    $report += ''
+    $report += '### §8.4 收尾'
+    $report += $Results['8.4']
+    $report += ''
+    $report += '### pytest'
+    $report += $Results['pytest']
+    if ($Notes.Count -gt 0) {
+        $report += ''
+        $report += '### 备注'
+        foreach ($n in $Notes) { $report += "- $n" }
+    }
+    $report += ''
+    $report += '### 标签'
+    $report += '未打 `smoke-passed`。本脚本不负责贴标签，由 watcher 在通过后处理。'
+    $utf8Bom = New-Object System.Text.UTF8Encoding $true
+    [IO.File]::WriteAllText($ReportFile, (($report -join "`n") + "`n"), $utf8Bom)
+    Write-Log "报告已写：$ReportFile（结论：$($Results['结论'])，耗时 ${Duration}s）"
+}
+
+# ---------- 前置守卫：只在 02 跑，绝不动生产，不 checkout ----------
+# ⛔ 生产边界（2026-11-14 用户明确要求）：D:\01_olbr_portal 是生产，不许动里面任何东西。
+$ProductionRoot = 'D:\01_olbr_portal'
+if ($Root.TrimEnd('\') -eq $ProductionRoot -or $Root -like ($ProductionRoot + '\*')) {
+    throw "拒绝执行：$Root 落在生产目录 $ProductionRoot 下面。冒烟只在 D:\02_olbr_portal 隔离副本上跑。"
+}
 if ($Root -notlike '*02_olbr_portal') { throw "当前目录不是 02（$Root），拒绝执行。" }
 if (-not (Test-Path -LiteralPath (Join-Path $Root 'ISOLATED_COPY.flag'))) {
     throw '缺少 ISOLATED_COPY.flag，拒绝执行：当前目录可能不是隔离副本。'
 }
 if ($HeadSha -notmatch '^[0-9a-f]{40}$') { throw "HeadSha 不是 40 位小写 hex：$HeadSha" }
-New-Item -ItemType Directory -Force -Path $TmpDir | Out-Null
+if (-not (Test-Path -LiteralPath $TmpDir)) { New-Item -ItemType Directory -Force -Path $TmpDir | Out-Null }
 '' | Out-File -LiteralPath $LogFile -Encoding UTF8
 Write-Log "$ScriptVersion PR #$PrNumber head $ShortSha（DryRun=$DryRun）"
 
+$actual = Get-HeadShaFull
+Write-Log "当前 HEAD=$actual  传入 HeadSha=$HeadSha  分支=$((git -C $Root rev-parse --abbrev-ref HEAD 2>$null))"
+if ($actual -ne $HeadSha) {
+    Write-Log "拒绝：当前 HEAD 与 -HeadSha 不一致。本脚本不再自行 checkout，请调用方先切到目标提交。"
+    $Results['结论'] = "失败：HEAD $actual 与 -HeadSha $HeadSha 不一致"
+    $Results['8.1'] = '未跑：HEAD 不匹配，已拒绝。'
+    $Results['8.2'] = '未跑：HEAD 不匹配，已拒绝。'
+    $Results['8.3'] = '未跑：HEAD 不匹配，已拒绝。'
+    $Results['8.4'] = '未跑：HEAD 不匹配，已拒绝。'
+    $Results['pytest'] = '未跑。'
+    Write-SmokeReport
+    exit 2
+}
+if ($Remote) { Write-Log "参数 -Remote=$Remote 已忽略：本脚本不再 fetch/checkout。" }
+
 try {
-    # ---------- 0) 取 PR 的 head，校验 SHA ----------
-    Write-Log '--- 0) 取 PR head ---'
-    $OriginalBranch = (git rev-parse --abbrev-ref HEAD).Trim()
-    $OriginalCommit = (git rev-parse HEAD).Trim()
     if ($DryRun) {
-        $Results['取码'] = '干跑：跳过 git fetch/checkout'
+        if (-not (Test-Path -LiteralPath $SmokePs1)) {
+            throw "找不到已验证的 $SmokePs1，干跑也无法确认真跑路径。"
+        }
+        if (Test-Path -LiteralPath $LockPath) {
+            $info = Read-LockInfo
+            $held = Test-SmokeHolderAlive -OwnerPid $info.OwnerPid
+            $Notes += "干跑时已存在 TMP\smoke.lock（held=$held）：$($info.Text)"
+            Write-Log $Notes[-1]
+        } else {
+            $Notes += '干跑未创建 TMP\smoke.lock；真跑会以 CreateNew 占用并在结束时只删除自己的锁。'
+        }
+        $Results['8.1'] = Get-FeProbeText
+        $Results['8.2'] = '干跑：跳过 start_all / psql / local_authority_tools check。真跑将要求 data_directory 经斜杠归一化后落在 D:\02 下，且三表 source/target 为 20/74/10。'
+        $Results['8.3'] = '干跑：跳过 6 项服务检查。真跑将要求 /api/health 的 db_mode=pg，overview 响应非空，以及 9277/8080/8443、index sha256、nginx -t。'
+        $Results['8.4'] = '干跑：跳过停服务与端口确认。真跑由 smoke.ps1 调用 stop_all（隐藏控制台、隔离等待），并确认 80/443 仍归 D:\01、02 端口已释放。'
+        $Results['pytest'] = '干跑：跳过 pytest。真跑使用 D:\02_olbr_portal\runtime\python312\python.exe，-m "not live"，-n 8（若已安装 xdist）；与 CI quality.yml 一样 deselect 两条 test_client_is_local_trust（::ffff:127.0.0.1 实现与文档不符，另开任务）；仅忽略 2 个已知 NUR 缺数据失败。'
+        $Results['结论'] = '通过'
+        $script:ExitCode = 0
     } else {
-        $remotes = (git remote).Trim() -split "`n"
-        $useRemote = $Remote
-        if ($remotes -notcontains $Remote) {
-            if ($remotes -contains 'origin') { $useRemote = 'origin' }
-            else { throw "找不到 git remote '$Remote' 或 'origin'。" }
+        if (-not (Test-Path -LiteralPath $SmokePs1)) {
+            throw "找不到已验证的 $SmokePs1。真跑把 §8.1–§8.4 与 pytest 委托给该脚本，请确认 D:\02 上存在 ops\smoke\smoke.ps1。"
         }
-        git fetch $useRemote ("pull/{0}/head" -f $PrNumber) 2>&1 | ForEach-Object { Write-Log "  $_" }
-        if ($LASTEXITCODE -ne 0) { Fail-Step '取码' "git fetch $useRemote pull/$PrNumber/head 失败" }
-        git checkout -B ("smoke-pr-{0}" -f $PrNumber) FETCH_HEAD 2>&1 | ForEach-Object { Write-Log "  $_" }
-        $actual = (git rev-parse HEAD).Trim()
-        if ($actual -ne $HeadSha) {
-            Fail-Step '取码' "checkout 后 HEAD 是 $actual，与传入的 $HeadSha 不一致（PR 可能刚推了新提交），拒绝冒烟。"
-        }
-        $Results['取码'] = "head $ShortSha 已 checkout（remote=$useRemote）"
-    }
-    Write-Log $Results['取码']
-
-    # ---------- §8.1 前端构建 ----------
-    Write-Log '--- §8.1 前端构建 ---'
-    $feChanged = $false
-    if (-not $DryRun) {
-        $changed = git diff --name-only 'main...HEAD' 2>$null
-        if ($LASTEXITCODE -ne 0) { $changed = git diff --name-only 'origin/main...HEAD' 2>$null }
-        foreach ($f in $changed) {
-            if ($f -like 'apps/portal/*' -or $f -like 'apps/my_app/frontend/*') { $feChanged = $true }
-        }
-    }
-    if ($SkipFrontendBuild) { $feChanged = $false }
-    if (-not $feChanged) {
-        $Results['8.1'] = '无需重建（相对 main 的变更未命中前端，沿用现有 apps\_fe_dist）。'
-    } elseif ($DryRun) {
-        $Results['8.1'] = '干跑：前端有变更，跳过实际构建。'
-    } else {
-        Push-Location (Join-Path $Root 'apps\my_app\frontend')
-        try { npm run build 2>&1 | ForEach-Object { Write-Log "  [my_app] $_" }; if ($LASTEXITCODE -ne 0) { Fail-Step '§8.1' 'my_app 前端构建失败' } }
-        finally { Pop-Location }
-        Push-Location (Join-Path $Root 'apps\portal')
-        try { npm run build 2>&1 | ForEach-Object { Write-Log "  [portal] $_" }; if ($LASTEXITCODE -ne 0) { Fail-Step '§8.1' '门户前端构建失败' } }
-        finally { Pop-Location }
-        $Results['8.1'] = '前端有变更，已重建 my_app 与门户（npm run build 通过）。'
-    }
-    Write-Log $Results['8.1']
-
-    # ---------- §8.2 之前：处理残留的 postmaster.pid ----------
-    # 今天中午 D:\02 就卡在这里：上次 PG 没干净退出，pid 文件残留，PG 起不来。
-    # 只有 pid 指向的进程已死才删；进程还活着说明 PG 正被别人用着，直接 blocked。
-    $PgData = Join-Path $Root 'runtime\pgdata'
-    $PidFile = Join-Path $PgData 'postmaster.pid'
-    if ((Test-Path -LiteralPath $PidFile) -and -not $DryRun) {
-        $oldPid = (Get-Content -LiteralPath $PidFile -TotalCount 1).Trim()
-        $alive = $false
-        if ($oldPid -match '^\d+$') { $alive = $null -ne (Get-Process -Id ([int]$oldPid) -ErrorAction SilentlyContinue) }
-        if ($alive) {
-            throw "便携 PG 的 postmaster.pid 指向仍存活的进程 $oldPid：PG 可能正被他人使用，拒绝冒烟（blocked）。"
-        }
-        Remove-Item -LiteralPath $PidFile -Force
-        $Notes += "残留 postmaster.pid（pid=$oldPid，进程已死）已清理。"
-        Write-Log "残留 postmaster.pid 已清理（pid=$oldPid）"
-    }
-
-    # ---------- 启动 02 全套服务 ----------
-    Write-Log '--- 启动 02（start_all.ps1）---'
-    if ($DryRun) {
-        $Results['启动'] = '干跑：跳过 start_all.ps1'
-    } else {
-        & (Join-Path $Root 'ops\deploy\start_all.ps1') 2>&1 | ForEach-Object { Write-Log "  $_" }
-        if ($LASTEXITCODE -ne 0) { Fail-Step '启动' "start_all.ps1 失败（exit=$LASTEXITCODE）" }
-        $StartedServices = $true
-        $Results['启动'] = 'start_all.ps1 通过'
-    }
-
-    # ---------- §8.2 数据库 ----------
-    Write-Log '--- §8.2 数据库 ---'
-    if ($DryRun) {
-        $Results['8.2'] = '干跑：跳过 psql 检查。'
-    } else {
-        $PgBin = Join-Path $Root 'runtime\postgresql16\bin'
-        $Psql = Join-Path $PgBin 'psql.exe'
-        $PgPort = [int](Get-DotEnvValue 'PGPORT' '55432')
-        $PgUser = Get-DotEnvValue 'MY_APP_DB_USER' 'myapp'
-        if ($PgPort -ne 55432) { Fail-Step '§8.2' "PGPORT 是 $PgPort，不是隔离端口 55432。" }
-        $dataDir = (& $Psql -w -h 127.0.0.1 -p $PgPort -U $PgUser -d postgres -tAc 'SHOW data_directory' 2>$null).Trim()
-        if ($LASTEXITCODE -ne 0 -or -not $dataDir) { Fail-Step '§8.2' 'psql SHOW data_directory 失败。' }
-        if ($dataDir -notlike "$Root*") { Fail-Step '§8.2' "data_directory 是 $dataDir，不在 02 下面。" }
-        $counts = ''
-        $AppDb = Join-Path $Root 'apps\my_app\db\app.db'
-        if (Test-Path -LiteralPath $AppDb) {
-            $counts = python -c "import sqlite3; c=sqlite3.connect(r'$AppDb'); print('/'.join(str(c.execute('SELECT COUNT(*) FROM '+t).fetchone()[0]) for t in ['credentials','task_schedule_config','email_recipients']))" 2>$null
-            if ($LASTEXITCODE -eq 0 -and $counts) { $counts = "；credentials/task_schedule_config/email_recipients = $counts" }
-            else { $counts = '；本地权威三表计数读取失败（不拦冒烟，已记录）' }
-        }
-        $Results['8.2'] = "通过。SHOW data_directory 为 ``$dataDir``，端口 55432（非生产 5432）$counts。"
-    }
-    Write-Log $Results['8.2']
-
-    # ---------- §8.3 服务检查 1–6 ----------
-    Write-Log '--- §8.3 服务检查 1–6 ---'
-    if ($DryRun) {
-        $Results['8.3'] = '干跑：跳过 6 项 HTTP 检查。'
-    } else {
-        $checks = @()
-        $err = Test-HttpOk 'http://127.0.0.1:7039/api/health' 'db_mode'
-        if ($err) { $checks += "1. /api/health：$err" }
-        $err = Test-HttpOk 'http://127.0.0.1:7039/api/wo-dashboard/overview'
-        if ($err) { $checks += "2. /api/wo-dashboard/overview：$err" }
-        $err = Test-HttpOk 'http://127.0.0.1:9277/uniplam/'
-        if ($err) { $checks += "3. 门户 9277：$err" }
-        $err = Test-HttpOk 'http://127.0.0.1:8080/myapp/'
-        if ($err) { $checks += "4a. nginx 8080：$err" }
-        $err = Test-HttpOk 'https://127.0.0.1:8443/myapp/'
-        if ($err) {
-            # PS 5.1 没有 -SkipCertificateCheck；自签证书时改走 curl -k。
-            $curlOut = curl.exe -k -s -o $null -w '%{http_code}' 'https://127.0.0.1:8443/myapp/' 2>$null
-            if ($curlOut -ne '200') { $checks += "4b. nginx 8443：$err（curl -k 亦为 $curlOut）" }
-        }
-        # 5. 8080 服务的 index.html 与 apps\_fe_dist\index.html sha256 一致
-        $distIndex = Join-Path $Root 'apps\_fe_dist\index.html'
-        if (-not (Test-Path -LiteralPath $distIndex)) { $checks += '5. apps\_fe_dist\index.html 不存在' }
+        New-SmokeLock -WaitSec 1800
+        $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $smokeArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $SmokePs1, '-PR', "$PrNumber", '-Sha', $ShortSha, '-Pytest')
+        if ($SkipFrontendBuild) { $smokeArgs += '-SkipFeBuild' }
+        Write-Log ("启动 $SmokePs1 " + ($smokeArgs -join ' '))
+        # 不重定向标准流：start_all 的隔离等待在 smoke.ps1 内部完成（隐藏控制台 + run_exit.cmd）。
+        # 外层也不用 1>$out 包一层，以免再引入句柄继承。
+        & $psExe @smokeArgs
+        $smokeExit = $LASTEXITCODE
+        Write-Log "smoke.ps1 退出码=$smokeExit"
+        $resultMd = Join-Path $TmpDir ("smoke_result_{0}_{1}.md" -f $PrNumber, $ShortSha)
+        Convert-SmokeResultToReport -ResultMdPath $resultMd -VerdictHint "smoke.ps1 exit=$smokeExit"
+        if ($smokeExit -eq 0 -and $Results['结论'] -eq '通过') { $script:ExitCode = 0 }
+        elseif ($smokeExit -eq 2) { $script:ExitCode = 2; if ($Results['结论'] -eq '通过') { $Results['结论'] = '失败：预检拒绝' } }
         else {
-            $want = (Get-FileHash -LiteralPath $distIndex -Algorithm SHA256).Hash
-            $tmpIndex = Join-Path $TmpDir 'smoke-served-index.html'
-            try {
-                Invoke-WebRequest -Uri 'http://127.0.0.1:8080/myapp/index.html' -UseBasicParsing -OutFile $tmpIndex -TimeoutSec 30
-                $got = (Get-FileHash -LiteralPath $tmpIndex -Algorithm SHA256).Hash
-                if ($got -ne $want) { $checks += '5. 8080 的 index.html sha256 与 apps\_fe_dist 不一致' }
-                else { $Results['8.3-hash'] = $want }
-            } catch { $checks += "5. 取 8080 的 index.html 失败：$($_.Exception.Message)" }
+            $script:ExitCode = 1
+            if ($Results['结论'] -eq '通过') { $Results['结论'] = "失败：smoke.ps1 exit=$smokeExit" }
         }
-        # 6. nginx -t 通过，且进程在 02 下面
-        $NginxExe = Join-Path $Root 'nginx-1.28.0\nginx.exe'
-        & $NginxExe -t -p (Join-Path $Root 'nginx-1.28.0\') 2>&1 | ForEach-Object { Write-Log "  [nginx -t] $_" }
-        if ($LASTEXITCODE -ne 0) { $checks += "6. nginx -t 失败（exit=$LASTEXITCODE）" }
-        $nginxPath = Get-ListeningProcessPath 8080
-        if ($nginxPath -and ($nginxPath -notlike "$Root*")) { $checks += "6. 8080 的 nginx 进程不在 02 下面：$nginxPath" }
-        if ($checks.Count -gt 0) { Fail-Step '§8.3' ($checks -join '；') }
-        $hashLine = ''
-        if ($Results.ContainsKey('8.3-hash')) { $hashLine = "；index.html sha256 ``$($Results['8.3-hash'])``" }
-        $Results['8.3'] = "全部通过。1. /api/health：db_mode=pg；2. 只读业务接口返回非空；3. 门户 9277：200；4. nginx 8080/8443：200；5. index.html sha256 一致$hashLine；6. nginx -t 通过，进程在 02 下面。"
     }
-    Write-Log $Results['8.3']
-
-    # ---------- pytest 离线集（与 CI quality.yml 同一套） ----------
-    Write-Log '--- pytest 离线集 ---'
-    if ($DryRun) {
-        $Results['pytest'] = '干跑：跳过 pytest。'
-    } else {
-        Push-Location (Join-Path $Root 'apps\my_app')
-        try {
-            $pyOut = python -m pytest tests -m 'not live' --deselect tests/test_client_is_local_trust.py::test_genuine_local_callers_still_allowed --deselect tests/test_client_is_local_trust.py::test_is_loopback_covers_ipv4_mapped_and_port_forms -q --tb=no 2>&1
-            $pyExit = $LASTEXITCODE
-            $pyOut | ForEach-Object { Write-Log "  [pytest] $_" }
-            $summary = ($pyOut | Select-String -Pattern 'failed|passed' | Select-Object -Last 1).Line
-            if (-not $summary) { $summary = "pytest exit=$pyExit（未解析到汇总行）" }
-            $failedLines = @($pyOut | Select-String -Pattern '^FAILED' | ForEach-Object { $_.Line })
-            $nonNur = @($failedLines | Where-Object { $_ -notmatch 'test_nur_exclude_semantics' })
-            if ($pyExit -ne 0 -and $nonNur.Count -gt 0) {
-                Fail-Step 'pytest' "$summary；除已知 NUR 外还有失败：$($nonNur -join '；')"
-            }
-            if ($pyExit -ne 0) { $Notes += 'pytest 有 2 个已知 NUR 缺数据失败，已按用户要求忽略。' }
-            $Results['pytest'] = "``$summary``"
-        } finally { Pop-Location }
-    }
-    Write-Log $Results['pytest']
-
-    $Results['结论'] = '通过'
-}
-catch {
-    if (-not $Results.ContainsKey('结论')) { $Results['结论'] = "失败：$($_.Exception.Message)" }
+} catch {
     Write-Log "冒烟失败：$($_.Exception.Message)"
-}
-finally {
-    # ---------- §8.4 收尾：停 02、确认端口释放、80/443 仍归生产 ----------
-    Write-Log '--- §8.4 收尾 ---'
-    $stopNotes = @()
-    if ($StartedServices -and -not $DryRun) {
-        & (Join-Path $Root 'ops\deploy\stop_all.ps1') 2>&1 | ForEach-Object { Write-Log "  [stop] $_" }
-    }
-    if (-not $DryRun) {
-        $busy = @()
-        foreach ($p in @(8080, 8443, 7039, 7091, 9277, 55432)) {
-            if (-not (Test-PortFree $p)) { $busy += $p }
-        }
-        if ($busy.Count -gt 0) {
-            $stopNotes += "02 端口未完全释放：$($busy -join ', ')"
-            Write-Log "警告：02 端口未完全释放：$($busy -join ', ')"
-        }
-        $prod80 = Get-ListeningProcessPath 80
-        $prod443 = Get-ListeningProcessPath 443
-        $prodOk = $true
-        foreach ($pp in @($prod80, $prod443)) {
-            if ($pp -and ($pp -notlike '*01_olbr_portal*')) { $prodOk = $false }
-        }
-        if ($prodOk) { $stopNotes += '80/443 仍归 D:\01_olbr_portal 的 nginx。' }
-        else { $stopNotes += "警告：80/443 归属异常（80=$prod80；443=$prod443）。" }
-        $stopNotes += '预先存在的 realtime_proxy 8887/8890 未动。'
-    } else {
-        $stopNotes += '干跑：跳过停服务与端口确认。'
-    }
-    $Results['8.4'] = ($stopNotes -join ' ')
-    Write-Log $Results['8.4']
-
-    # 恢复 git 原分支（冒烟 checkout 的 smoke-pr-* 分支删掉，不留尾巴）
-    if ((-not $DryRun) -and $OriginalBranch -and ($OriginalBranch -ne 'HEAD')) {
-        git checkout $OriginalBranch 2>&1 | Out-Null
-        git branch -D ("smoke-pr-{0}" -f $PrNumber) 2>&1 | Out-Null
-        $restored = (git rev-parse HEAD).Trim()
-        if ($restored -ne $OriginalCommit) { Write-Log "警告：恢复后 HEAD 是 $restored，原提交是 $OriginalCommit。" }
-    }
+    $Results['结论'] = "失败：$($_.Exception.Message)"
+    if (-not $Results.ContainsKey('8.1')) { $Results['8.1'] = "失败：$($_.Exception.Message)" }
+    if (-not $Results.ContainsKey('8.2')) { $Results['8.2'] = '未完成。' }
+    if (-not $Results.ContainsKey('8.3')) { $Results['8.3'] = '未完成。' }
+    if (-not $Results.ContainsKey('8.4')) { $Results['8.4'] = '未完成。' }
+    if (-not $Results.ContainsKey('pytest')) { $Results['pytest'] = '未完成。' }
+    $msg = $_.Exception.Message
+    if ($msg -match '锁' -or $msg -match 'HEAD') { $script:ExitCode = 2 } else { $script:ExitCode = 1 }
+} finally {
+    Remove-SmokeLockIfOwned
+    if (-not $Results.ContainsKey('结论')) { $Results['结论'] = '失败' }
+    if (-not $Results.ContainsKey('8.1')) { $Results['8.1'] = '未写入。' }
+    if (-not $Results.ContainsKey('8.2')) { $Results['8.2'] = '未写入。' }
+    if (-not $Results.ContainsKey('8.3')) { $Results['8.3'] = '未写入。' }
+    if (-not $Results.ContainsKey('8.4')) { $Results['8.4'] = '未写入。' }
+    if (-not $Results.ContainsKey('pytest')) { $Results['pytest'] = '未写入。' }
+    Write-SmokeReport
 }
 
-# ---------- 写报告（与 Grok #43 回帖同格式，watcher 直接拿去贴） ----------
-$EndedAt = Get-Date
-$Duration = [math]::Round(($EndedAt - $StartedAt).TotalSeconds, 1)
-$passed = ($Results['结论'] -eq '通过')
-$report = @()
-$verdict = '失败'
-if ($passed) { $verdict = '通过' }
-$report += "## D:\02 冒烟结果：$verdict"
-$report += ''
-$report += "- 测试提交：``$HeadSha``"
-$report += "- 由本地冒烟脚本运行（$ScriptVersion），无 LLM 参与"
-$report += "- 运行时间：$($StartedAt.ToString('yyyy-MM-dd HH:mm:ss'))–$($EndedAt.ToString('HH:mm:ss'))（Atlantic/Reykjavik，UTC+0），合计 $Duration 秒"
-if ($IssueNumber -gt 0) { $report += "- 关联 Issue：#$IssueNumber" }
-$report += ''
-$report += '### §8.1 前端构建'
-$report += $Results['8.1']
-$report += ''
-$report += '### §8.2 数据库'
-$report += $Results['8.2']
-$report += ''
-$report += '### §8.3 服务检查 1–6'
-$report += $Results['8.3']
-$report += ''
-$report += '### §8.4 收尾'
-$report += $Results['8.4']
-$report += ''
-$report += '### pytest'
-$report += $Results['pytest']
-if ($Notes.Count -gt 0) {
-    $report += ''
-    $report += '### 备注'
-    foreach ($n in $Notes) { $report += "- $n" }
-}
-$report += ''
-$report += '### 标签'
-if ($passed) { $report += '已打 `smoke-passed`。' } else { $report += '未打 `smoke-passed`（冒烟未通过）。' }
-$report -join "`n" | Out-File -LiteralPath $ReportFile -Encoding UTF8
-Write-Log "报告已写：$ReportFile（结论：$($Results['结论'])，耗时 ${Duration}s）"
-
-if ($passed) { exit 0 } else { exit 1 }
+exit $script:ExitCode
