@@ -5,6 +5,13 @@
 > 标签状态机）与 `dispatch-rules.md`（拆分与汇总），**本文只写实现映射**：
 > 哪个 workflow 在什么触发下做哪一步、安全阀在哪、出了问题去哪看。
 > 标签定义以 `.github/labels.yml` 为准，本文不自造标签。
+>
+> **2026-11-14 TASK-01 更新**：`auto-dispatch.yml`、`agent-orchestrator.yml`、
+> `dispatch-check.yml` 的业务逻辑已抽到 `apps/control-plane/backend/dispatch/`
+> 可测模块（workflow 只负责触发与传参，不再内嵌大段 Python），分派幂等改为
+> **git ref CAS**。实现映射见第六节、幂等机制见第七节、CI 作业见第八节、
+> dispatch ref 清理与已知边界见第九、十节。第一至五节保留 TASK-07 的历史
+> 口径（其中已被本轮回填的地方在相应位置标注）。
 
 ## 一、全景：一个任务的自动化生命周期
 
@@ -17,7 +24,8 @@ Worker 认领：发认领评论 + 打 state:claimed
 │ Issue 下留自动化评论
 ▼
 Worker 在分支上提交代码，草稿 PR 转正式
-│ quality.yml：5 个 job 检查（compileall / ruff / 门户 / 文档守卫 / pytest）
+│ quality.yml：7 个 job 检查（原 5 个 + agent-tests + agent-linux-process-tests，
+│ 见第八节；2026-11-14 TASK-01 起）
 │ 失败 → ci-failure-notify.yml：到 PR 与 Issue 通知 builder
 ▼
 quality 全绿 → agent-orchestrator.yml 自动 POST webhook 请 Grok 冒烟
@@ -53,9 +61,9 @@ Muse 1 按 dispatch-rules.md 第四节做最终汇总（人工/Agent 环节，�
 | `ci-failure-notify.yml` | `quality` 工作流跑完且结论 failure / timed_out | 按 head SHA 定位 open PR，评论通知 builder（失败 job、运行链接、SHA），关联 Issue 同步一份 | 同一 run 只通知一次（`ci-failure-notice` 标记去重）；只通知不改代码/标签 |
 | `pr-merged-writeback.yml` | PR 关闭且 `merged == true`、base 为 main；或 auto-merge 合并成功后 `workflow_dispatch`（填 PR 号） | 解析关联 Issue → 打 `state:merged`、摘其余 `state:` 标签 → 发 PR_MERGED 评论 → 关闭 Issue | 解析不到关联 Issue 就跳过；已回写过的重复触发跳过；dispatch 路径从 API 取 PR 并校验已合入 main |
 | `auto-merge.yml` 的 `auto-merge` 作业 | 合并成功后（本作业内） | 向 `auto-dispatch.yml` 与 `pr-merged-writeback.yml` 各 POST 一次 `workflow dispatch`（`ref: main`，`inputs: pr_number`） | dispatch 失败只记日志，不让合并作业变红（合并已发生）；下游工作流自身幂等，重复触发不重复评论/分派 |
-| `agent-orchestrator.yml`（2026-11-14 扩展） | `quality` 跑完且结论 success；或 PR 打 `state:qa-ready` 标签；或手动 dispatch | 按 head SHA 定位 open PR → POST webhook 请 Grok 冒烟 | 只认 success 结论；草稿 PR 跳过；已有 `state:qa-ready` 的跳过（打标签路径会触发）；同一 head SHA 只触发一次（查本工作流按 head SHA 的运行记录去重，失败的运行不算、可重试）；无对应 open PR 只记日志 |
-| `auto-dispatch.yml`（2026-11-14 新增） | PR 关闭且 `merged == true`、base 为 main；或 auto-merge 合并成功后 `workflow_dispatch`（填 PR 号） | 找下一个就绪任务（`state:todo` + `agent:muse-2/3` + 依赖全关 + 无认领/分派评论）→ 发 TASK_ASSIGNED 评论（from: github-actions）→ 补 `state:todo` 标签 | 优先派给本次合并空闲的 builder；依赖未满足的绝不分派；已认领 / 已分派的任务不动；无就绪任务只记日志；每次只派一个任务；dispatch 路径从 API 取 PR 并校验已合入 main |
-| `dispatch-check.yml`（2026-11-14 修 404） | Issue 新建 / 编辑 / 关闭 / 标签变化；每小时定时巡检 | 缺字段提醒、依赖阻塞打 `state:blocked`、依赖解除摘标签 | 只做提醒与标签，不合并、不关闭 Issue；依赖方搜索改走 REST Search API（`gh api search/issues` 在 runner 里报 HTTP 404，见第五节备忘） |
+| `agent-orchestrator.yml`（2026-11-14 扩展；TASK-01 改实现，现 Actions 层面 disabled） | `quality` 跑完且结论 success；或 PR 打 `state:qa-ready` 标签；或手动 dispatch（自动触发路径已从 `on:` 摘除，目前只剩手动 dispatch） | 调 `qa_dispatch.py`：按 head SHA 定位 open PR（全量分页）→ 跳过草稿 / 已有 `state:qa-ready` → `POST /git/refs` 登记 `refs/heads/dispatch/qa-trigger/pr-<N>-<headsha>-<digest>` → POST webhook 请 Grok 冒烟（webhook 失败回滚登记） | 只认 success 结论；草稿 PR 跳过；已有 `state:qa-ready` 的跳过；同一 head SHA 只触发一次（ref CAS，取代旧的“查运行记录”去重）；无对应 open PR 只记日志 |
+| `auto-dispatch.yml`（2026-11-14 新增；TASK-01 改实现） | PR 关闭且 `merged == true`、base 为 main；或 auto-merge 合并成功后 `workflow_dispatch`（填 PR 号） | 调 `auto_dispatch.py`：校验 PR → 触发级对账（已登记则只补状态）→ 全量分页找就绪任务（`state:todo` + `agent:muse-2/3` + 依赖全关 + 无认领/分派评论）→ `POST /git/refs` 做 CAS 登记 → 发带 `dispatch_id` 的 TASK_ASSIGNED 评论 → 幂等补 `state:todo` / 摘 `state:blocked` | 优先派给本次合并空闲的 builder；依赖未满足的绝不分派；已认领 / 已分派的任务不动；无就绪任务只记日志；每次只派一个任务；dispatch 路径从 API 取 PR 并校验已合入 main；并发 / 重复投递只登记一次（第七节） |
+| `dispatch-check.yml`（2026-11-14 修 404；TASK-01 改实现） | Issue 新建 / 编辑 / 关闭 / 标签变化；每小时定时巡检 | 调 `dispatch_check.py`：全量分页读评论 / Issue 列表 / 依赖方搜索结果 → 缺字段提醒、依赖阻塞打 `state:blocked`、依赖解除幂等摘标签；**只检查不分派** | 只做提醒与标签，不合并、不关闭 Issue；评论 marker 分页扫描 + 超时对账（重复执行不产生第二条评论）；标签操作幂等（加标签去重、摘不存在的标签当成功）；查询 / 分页失败显式报错让运行变红 |
 
 既有 workflow 不在 TASK-07 改动范围：`quality.yml`（检查本体）；
 `auto-merge.yml` 只加了 `update-branches` 作业与 push / dispatch 触发，
@@ -63,6 +71,10 @@ Muse 1 按 dispatch-rules.md 第四节做最终汇总（人工/Agent 环节，�
 `agent-orchestrator.yml`、`dispatch-check.yml` 与新增的
 `auto-dispatch.yml` 是 2026-11-14 的后续自动化（见上表），不在 TASK-07
 的原始范围里。
+2026-11-14 TASK-01：上表三个后续自动化 workflow（agent-orchestrator /
+auto-dispatch / dispatch-check）的内嵌 Python 已抽成
+`apps/control-plane/backend/dispatch/` 下的可测模块，workflow 只保留触发、
+权限与传参；具体映射、并发幂等与 CI 作业见第六、七、八节。
 
 ## 三、几个容易误解的口径
 
@@ -88,13 +100,16 @@ CI 失败只发通知评论、不打任何标签（标签只用 labels.yml 已�
 不为 CI 失败新造标签）。
 6. **CI 变绿自动触发 Grok，不等于“每次 quality 跑完都触发”**：只有结论
 为 success 才触发；quality 对同一 head SHA 会跑两次（push +
-pull_request），去重靠查本工作流按 head SHA 的运行记录，同一 SHA
-只触发一次；失败重跑（结论 failure）不触发，ci-failure-notify
+pull_request）。去重旧实现是查本工作流按 head SHA 的运行记录，**2026-11-14
+TASK-01 起改为 git ref CAS**（见第七节）：同一 head SHA 只触发一次，并发
+运行也只有一个赢家；失败重跑（结论 failure）不触发，ci-failure-notify
 负责通知。PR 已有 `state:qa-ready` 时也不重复触发（打标签路径已覆盖）。
+Grok 已于 2026-11-14 退役，该工作流当前在 Actions 层面 disabled（见第十节）。
 7. **合入后自动分派只派一个任务**：`auto-dispatch.yml` 每次合并只找
 编号最小的就绪任务，优先给本次空闲的 builder；没有就绪任务时只记
 日志，不报错、不派错。已被分派过（有 TASK_ASSIGNED 评论）的任务不
-重复分派；48 小时无人认领的走协议升级流程，不由本工作流重派。
+重复分派；48 小时无人认领的走协议升级流程，不由本工作流重派。并发 /
+重复投递 / workflow 重试由 ref CAS 保证“同一任务只登记一次”（第七节）。
 8. **GITHUB_TOKEN 合并不会触发下游工作流**：auto-merge 用默认
 GITHUB_TOKEN 合并 PR，GitHub 不会为该 token 触发的事件再启动新工作
 流，所以 `pull_request closed` 事件被抑制，auto-dispatch 与
@@ -131,13 +146,24 @@ main、force push 在 GitHub 侧均不被拦截，此前的合并纪律全靠流
 勾选）；「Require branches to be up to date」未开；禁止 force push；
 「Do not allow bypassing the above settings」已开，管理员同样受约束。
 自此直推 main 被 GitHub 侧拦截，本节清单全部生效。
+- 2026-11-14（TASK-01 补记）：`quality.yml` 作业由 5 个增至 7 个——新增
+`agent-tests`（windows-latest）与 `agent-linux-process-tests`（ubuntu-latest），
+见第八节。**分支保护规则本轮未改**：既有必需状态检查仍为上面核实的五个
+job；是否把两个新作业加入必需检查由用户/负责人决定。未加入前它们失败会
+在 CI 页面显示、但不阻塞合并。
 
 ## 五、运维备忘
 
-- 四个自动化 workflow 都只用 `GITHUB_TOKEN` + REST API（curl/jq），不引入
-第三方 Action；权限按最小化声明在各文件头 `permissions:`。
-（`dispatch-check.yml` 与新增的 `auto-dispatch.yml` 内嵌 Python
-脚本只用标准库 urllib，不引入第三方依赖，与守卫的零依赖要求一致。）
+- 四个自动化 workflow 都只用 `GITHUB_TOKEN` + REST API，不引入第三方
+Action；权限按最小化声明在各文件头 `permissions:`（各 workflow 的具体权限
+与传参见第六节）。（`dispatch-check.yml`、`auto-dispatch.yml` 与
+`agent-orchestrator.yml` 的内嵌 Python 自 2026-11-14 TASK-01 起已移到
+`apps/control-plane/backend/dispatch/` 下的模块，只用标准库 urllib，不引入
+第三方依赖，与守卫的零依赖要求一致；其余 workflow 仍用 curl/jq。）
+- 分派模块可离线自测（内存假 GitHub API，含并发 / 分页 / 超时故障注入）：
+`python -m pytest apps/control-plane/backend/dispatch/tests -q`
+（2026-11-14 本机结果 71 passed；CI 里由 `agent-tests` 作业的三路径命令
+一起跑，见第八节）。
 - 手动补救入口：`issue-to-pr`、`auto-merge` 均支持 `workflow_dispatch`，
 在 Actions 页选对应 workflow 填参数即可重跑（幂等，不会重复建）。
 `agent-orchestrator` 也支持 `workflow_dispatch`（填 PR 号）手动补触发。
@@ -155,3 +181,177 @@ dispatch 失败只记日志，不影响已发生的合并。
 （#18/#22 关闭触发的运行），依赖方因此未被解封。已改走 REST
 Search API（`GET /search/issues?q=...`，q 参数 urlencode 编码），
 同一查询实测返回 HTTP 200；其余 `gh api repos/...` 调用未动。
+
+## 六、2026-11-14 TASK-01：三个 workflow 的模块化实现映射
+
+背景：原 `auto-dispatch.yml` / `dispatch-check.yml` / `agent-orchestrator.yml`
+把两百多行 Python 内嵌在 YAML heredoc 里，无法单测，并且有 check-then-act
+重复分派与“只读第一页”的真实缺陷。现在业务逻辑在
+`apps/control-plane/backend/dispatch/`（每文件 <500 行、中文注释、零第三方
+依赖），workflow 只保留触发、权限、环境变量与一行 `python ...` 调用。
+
+| workflow | 调用的脚本 | workflow 传入的环境变量 | `permissions:`（YAML 原文） |
+| --- | --- | --- | --- |
+| `auto-dispatch.yml` | `python apps/control-plane/backend/dispatch/auto_dispatch.py` | `GH_TOKEN`、`REPO`、`EVENT`、`PR_NUMBER_EVENT`、`PR_NUMBER_INPUT`、`MERGE_SHA_EVENT` | `contents: write`（创建 dispatch ref）、`pull-requests: read`（读 PR）、`issues: write`（评论 / 标签） |
+| `agent-orchestrator.yml` | `python apps/control-plane/backend/dispatch/qa_dispatch.py` | `GH_TOKEN`、`REPO`、`EVENT`、`PR_NUMBER_EVENT`、`PR_NUMBER_INPUT`、`ISSUE_NUMBER_INPUT`、`RUN_HEAD_SHA`、`RUN_ID`、`RUN_URL`、`WEBHOOK_URL`、`WEBHOOK_KEY` | `contents: write`（创建 QA 登记 ref）、`pull-requests: read`（按 head SHA 找 PR） |
+| `dispatch-check.yml` | `python apps/control-plane/backend/dispatch/dispatch_check.py` | `GH_TOKEN`、`REPO`、`ISSUE_NUMBER`、`EVENT_NAME`、`EVENT_ACTION` | `contents: read`（checkout）、`issues: write`（评论 / 标签） |
+
+补充：
+
+- 三个作业都加了 `actions/checkout@v4` + `actions/setup-python@v5`（3.12）：
+  没有 checkout，runner 上就没有模块文件；`contents: write` 只给需要
+  `POST /git/refs` 的两个 workflow。
+- `EVENT` / `EVENT_NAME` 只用于日志；`ISSUE_NUMBER` 在定时巡检（`schedule`）
+  时为空字符串，脚本据此走“全量巡检”分支。
+- 跳过原因全部打印在运行日志里（未合入 main / 草稿 / 已有 `state:qa-ready` /
+  已有认领或分派评论 / 已登记等），排查先看日志。
+- 模块清单：`github_client.py`（REST 客户端 + Link 分页 + 重试 + 显式失败）、
+  `dispatch_registry.py`（git ref CAS）、`auto_dispatch.py`、`qa_dispatch.py`、
+  `dispatch_check.py`、`comment_ledger.py`（评论只发一次）、`protocol.py`
+  （消息头 / 依赖解析纯函数）。测试在 `dispatch/tests/`。
+- 分页统一规则（TASK-01 修复点）：`per_page=100`、跟随 `Link: rel="next"`、
+  按 id 去重、空页停止、超上限显式报错；查询失败不再被 `except` 兜成
+  “没有记录”，直接让运行失败，避免用不完整数据做分派 / 打标签决定。
+
+## 七、分派幂等：git ref CAS（TASK-07，2026-11-14 实现）
+
+**问题**：GitHub 评论接口没有“不存在才创建”的语义。旧实现先读评论判断
+“没分派过”，再 POST TASK_ASSIGNED——两个 workflow 并发运行时都能通过检查，
+同一任务被分派两次。
+
+**做法**：用 `POST /git/refs` 创建 ref 作为原子 CAS。ref 名全局唯一，后到的
+请求拿到 422，天然互斥。
+
+### 7.1 dispatch_key / dispatch_id 构成
+
+- 逻辑来源 `source`：auto-dispatch 固定为 `pr-merged`；QA 触发固定为
+  `qa-trigger`。**注意记的是逻辑事件，不是 workflow 事件名**——
+  `pull_request closed` 与 auto-merge 的 `workflow_dispatch` 是同一次
+  “PR 合入 main”的两条投递路径，用事件名会让同一合并算出两个 key、被派两次。
+- 规范化字符串：`repo|kind|number|sha|source`；`digest` = 其 sha256 的
+  前 10 位 hex。
+- `dispatch_id` = `<kind>-<number>-<sha前12位>-<digest10>`：
+  - auto-dispatch：`kind=issue`，`number`=目标任务 Issue 号，
+    `sha`=触发 PR 的 `merge_commit_sha`；
+  - QA 触发：`kind=pr`，`number`=PR 号，`sha`=PR 的 head SHA。
+- ref = `refs/heads/dispatch/<source>/<dispatch_id>`，例如
+  `refs/heads/dispatch/pr-merged/issue-7-222222222222-78a27590e9`。
+- **稳定性**：同一 repo + 同一目标 + 同一 sha + 同一逻辑来源必然算出同一个
+  dispatch_id；repo 也在 hash 里，跨仓库不串。
+
+### 7.2 登记、发评论与对账
+
+1. `POST /git/refs`（payload 带完整 `refs/heads/...`，`sha` 锚到
+   merge_commit_sha / head_sha 这类仓库里已存在的 commit）：
+   - **201**：本次是唯一赢家 → 发 TASK_ASSIGNED 评论；
+   - **422**：再用 `GET /git/ref/{ref}` 确认——ref 存在 = 已登记（并发输家 /
+     上次运行已登记），走对账；ref 不存在 = 锚点 SHA 无效等真实错误，
+     **显式抛错**，不当成“已登记”静默丢分派。
+2. 评论机器可读头带 `dispatch_id`，例如
+   `<!-- agent-msg: TASK_ASSIGNED, task: #7, from: github-actions, to: muse-2,
+   at: ..., dispatch_id: issue-7-... -->`；对账时**分页扫全量评论**按
+   `dispatch_id` 判重，而不是只看第一页。
+3. ref 存在但评论缺失（上次登记后进程崩溃 / 评论写入失败）→ 补发一次评论。
+   并发场景下先等一个 grace 窗口（生产默认 2 秒，测试用 0.05–0.5 秒）观察
+   赢家是否已经发出来，避免两个并发运行各补一条。
+4. **POST 不自动重试**（非幂等）：发评论遇到传输层超时（结果未知）时，先重扫
+   评论对账，确实没有才补发一次；补发后仍读不到则显式失败。宁可失败重跑，
+   也不盲目再发一条。
+5. **workflow 重试对齐**：同一 merge sha 的重复投递 / 重试先做触发级对账
+   （`GET /git/matching-refs/heads/dispatch/pr-merged` 找名字里含该 sha 的
+   ref）→ 找到目标 Issue 就只补评论 / 标签，不重新选任务。因此“分派成功但
+   标签回写失败”后重试不会派第二个任务、也不会丢状态。
+6. **QA 触发去重**：同一 PR 同一 head SHA 用同一个 ref。webhook 明确返回
+   非 2xx → 回滚登记 ref 并失败（允许下次重试，与原“失败运行不算已触发”
+   一致）；webhook 传输超时（结果未知）→ **保留**登记，宁可少重试一次也
+   不重复触发同一 SHA。
+7. **已知边界（2026-11-14 负责人确认可接受）**：并发双投递如果在“选定目标
+   任务之后”才错开，两次运行可能各派一个不同 Issue；**同一任务仍然只会被
+   分派一次**（ref CAS 保证）。要彻底消除需再加一层触发级 ref CAS，本轮
+   不做，如实记录为已知边界。
+
+## 八、quality.yml：作业从 5 个增至 7 个（2026-11-14 TASK-01）
+
+新增两个作业（既有 5 个作业未改动）：
+
+| # | 作业 | runner | 内容 |
+| --- | --- | --- | --- |
+| 1 | `compileall（apps + ops/deploy）` | windows-latest | 既有 |
+| 2 | `ruff E9,F821（my_app）` | windows-latest | 既有 |
+| 3 | `门户 lint / test / 文档守卫` | windows-latest | 既有 |
+| 4 | `my_app 文档一致性守卫` | windows-latest | 既有 |
+| 5 | `pytest 离线集（-m "not live"）` | windows-latest | 既有 |
+| 6 | `agent-worker + control-plane 调度/分派测试`（`agent-tests`） | windows-latest | **新增** |
+| 7 | `agent-worker Linux 进程/信号测试`（`agent-linux-process-tests`） | ubuntu-latest | **新增** |
+
+两条命令原文（与 `quality.yml` 逐字一致）：
+
+```bash
+# 6：agent-worker + control-plane（调度器 + 分派模块）离线测试
+python -m pytest apps/agent-worker/tests apps/control-plane/backend/tests apps/control-plane/backend/dispatch/tests -q -p no:cacheprovider
+```
+
+```bash
+# 7：在 Linux 上真实执行 POSIX 进程组 / SIGTERM / SIGKILL 测试
+python -m pytest apps/agent-worker/tests -q -p no:cacheprovider
+```
+
+说明：
+
+- `-p no:cacheprovider`：runner 工作区不留 `.pytest_cache`，避免脏文件。
+- 三个目录按目录跑、不依赖 rootdir 自动发现；`dispatch/tests` 必须显式列出，
+  否则 TASK-07 的分派幂等测试不进 CI（`apps/control-plane/backend/tests` 是
+  调度器测试的目录，`dispatch/tests` 是分派模块自己的目录）。
+- Windows 作业里 Python 进程 / 信号测试只能走模拟分支；单独的 ubuntu 作业
+  才让 `os.killpg` / SIGTERM / SIGKILL 语义真实执行。
+- 分支保护是否把两个新作业加为“必需检查”，见第四节的 TASK-01 补记（本轮
+  未改保护规则）。
+
+## 九、`refs/heads/dispatch/**` 累积与清理策略（2026-11-14）
+
+会产生什么：每次成功分派新增一个 ref（在仓库分支列表里表现为
+`dispatch/pr-merged/...` 或 `dispatch/qa-trigger/...` 分支）——auto-dispatch
+每次合并 1 个；QA 每个 PR 的每个 head SHA 1 个。长期会累积。
+
+**本轮不做自动清理**，原因：
+
+1. 删除 ref 会破坏 CAS 幂等：同一事件被重试 / 手动 rerun 时，已删的 ref 会被
+   当成“未登记”再分派一次——这正是 TASK-07 要消除的重复分派。
+2. git ref 没有时间戳元数据，自动判断“这条记录已经安全过期”不可靠。
+
+**人工清理（保守，只删确认不会再重跑的旧记录）**：
+
+1. 列出：`gh api "repos/{owner}/{repo}/git/matching-refs/heads/dispatch/pr-merged" --paginate`
+   （QA 的换成 `heads/dispatch/qa-trigger`）。
+2. 只删“对应 PR 已合并、对应 Issue 已关闭”的 ref：
+   `gh api -X DELETE "repos/{owner}/{repo}/git/refs/heads/dispatch/pr-merged/<dispatch_id>"`。
+3. 保守保留近 N 天（建议 30 天）：ref 本身没时间戳，用对应 PR 的合并日期判断。
+4. `qa-trigger` 的 ref 在 PR 尚未合并时**不要删**：删了同一 head SHA 会重新
+   触发 QA。PR 关闭 / 合并后可按同法清理。
+5. 删除已分派 Issue 的 `pr-merged` ref 后，如果同一 merge 事件再被投递
+   （典型是手动 rerun 旧 workflow），理论上会重复分派——所以清理只针对
+   “确认不会再重跑”的记录。
+
+本轮未提供自动清理脚本（避免误删导致重复分派）；后续如需自动化，应做成
+带 TTL / 白名单（跳过最近 N 天与未合并 PR）的独立作业。
+
+## 十、已知边界与 NOT TESTED（2026-11-14 TASK-01）
+
+| 项 | 状态 | 说明 |
+| --- | --- | --- |
+| 真实 GitHub Actions 上的并发执行（两 workflow 同时跑） | **NOT TESTED / BLOCKED** | 本机无 GitHub Actions runner、无 `act`；并发 / 幂等改用内存假 GitHub API 做真实多线程 CAS 测试（`dispatch/tests/`） |
+| 真实 GitHub API 的分页 Link / 422 / ref 路径在线行为 | **NOT TESTED** | 本机无仓库 token；实现按官方 REST 文档。单 ref 的 `GET /git/ref` 与 `DELETE /git/refs` 用 `heads/<branch>` 形式，`POST /git/refs` 的 payload 用完整 `refs/heads/...` |
+| ubuntu-latest 上的 POSIX 进程 / 信号行为 | **NOT TESTED** | 本机 Windows；由新增的 `agent-linux-process-tests` 作业在 CI 真实执行 |
+| `agent-orchestrator.yml` 重新启用 | **BLOCKED（等决策）** | 该工作流在仓库 Actions 配置里仍是 `disabled_manually`（`gh workflow disable`），本轮只改实现未改开关；且 `on:` 目前只剩 `workflow_dispatch`（Grok 已退役）。重新启用前先确认 Grok 是否恢复 |
+| fork PR 用 head SHA 作 ref 锚点 | **已知风险** | 对象可能不在 base repo，`POST /git/refs` 会 422；实现会显式报错（不会静默丢触发，也不会重复触发） |
+| 并发双投递“各派不同 Issue”的极端窗口 | **已知边界** | 见第七节第 7 条；同一任务不会被分派两次，负责人已确认可接受 |
+
+本地验证记录（2026-11-14，实现方在本机跑）：
+
+- `python -m pytest apps/control-plane/backend/dispatch/tests -q` → 71 passed；
+  重复多轮无 flake。
+- CI 第 6 个作业的三路径组合命令本机 → 258 passed, 6 skipped（含另两位成员的
+  agent-worker / scheduler 测试）。
+- workflow YAML 结构校验（本机无 act，只验证可解析）：
+  `python -c "import yaml, pathlib; [yaml.safe_load(p.read_text(encoding='utf-8')) for p in pathlib.Path('.github/workflows').glob('*.yml')]"`
+  → 8 个 workflow 全部通过。

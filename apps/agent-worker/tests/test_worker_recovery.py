@@ -1,128 +1,126 @@
-"""断线恢复验收（Issue #18）：断网 5 分钟——
+"""断线恢复验收（原 Issue #18 语义，改由中央调度器 + outbox 镜像承载）。
 
-- 租约未过期：重连后续租并回传，全程恰好一次 TASK_COMPLETED；
-- 租约已过期且被重派：原 Worker 的迟到回传被拒，零重复执行。
+- 断网期间：GitHub 回写（mirror.drain）失败只保留 outbox，不重复执行；
+  重连后 drain 重放，全程恰好一次完成；
+- 租约过期且任务被重派：旧实例的完成被 fencing 拒绝（StaleFencing），
+  新实例只完成一次，零重复结果。
 """
 
 from __future__ import annotations
 
 from datetime import timedelta
 
-from conftest import gi, wk
+from conftest import gi, make_worker, wk
 
-BODY = "## 目标\n写结果文件。\n## 改动文件\n- `result.txt`\n"
-
-
-class FlakyTransport:
-    """包一层内存传输：fail_until 之前所有调用都抛 TransportError（模拟本机断网）。"""
-
-    def __init__(self, inner, clock):
-        self.inner = inner
-        self.clock = clock
-        self.fail_until = None
-
-    def _gate(self):
-        if self.fail_until is not None and self.clock() < self.fail_until:
-            raise gi.TransportError("模拟断网")
-
-    def list_issues(self, labels=(), state="open"):
-        self._gate()
-        return self.inner.list_issues(labels, state)
-
-    def get_issue(self, number):
-        self._gate()
-        return self.inner.get_issue(number)
-
-    def list_comments(self, number):
-        self._gate()
-        return self.inner.list_comments(number)
-
-    def add_comment(self, number, body, author=""):
-        self._gate()
-        return self.inner.add_comment(number, body, author)
-
-    def set_labels(self, number, labels):
-        self._gate()
-        return self.inner.set_labels(number, labels)
+BODY = "## 目标\n写结果文件。\n## 改动文件\n- `result.txt`\n## 执行命令\n```\necho ok\n```\n"
 
 
-def _make_worker(adapter, git_repo, clock, sleep, runner):
-    return wk.AgentWorker(
-        adapter,
-        wk.WorktreeAllocator(git_repo),
-        wk.Executor(),
-        wk.WorkerConfig(
-            agent_id="muse-2",
-            poll_interval_s=5,
-            recovery_backoff_s=10,
-            recovery_budget_s=900,
-            scope_wait_timeout_s=120,
-        ),
-        clock=clock,
-        sleep=sleep,
-        runner=runner,
+def _issue(transport, number: int):
+    return transport.create_issue(
+        number, "断线恢复", BODY, labels=("agent:muse-2", "state:todo")
     )
 
 
-def _completed_count(transport, number) -> int:
-    return sum(
-        1
-        for c in transport.list_comments(number)
-        if (gi.parse_header(c.body) or {}).get("type") == "TASK_COMPLETED"
-    )
+def _runner_ok(wt_path):
+    (wt_path / "result.txt").write_text("done\n", encoding="utf-8")
+    return 0
 
 
-def test_disconnect_5min_lease_alive_resumes(transport, clock, git_repo):
-    flaky = FlakyTransport(transport, clock)
-    adapter = gi.GitHubIssueAdapter(flaky, "muse-2", clock=clock, lease_ttl=timedelta(hours=4))
-    issue = transport.create_issue(
-        61, "断网恢复（租约未过期）", BODY, labels=("agent:muse-2", "state:todo")
-    )
+def test_disconnect_5min_mirror_outbox_resumes_without_duplicate(
+    transport, clock, git_repo, scheduler, mirror
+):
+    """断网 5 分钟：执行与完成只发生一次；GitHub 回写延后到重连后的 drain。"""
+    issue = _issue(transport, 61)
+    worker = make_worker(transport, git_repo, clock, scheduler, mirror, runner=_runner_ok)
+    worker.register()
+    mirror.fail_next = 1  # 执行完成后的 GitHub 回写时断网
 
-    def runner(wt_path):
-        (wt_path / "result.txt").write_text("done\n", encoding="utf-8")
-        flaky.fail_until = clock.now + timedelta(minutes=5)  # 执行完回传时开始断网 5 分钟
-        return 0
-
-    worker = _make_worker(adapter, git_repo, clock, lambda s: clock.advance(s), runner)
     assert worker.handle_task(issue) == "completed"
-    assert _completed_count(transport, 61) == 1
-    assert "state:in-review" in transport.get_issue(61).labels
-    # 恢复路径确实走了续租
-    assert any("断线恢复后续租" in c.body for c in transport.list_comments(61))
+    assert len(scheduler.completions) == 1
+    assert scheduler.outbox and scheduler.outbox[0]["mirrored"] is False
+    assert scheduler.leases.get("issue-61") is None
+
+    clock.advance(300)  # 断网 5 分钟
+    # 重连后的周期先 drain：标签可能还没收敛（本替身不改 GitHub 标签），
+    # 于是会再遇到 AlreadyTerminal —— 关键是没有第二条结果、outbox 已被重放。
+    assert worker.run_once() in ("idle", "claim-conflict")
+    assert scheduler.outbox[0]["mirrored"] is True
+    assert len(scheduler.completions) == 1  # 没有第二条结果
 
 
-def test_disconnect_lease_expired_reassigned_no_duplicate(transport, clock, git_repo):
-    flaky = FlakyTransport(transport, clock)
-    adapter_a = gi.GitHubIssueAdapter(
-        flaky, "muse-2", clock=clock, lease_ttl=timedelta(seconds=120)
-    )
-    issue = transport.create_issue(
-        62, "断网恢复（租约过期重派）", BODY, labels=("agent:muse-2", "state:todo")
-    )
-    start = clock.now
-    state = {"reassigned": False}
+def test_lease_expired_reassigned_old_attempt_rejected(
+    transport, clock, git_repo, scheduler, mirror
+):
+    """租约过期被重派：旧实例的完成被 StaleFencing 拒绝，全程恰好一次结果。"""
+    issue = _issue(transport, 62)
 
-    def runner(wt_path):
+    def runner_old(wt_path):
         (wt_path / "result.txt").write_text("A 的结果\n", encoding="utf-8")
-        flaky.fail_until = clock.now + timedelta(seconds=150)  # A 断网 150 秒 > 租约 120 秒
+        # 执行期间租约过期（120s），另一实例 B 接手并完成
+        clock.advance(130)
+        lease_b = scheduler.claim(
+            "issue-62",
+            agent_id="muse-2",
+            instance_id="inst-b",
+            attempt_id="b-attempt",
+            lease_ttl=timedelta(minutes=10),
+        )
+        scheduler.transition(
+            "issue-62",
+            attempt_id="b-attempt",
+            fencing_token=lease_b.fencing_token,
+            state=scheduler.S.RUNNING,
+        )
+        scheduler.complete(
+            "issue-62",
+            attempt_id="b-attempt",
+            fencing_token=lease_b.fencing_token,
+            idempotency_key="b-attempt",
+            summary="重派后由新实例完成。",
+        )
         return 0
 
-    def sleep_and_reassign(seconds):
-        clock.advance(seconds)
-        # 租约过期后：Muse 1 把标签摘回 todo 重派，另一实例（同身份）接手并完成
-        if not state["reassigned"] and clock.now >= start + timedelta(seconds=130):
-            state["reassigned"] = True
-            transport.set_labels(62, ("agent:muse-2", "state:todo"))
-            adapter_b = gi.GitHubIssueAdapter(
-                transport, "muse-2", clock=clock, lease_ttl=timedelta(seconds=120)
-            )
-            adapter_b.claim(62)
-            adapter_b.begin_attempt(62, "b-attempt")
-            adapter_b.complete(62, "b-attempt", "重派后由新实例完成。")
-
-    worker = _make_worker(adapter_a, git_repo, clock, sleep_and_reassign, runner)
+    worker = make_worker(
+        transport,
+        git_repo,
+        clock,
+        scheduler,
+        mirror,
+        runner=runner_old,
+        lease_ttl_s=120,
+    )
     assert worker.handle_task(issue) == "aborted-reassigned"
-    assert state["reassigned"] is True
-    # 全程恰好一次完成回传（B 的），A 的迟到回传被 StaleAttempt 拒绝
-    assert _completed_count(transport, 62) == 1
+    assert len(scheduler.completions) == 1  # 只有 B 的一次
+    assert worker.active is None
+    assert scheduler.leases.get("issue-62") is None
+    # 旧实例不再乱发 GitHub 回写（outbox 里只有 B 的一条）
+    assert [op["completion_id"] for op in scheduler.outbox] == ["b-attempt"]
+
+
+def test_failure_inside_runner_keeps_original_exception_after_cleanup(
+    transport, clock, git_repo, scheduler, mirror
+):
+    """内部异常：清理后原样抛出；租约/范围锁/_active 不残留。"""
+    issue = _issue(transport, 63)
+
+    def runner_boom(wt_path):
+        raise ValueError("原始异常")
+
+    worker = make_worker(transport, git_repo, clock, scheduler, mirror, runner=runner_boom)
+    try:
+        worker.handle_task(issue)
+    except ValueError as exc:
+        assert "原始异常" in str(exc)
+    else:  # pragma: no cover - 明确要求异常必须传播
+        raise AssertionError("内部异常必须向上传播，不能被清理吞掉")
+
+    assert worker.active is None
+    assert scheduler.leases.get("issue-63") is None
+    assert scheduler.scope_locks.get("issue-63") is None
+    # 执行器自身异常 → 子进程树未确认退出，工作区保留（不删）
+    assert any("未确认退出" in err for err in worker.cleanup_errors)
+
+
+def test_scheduler_module_task_id_convention():
+    assert wk.task_id_for_issue(42) == "issue-42"
+    assert wk.task_id_for_issue(0) == "issue-0"
