@@ -65,8 +65,8 @@ CI 作业（`.github/workflows/quality.yml`，2026-11-14 起由 5 个增至 7 �
 | T06 | 旧实例恢复后提交结果被 fencing 拒绝 | `test_scheduler_complete.py::test_c05_old_attempt_and_token_rejected`、`test_scheduler_claim.py::test_t07_expired_lease_can_be_reclaimed_and_old_worker_fenced` | PASS | — |
 | T07 | 执行 200 秒心跳持续刷新 | `test_heartbeat.py::test_200s_task_stale_without_refresh_but_fresh_with_it`、`test_heartbeat_continues_while_task_is_running` | PASS | — |
 | T08 | 执行 30 分钟不被误杀 | `test_heartbeat.py::test_background_heartbeat_keeps_30min_task_not_stale`、`test_fresh_at_heartbeat_not_stale_over_30min_when_refreshed` | PASS | — |
-| T09 | 旧 Worker 忽略 SIGTERM 后最终确认退出 | `test_executor_process_tree.py::test_ignored_sigterm_escalates_to_sigkill`、`test_watchdog.py::test_restart_never_starts_new_before_old_confirmed_exit` | SKIP(POSIX) / PASS(Windows taskkill 路径) | PASS |
-| T10 | 孙进程超时后进程树全部清理 | `test_executor_process_tree.py::test_grandchild_process_is_reaped` | SKIP(POSIX) | PASS |
+| T09 | 旧 Worker 忽略 SIGTERM 后最终确认退出 | `test_executor_process_tree.py::test_ignored_sigterm_escalates_to_sigkill`（POSIX）；Windows 真实停止路径由 `test_executor_process_tree.py::test_windows_timeout_kills_grandchild_and_tree_exited_true` 与 Muse 2 探针 W6 覆盖；`test_watchdog.py::test_restart_never_starts_new_before_old_confirmed_exit` | PASS（Windows 真实进程树；Muse 2 W6 独立验证） | PASS |
+| T10 | 孙进程超时后进程树全部清理 | `test_executor_process_tree.py::test_grandchild_process_is_reaped`（POSIX）、`test_windows_timeout_kills_grandchild_and_tree_exited_true`（Windows 真跑） | PASS（Windows 修复后；0a91985 上为 FAIL，Muse 2/3 独立发现） | PASS |
 | T11 | 租约过期后范围锁可回收 | `test_scheduler_scope.py::test_s06_expired_lease_locks_auto_invalid_without_reap`、`test_s07_reap_releases_locks_and_is_idempotent` | PASS | — |
 | T12 | 两 Worker 抢重叠范围只一个成功 | `test_scheduler_scope.py::test_s02_overlapping_scope_conflict`、`test_s09_two_instances_same_scope_only_one_wins` | PASS | — |
 | T13 | 两 Worker 不重叠范围可并发 | `test_scheduler_scope.py::test_s01_non_overlapping_scopes_both_allowed`、`test_s10_release_scope_allows_other_task` | PASS | — |
@@ -76,7 +76,7 @@ CI 作业（`.github/workflows/quality.yml`，2026-11-14 起由 5 个增至 7 �
 | T17 | Hook 校验失败状态正确、资源清理 | `test_worker_cleanup.py::test_blocked_hooks_releases_everything` | PASS | — |
 | T18 | 缺少执行命令状态正确、资源清理 | `test_worker_cleanup.py::test_blocked_no_command_releases_lease_and_scope` | PASS | — |
 | T19 | 范围锁等待超时无锁残留 | `test_worker_cleanup.py::test_blocked_scope_timeout_releases_lease` | PASS | — |
-| T20 | 执行超时进程树退出、资源清理 | `test_executor_process_tree.py::test_timeout_terminates_process_tree_and_sets_reason` | PASS | PASS |
+| T20 | 执行超时进程树退出、资源清理 | `test_executor_process_tree.py::test_timeout_terminates_process_tree_and_sets_reason`、`test_windows_timeout_kills_grandchild_and_tree_exited_true`（含孙进程） | PASS（Windows 含孙进程，修复后） | PASS |
 | T21 | Worker 内部异常不失控且保留原始异常 | `test_worker_cleanup.py::test_internal_exception_cleans_then_reraises`、`test_failure_inside_runner_keeps_original_exception_after_cleanup` | PASS | — |
 | T22 | 外部取消任务及时停止且不提交结果 | `test_worker_cleanup.py::test_cancel_terminates_process_and_never_completes`、`test_executor_process_tree.py::test_cancel_event_terminates_process_group` | PASS | PASS |
 | T23 | Worker 崩溃后租约/锁/任务可恢复 | `test_scheduler_claim.py::test_t07_*`、`test_scheduler_complete.py::test_c07_complete_after_reap_is_stale`、`test_worker_integration.py::test_real_scheduler_blocks_then_retry_recovers` | PASS | — |
@@ -119,6 +119,23 @@ CI 作业（`.github/workflows/quality.yml`，2026-11-14 起由 5 个增至 7 �
 | 真实多主机（跨机器）调度 | NOT TESTED | 本轮存储为单主机 SQLite；多主机需替换 PostgreSQL（ADR-2） |
 | 生产训练机部署 | BLOCKED | 任务书 §3.2/§15：部署需项目所有者另行授权，第三方不得部署 |
 | 真实任务队列/生产 Worker 凭据破坏性测试 | BLOCKED | 同上，全程只用隔离测试环境 |
+
+## 六点五、独立验收发现与修复记录（2026-11-14）
+
+Muse 2 / Muse 3 在验收 commit `0a91985` 上**独立复现**同一个阻断缺陷：Windows 分支
+在超时/取消后孙进程仍存活，而 `ExecutionResult.tree_exited=True`（假阳性），原因叠加为
+「`taskkill /T`（无 /F）对控制台进程无效 → `proc.terminate()` 只杀根 → `_group_alive`
+只看根 poll → 强制 `/F /T` 永远不可达」。修复见 commit `fix(agent-worker): 修 Windows
+进程树清理假阳性`：
+
+- 新增 `apps/agent-worker/windows_tree.py`：终止前快照整棵树（Toolhelp32 原生 →
+  wmic → PowerShell CIM 兜底），宽限阶段不杀根，根存活时执行 `taskkill /F /T`，
+  之后逐个确认快照子孙消失；`tree_exited` 查询失败按「可能存活」处理（不给假阳性）。
+- 新增 Windows 真跑测试：`test_windows_timeout_kills_grandchild_and_tree_exited_true`、
+  `test_windows_cancel_kills_grandchild_and_tree_exited_true`、
+  `test_windows_root_exit_leaving_orphans_is_cleaned`；去掉 `/F /T` 的变异自检会让三条全红。
+- 原矩阵中 T09/T20 的 Windows「PASS」曾在 `0a91985` 上过强声明，已按实际证据更正；
+  Muse 2/3 的独立验收报告见 `muse2-verification.md` / `muse3-verification.md`。
 
 ## 七、基线证据
 

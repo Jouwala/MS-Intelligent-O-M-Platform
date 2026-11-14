@@ -24,6 +24,7 @@ hi = _bootstrap.load_sibling("hostinfo")
 cp = _bootstrap.load_sibling("command_parse")
 tl = _bootstrap.load_sibling("task_lifecycle")
 wd = _bootstrap.load_sibling("watchdog")
+wintree = _bootstrap.load_sibling("windows_tree")
 
 START = datetime(2026, 11, 14, 2, 0, 0, tzinfo=timezone.utc)
 

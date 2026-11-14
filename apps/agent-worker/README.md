@@ -20,6 +20,7 @@ Worker 不再自己发 `TASK_COMPLETED`（避免双写与重复评论）。
 | `heartbeat.py` | Worker 存活心跳：临时文件 + `flush/fsync` + `os.replace` 原子写（含 Windows 并发读重试），后台线程默认 30s 刷新，内容含 agent/instance/pid/at/task/state |
 | `cancellation.py` | 取消轮询线程（默认 5s）：查 `scheduler.is_cancel_requested`，命中置 Event 供执行器终止进程组 |
 | `hostinfo.py` | 主机信息与能力标签：`HOSTNAME`→`socket.gethostname()`，按 `sys.platform` 生成 `windows-worker` / `linux-worker`（TASK-11） |
+| `windows_tree.py` | Windows 进程树快照/强杀/逐个确认（Toolhelp32→wmic→CIM 兜底），保证 `tree_exited` 不假阳性 |
 | `command_parse.py` | 「执行命令」解析：结构化 `json` argv 优先，否则平台感知 shlex（Windows 保留反斜杠），永不 `shell=True`（TASK-13） |
 | `worktree.py` | Worktree 分配器（一任务一 Worktree、分支 `agent/<任务>`）+ 钩子校验（worktree hooksPath 静默失效坑、POSIX 可执行位 644 拒绝）+ 孤儿 worktree 回收接口 |
 | `_bootstrap.py` | 按文件路径加载模块（目录名带连字符不是合法包名）；`load_scheduler()` 加载中央调度器包 |
