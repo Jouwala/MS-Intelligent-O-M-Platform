@@ -37,9 +37,8 @@ TASK-02 接口定义（§8.1：`start/stop/status/submit/result`）。
 
 ## 未完成
 
-- [ ] 按 Issue 验收标准实现
-- [ ] agent-done-check 自检并把命令与结果贴到 Issue 评论
-
+- [x] 按 Issue 验收标准实现（base.py + grok_webhook.py + 接口测试，见本分支提交）
+- [x] agent-done-check 自检（结果贴到 Issue 评论）
 ## 下一步
 
 在本分支提交代码，草稿 PR 转正式后按 agent-protocol 发 TASK_COMPLETED / PR_CREATED 评论。
