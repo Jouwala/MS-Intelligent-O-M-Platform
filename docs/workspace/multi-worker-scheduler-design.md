@@ -222,8 +222,9 @@ GitHub 镜像与审计语义，既有测试不删；新 Worker 走 `SchedulerSer
 
 ## 十二、已知风险与后续项
 
-1. **多主机**：SQLite 不能跨主机共享；多训练机部署前必须把 `store.py` 换成 PG
-   （契约已隔离，替换点单一）。
+1. **多主机**：SQLite 不能跨主机共享；owner 2026-11-14 已确认生产拓扑是**多台 VM 各自跑
+   Worker**，因此当前实现**禁止多 VM 部署**（见第十三节部署门槛）；解除条件是按
+   「GitHub 原生 ref-CAS」方案落地权威层，或在 owner 另行批准下换成 PostgreSQL。
 2. **Linux 真实执行**：本机为 Windows，POSIX 信号/进程组测试在 GitHub Actions
    `ubuntu-latest` 作业里真实执行；本机结果标注为「跳过」而非通过。
 3. **真实 GitHub Actions 并发**：本地用假 GitHub API 做并发/故障测试；
@@ -248,3 +249,20 @@ GitHub 镜像与审计语义，既有测试不删；新 Worker 走 `SchedulerSer
 9. **Worker 层「执行超时」分支缺仓库回归（Muse 2 N3）**：executor 超时已覆盖，
    Worker 上层把 `killed_reason=timeout` 映射到 FAILED 的路径目前只有集成测试间接覆盖，
    建议补一条显式用例。
+
+## 十三、部署门槛：多 VM 生产拓扑（2026-11-14 owner 确认后新增）
+
+**结论：多 VM 部署 BLOCKED，直到 GitHub 原生 ref-CAS 权威层合入并通过回归。**
+
+- 生产拓扑（owner 2026-11-14 确认）：**多台 VM 各自运行 Worker**。
+- 当前实现（PR #52）的权威存储是每台主机本地的 SQLite（`TMP/scheduler/scheduler.db`），
+  事务原子性只在同一主机、同一数据库文件内成立。
+- 跨 VM 时认领 / 租约 / fencing / 范围锁 / 完成幂等**不互斥**：两台 VM 可以对同一任务
+  各自 `claim` 成功并同时执行。单机多实例安全，多机不安全。
+- **允许的部署方式（临时）**：同一台主机上运行一个或多个 Worker 实例（共享同一调度器 DB
+  文件），或纯只读/离线测试。**禁止**把 Worker 部署到两台及以上 VM，也禁止把本地 SQLite
+  当作跨机锁使用（含放到共享网络盘上——SQLite over SMB 的锁语义不可靠）。
+- **解除条件**：按 owner 选定的「GitHub 原生 ref-CAS（无中央服务）」方案实现权威层，
+  通过 T02/T04/T05/T11/T12/T15/T23/T24/T30 回归与 Muse 2 / Muse 3 独立验收后，
+  由 owner 批准解除本门槛。
+- 本门槛不涉及代码行为改动，仅为部署与验收约束；权威层方案落地后本节删除或改写。
