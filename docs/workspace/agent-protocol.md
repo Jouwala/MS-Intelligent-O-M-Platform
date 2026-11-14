@@ -24,9 +24,9 @@
 | 3 | TASK_PROGRESS | `<!-- agent-msg: TASK_PROGRESS, task: #12, from: muse-2, at: ... -->` | Muse 2/3 | 做到哪一步、还剩什么、是否遇到阻塞（阻塞另发 TASK_BLOCKED） |
 | 4 | TASK_BLOCKED | `<!-- agent-msg: TASK_BLOCKED, task: #12, from: muse-2, at: ... -->` | 任何 Worker | 卡在哪、已尝试什么、需要什么（等依赖 / 等决定 / 等修复） |
 | 5 | TASK_COMPLETED | `<!-- agent-msg: TASK_COMPLETED, task: #12, from: muse-2, at: ... -->` | Muse 2/3 | 改了什么、分支、提交、自检结果（贴 `agent-done-check.mjs` 命令与结果）；同时打 `state:in-review` 标签 |
-| 6 | QA_STARTED | `<!-- agent-msg: QA_STARTED, task: #12, from: grok, at: ... -->` | Grok | 冒烟已开始：PR 号、HEAD SHA、预计时长 |
-| 7 | QA_FAILED | `<!-- agent-msg: QA_FAILED, task: #12, from: grok, at: ... -->` | Grok | 结构化失败报告：PR、HEAD SHA、失败项、错误信息、日志链接；同时打 `state:qa-failed` 标签 |
-| 8 | QA_PASSED | `<!-- agent-msg: QA_PASSED, task: #12, from: grok, at: ... -->` | Grok | 冒烟通过：PR、HEAD SHA、通过项；同时打 `smoke-passed` 与 `state:qa-passed` 标签 |
+| 6 | QA_STARTED | `<!-- agent-msg: QA_STARTED, task: #12, from: smoke-watcher, at: ... -->` | smoke-watcher（D:\02 本机） | 冒烟已开始：PR 号、HEAD SHA、预计时长 |
+| 7 | QA_FAILED | `<!-- agent-msg: QA_FAILED, task: #12, from: smoke-watcher, at: ... -->` | smoke-watcher（D:\02 本机） | 结构化失败报告：PR、HEAD SHA、失败项、错误信息、日志链接；同时打 `state:qa-failed` 标签 |
+| 8 | QA_PASSED | `<!-- agent-msg: QA_PASSED, task: #12, from: smoke-watcher, at: ... -->` | smoke-watcher（D:\02 本机） | 冒烟通过：PR、HEAD SHA、通过项；同时打 `smoke-passed` 与 `state:qa-passed` 标签 |
 | 9 | FIX_REQUESTED | `<!-- agent-msg: FIX_REQUESTED, task: #12, from: muse-1, at: ... -->` | Muse 1 | 修复任务已建：新 Issue 编号、失败报告链接、修复轮次（第 1/2/3 次） |
 | 10 | FIX_COMPLETED | `<!-- agent-msg: FIX_COMPLETED, task: #12, from: muse-2, at: ... -->` | Muse 2/3 | 修复内容、新提交、回归自检结果；重新进入评审与测试 |
 | 11 | PR_CREATED | `<!-- agent-msg: PR_CREATED, task: #12, from: muse-2, at: ... -->` | Muse 2/3 | PR 链接、改动摘要、CI 状态；PR 描述须自动汇总改动与测试结果 |
@@ -36,7 +36,7 @@
 
 - **认领评论**（TASK_ACCEPTED 的一种固定写法）：`<!-- agent-claim: muse-2, 2026-11-13T19:30:00Z -->`，认领后 4 小时无进展（无 push、无评论）即租约过期，Muse 1 摘 `state:claimed` 标签重派。
 - **测试结果必须与 Commit 一致**：QA_PASSED / QA_FAILED 里的 HEAD SHA 必须等于 PR 当前 head SHA；过期测试结果（HEAD 已变）不得触发合并，`auto-merge.yml` 只认 head SHA 上的检查结果。
-- **Grok 不写代码**（第一阶段，用户决定）：Grok 只发 QA_STARTED / QA_FAILED / QA_PASSED，不发 TASK_COMPLETED / FIX_COMPLETED，不提交修复代码。
+- **QA 不写代码**（第一阶段，用户决定）：QA 只发 QA_STARTED / QA_FAILED / QA_PASSED，不发 TASK_COMPLETED / FIX_COMPLETED，不提交修复代码。2026-11-14 起 QA 由 D:\02 本机 smoke-watcher 承担，Grok Bot 已退役。
 
 ## 三、标签状态机
 

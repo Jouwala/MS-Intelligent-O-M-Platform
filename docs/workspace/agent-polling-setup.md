@@ -35,7 +35,7 @@ Muse 2、Muse 3 各自完成一个试验 Issue，全程不经用户转发，验�
 2. 被指派的 Muse 在自己的下一个会话开始时主动发现该 Issue（记录从建 Issue 到发现的时间）。
 3. 发认领评论（机器可读头 `<!-- agent-claim: muse-2, <ISO时间> -->`），打 `state:claimed` 标签，建分支 `agent/<任务>`。
 4. 完成试验改动（小改动即可，如补一行文档），跑 `node ops/deploy/agent-done-check.mjs`，推分支、开 PR，发 PR_CREATED 评论。
-5. PR 的 CI 变绿后，确认 Grok 冒烟被触发（或手动 dispatch），收到 QA 结果后按结果行动。
+5. PR 的 CI 变绿后，D:\02 本机的 smoke-watcher 会自动检出、冒烟、贴评论并打 smoke-passed（原 Grok 链路已于 2026-11-14 退役）；收到结果后按结果行动。
 6. 合并后发 PR_MERGED 评论（或由 Muse 1 发），打 `state:merged` 标签，关闭 Issue。
 7. 把全过程的时间线（发现时间、认领时间、PR 时间、QA 时间、合并时间）贴在 Issue 评论里，作为 V1 验收证据。
 

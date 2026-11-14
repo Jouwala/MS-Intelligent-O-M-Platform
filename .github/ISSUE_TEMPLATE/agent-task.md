@@ -1,6 +1,6 @@
 ---
 name: Agent 任务
-about: 跨 VM 多 Agent 协作的任务单（Muse 1 拆分、Muse 2/3 开发、Grok 测试）。所有字段必填，缺字段的 Issue 会被 dispatch-check 提醒补齐。
+about: 跨 VM 多 Agent 协作的任务单（Muse 1 拆分、Muse 2/3 开发、D:\02 本机 smoke-watcher 测试）。所有字段必填，缺字段的 Issue 会被 dispatch-check 提醒补齐。
 title: "[任务] "
 labels: ["state:todo"]
 assignees: []
@@ -18,7 +18,7 @@ assignees: []
 <!-- - [ ] agent:muse-1（总指挥，只负责协调类任务，不写业务代码） -->
 <!-- - [ ] agent:muse-2（Coding Worker） -->
 <!-- - [ ] agent:muse-3（Coding Worker） -->
-<!-- - [ ] agent:grok（QA Worker，只负责测试，不写代码） -->
+<!-- agent:grok 已于 2026-11-14 退役：QA 由 D:\02 本机 smoke-watcher 自动执行，不用再指派 -->
 
 负责人：<!-- 如 agent:muse-2 -->
 
@@ -46,7 +46,7 @@ assignees: []
 <!-- 可逐条打勾的验收项。验收不通过即返工，不由口头确认代替。 -->
 <!-- - [ ] agent-done-check.mjs 通过（改动前后端加 --full） -->
 <!-- - [ ] quality.yml 5 个 job 全绿 -->
-<!-- - [ ] Grok D:\02 冒烟通过（smoke-passed 标签） -->
+<!-- - [ ] D:\02 本机冒烟通过（smoke-passed 标签，smoke-watcher 自动打） -->
 
 - [ ]
 - [ ]
