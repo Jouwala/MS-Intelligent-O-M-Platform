@@ -20,7 +20,7 @@
 #
 # 安全阀：
 #   - 只处理 open 状态、且带 agent:muse-2 / agent:muse-3 标签的 Issue
-#     （开发任务才需要分支；Grok 的 QA 任务、Muse 1 的协调任务跳过）。
+#     （开发任务才需要分支；QA 任务、Muse 1 的协调任务跳过。QA 自 2026-11-14 起由 D:\02 本机 smoke-watcher 承担）。
 #   - 幂等：分支已存在不重建，PR 已存在不开第二个，Issue 下已有本工作流
 #     的完成标记评论时整体跳过——重复打标签、手动重跑都不会重复建。
 #   - 分支名必须通过 ^(agent|refactor|fix|feat|chore|task)/[A-Za-z0-9._/-]+$ 校验且不含 ..，防注入。
@@ -168,7 +168,7 @@ jobs:
               echo "- [ ] 本 PR 描述补齐改动摘要与测试结果（PR_CREATED 的自动汇总口径，见 agent-protocol.md）"
               echo
               echo "---"
-              echo "本 PR 由 issue-to-pr 工作流在任务被认领时自动创建（草稿）。开发 Agent 在本分支提交代码；转正式 PR 后走 CI → Grok 冒烟（smoke-passed）→ auto-merge 合并，合并后 pr-merged-writeback 自动回写任务状态并关闭 Issue。"
+              echo "本 PR 由 issue-to-pr 工作流在任务被认领时自动创建（草稿）。开发 Agent 在本分支提交代码；转正式 PR 后走 CI → D:\02 本机 smoke-watcher 冒烟（smoke-passed）→ auto-merge 合并，合并后 pr-merged-writeback 自动回写任务状态并关闭 Issue。"
             } > /tmp/pr-body.md
             # 保留 HTTP 状态与 API 报错原文：Issue #11 实跑时这一步 403 失败，
             # 旧写法把响应直接丢进 jq，只剩一句「开 PR 失败」，根因（仓库设置里

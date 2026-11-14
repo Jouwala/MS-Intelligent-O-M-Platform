@@ -1,29 +1,29 @@
 # Agent orchestrator：只做机械触发，不做判断。
 #
-# 三种触发方式，都会向 Grok Routine 的 webhook POST 一次冒烟测试请求：
-#   1. PR 被打上 QA 就绪标签（`state:qa-ready`）——人工 / 协调员触发；
-#   2. 手动 dispatch 本工作流（填 PR 号）——人工补救；
-#   3. quality 工作流跑完且结论为 success——CI 变绿自动触发（2026-11-14
-#      新增，不再需要人工打标签）。quality 对同一 head SHA 会跑两次
-#      （push + pull_request），且失败重跑也会再触发，所以自动触发路径
-#      有去重：同一 head SHA 只触发一次（见下文“去重”）。
+# ⛔ 已退役（2026-11-14 用户停用 Grok Bot）
+# =====================================================================
+# 冒烟与回写改由 D:\02 本机承担：计划任务 OLBR_SmokeWatcher 每 60 秒轮询，
+# CI 变绿且无 smoke-passed 的 open PR 就地检出该 PR head → 跑
+# ops\smoke\smoke.ps1 → 贴回评论 → 通过才打 smoke-passed → auto-merge 合入。
+# 全程 0 token、0 LLM。入口：ops/deploy/smoke-watcher.ps1。
 #
-# Grok 读 Issue/PR、在 D:\02 上跑 §8.2–8.4 冒烟 + 离线 pytest，结果发到
-# 用户与 Grok 的聊天里；它不在 GitHub 上回帖。
+# 本工作流原来负责向 Grok Routine 的 webhook POST 一次冒烟请求（三种触发：
+# state:qa-ready 标签 / 手动 dispatch / quality 变绿）。Grok 停掉之后 webhook
+# 拿不到响应，这个 job 会 exit 1，把每个 CI 变绿的 PR 都拖红，所以：
+#   1. 自动触发路径已从下面的 `on:` 里摘除（只留手动 dispatch）；
+#   2. 本工作流在 Actions 层面已 disabled_manually（gh workflow disable）。
+# 重新启用前先确认 Grok 是否真的回来；不回来就删掉本文件。
 #
-# webhook 地址和 sender key 放在仓库 secret 里（绝不写进代码）：
+# webhook 地址和 sender key 仍留在仓库 secret 里（绝不写进代码），当前无人使用：
 #   GROK_ROUTINE_WEBHOOK_URL
 #   GROK_ROUTINE_WEBHOOK_KEY
-# 请求头：Authorization: Bearer <secret 里的 sender key>
 
 name: agent-orchestrator
 
 on:
-  pull_request:
-    types: [labeled]
-  workflow_run:
-    workflows: ["quality"]
-    types: [completed]
+  # 2026-11-14：Grok 退役后只保留手动 dispatch；自动触发路径已摘除，
+  # 避免向已失效的 webhook POST 把 CI 拖红。本工作流同时已在 Actions 层面
+  # disabled_manually（gh workflow disable agent-orchestrator.yml）。
   workflow_dispatch:
     inputs:
       pr_number:

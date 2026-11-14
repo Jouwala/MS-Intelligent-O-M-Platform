@@ -1,6 +1,6 @@
 # 自动合并：CI 全绿 + smoke-passed 标签的 PR 自动合入 main，不经过 Muse、无需人工点批准。
 #
-# 冒烟结果由 Grok 贴回：Grok 在 D:\02 冒烟通过后，给该 PR 打上 smoke-passed 标签
+# 冒烟结果由 D:\02 本机 smoke-watcher 贴回：它在 D:\02 冒烟通过后贴评论并给该 PR 打 smoke-passed 标签
 # （标签需先在仓库里建好；打标签用 GitHub API 或网页，不经过 Muse）。
 #
 # 触发（覆盖两种顺序）：
