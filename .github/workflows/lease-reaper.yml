@@ -1,0 +1,51 @@
+# 租约 / 孤儿范围锁回收（ADR-7 §3.7）
+#
+# GitHub refs 是权威层，不需要中央服务：定时 workflow 调
+# apps/control-plane/backend/dispatch/lease_reaper.py 删除过期 lease ref
+# 与孤儿 scope ref，并（可选）收敛残留的 state 标签。
+#
+# 设计要点：
+# - 每 5 分钟（cron 最小粒度）+ 可手动 workflow_dispatch；
+# - permissions 只需 contents: write（删 refs）与 issues: write（可选标签修正）；
+# - 并发组保证同一时刻只有一个 Reaper（多轮重叠没有意义，也浪费 API 配额）；
+# - 失败显式：脚本非零退出 → workflow 变红，看日志里的 [reaper] 原因；
+# - 幂等：没有可删项也正常退出 0。HWM ref 默认永不删除。
+
+name: lease-reaper
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: lease-reaper
+  cancel-in-progress: false
+
+jobs:
+  reap:
+    name: 回收过期租约与孤儿范围锁
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 执行 Reaper（refs 权威层）
+        env:
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 日志/错误是中文：固定 UTF-8，避免 runner locale 差异导致输出乱码
+          PYTHONIOENCODING: utf-8
+        # 默认只删过期租约 + 孤儿 scope（HWM 永不删）；要顺手修正 state 标签
+        # 可加 `--fix-labels`，要先确认仓库标签口径。
+        run: python apps/control-plane/backend/dispatch/lease_reaper.py
