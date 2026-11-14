@@ -22,6 +22,7 @@
   （Grok 当年的 checkout 由它接管）；工作树有未提交的已跟踪改动时跳过该 PR，
   不覆盖他人在途工作。Token 依次取 `SMOKE_GITHUB_TOKEN`/`GITHUB_TOKEN`/
   `GH_TOKEN`，都没有时回落本机 `gh auth token`（只在内存，不落盘）。
+  开头有硬守卫：推导出的根目录落在 `D:\01_olbr_portal` 下直接拒绝执行（生产只读）。
 - `install-smoke-watcher.ps1`：把 watcher 注册成常驻计划任务 `OLBR_SmokeWatcher`
   （登录自启、崩溃每分钟重启、单实例）；`-Status` 查、`-Uninstall` 卸。
   日志 `TMP\smoke-watcher.log`。

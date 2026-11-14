@@ -7,6 +7,13 @@
   轮询 GitHub，看到 CI 已绿、且没有 smoke-passed 的 open PR，**先切到该
   PR 的 head**，再跑 smoke-local.ps1，贴回评论、通过才打标签。0 token。
 
+  ⛔ 生产边界（2026-11-14 用户明确要求）
+  ----------------------------------------
+  D:\01_olbr_portal 是生产，**不许动它里面任何东西**。本脚本只在
+  D:\02_olbr_portal 隔离副本里工作；开头有硬守卫，一旦推导出的根目录
+  落在 D:\01 下面就直接拒绝执行。冒烟链路对 D:\01 只有一处只读用途：
+  看 80/443 的 nginx 归属、读它家 app.db 做三表比对，从不写入。
+
   触发条件（与 agent-orchestrator 的去重逻辑一致）：
     · PR open、非草稿、base 是 main；
     · 同一 head SHA 的 quality 工作流有一次 completed + success；
@@ -66,6 +73,11 @@ $PidFile = Join-Path $TmpDir 'smoke-watcher.pid'
 $LogFile = Join-Path $TmpDir 'smoke-watcher.log'
 $SmokeScript = Join-Path $PSScriptRoot 'smoke-local.ps1'
 
+# ⛔ 生产边界硬守卫：宁可不动，也不许任何路径落到 D:\01 下面。
+$ProductionRoot = 'D:\01_olbr_portal'
+if ($Root.TrimEnd('\') -eq $ProductionRoot -or $Root -like ($ProductionRoot + '\*')) {
+    throw "拒绝执行：推导出的根目录是 $Root，落在生产目录 $ProductionRoot 下面。本链路只在 D:\02_olbr_portal 隔离副本上跑。"
+}
 if ($Root -notlike '*02_olbr_portal') { throw "当前目录不是 02（$Root），拒绝执行。" }
 if (-not (Test-Path -LiteralPath (Join-Path $Root 'ISOLATED_COPY.flag'))) {
     throw '缺少 ISOLATED_COPY.flag，拒绝执行。'
@@ -127,8 +139,36 @@ function Invoke-GitHubApi {
     if ($null -eq $Body) {
         return Invoke-RestMethod -Uri $uri -Method $Method -Headers $headers -TimeoutSec 60
     }
-    $json = ($Body | ConvertTo-Json -Depth 5 -Compress)
-    return Invoke-RestMethod -Uri $uri -Method $Method -Headers $headers -Body $json -ContentType 'application/json' -TimeoutSec 60
+
+    # PS 5.1 的两个坑（2026-11-14 本机贴评论返回 400/422 实测）：
+    # 1) 把 Get-Content -Raw 读出的字符串塞进 hashtable，ConvertTo-Json 会序列化成
+    #    {"body":{"value":"..."}} —— body 变成对象，GitHub 判非法。必须显式 [string]。
+    # 2) -Body 传字符串时 PS 5.1 按 ANSI 编码发，中文变 '?' —— 统一发 UTF-8 字节。
+    $normalized = @{}
+    if ($Body -is [hashtable]) {
+        foreach ($k in $Body.Keys) {
+            $v = $Body[$k]
+            if ($v -is [string]) { $normalized[$k] = [string]$v } else { $normalized[$k] = $v }
+        }
+    } else {
+        $normalized = $Body
+    }
+    $json = ($normalized | ConvertTo-Json -Depth 5 -Compress)
+    $bytes = [Text.Encoding]::UTF8.GetBytes($json)
+    try {
+        return Invoke-RestMethod -Uri $uri -Method $Method -Headers $headers -Body $bytes -ContentType 'application/json; charset=utf-8' -TimeoutSec 60
+    } catch {
+        # 把 GitHub 返回的错误体带出来：否则日志里只有 (400) Bad Request，没法查。
+        $detail = $_.Exception.Message
+        try {
+            $resp = $_.Exception.Response
+            if ($resp) {
+                $sr = New-Object IO.StreamReader($resp.GetResponseStream())
+                $detail = $detail + ' | ' + $sr.ReadToEnd()
+            }
+        } catch { }
+        throw ("GitHub API $Method $Path 失败：" + $detail)
+    }
 }
 
 function Invoke-Git {
@@ -336,7 +376,7 @@ function Invoke-OneCycle {
         $passed = ($smokeExit -eq 0)
         $reportFile = Join-Path $TmpDir ("smoke-pr-{0}-{1}.md" -f $n, $short)
         $report = ''
-        if (Test-Path -LiteralPath $reportFile) { $report = Get-Content -LiteralPath $reportFile -Raw }
+        if (Test-Path -LiteralPath $reportFile) { $report = [string](Get-Content -LiteralPath $reportFile -Raw) }
         else { $report = "## D:\02 冒烟结果：失败`n`n冒烟脚本未生成报告（exit=$smokeExit），请看 TMP\smoke-pr-$n-$short.log。" }
 
         # 贴标签前重读 PR：head 变了就放弃本次结果，不贴标签。
