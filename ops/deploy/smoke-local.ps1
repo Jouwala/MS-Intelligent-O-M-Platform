@@ -10,7 +10,9 @@
   ops\smoke\smoke.ps1（隐藏控制台、隔离等待 start_all/stop_all、
   注册表 Delegation 用完即恢复）。本脚本负责：UTF-8 BOM 可被
   PS 5.1 解析、TMP\smoke.lock、校验当前 HEAD 与 -HeadSha 一致
-  （不 checkout / 不删分支）、把结果写成 TMP\smoke-pr-<PR>-<sha7>.md。
+  （不 checkout / 不删分支；checkout 由调用方负责，watcher 会在
+  冒烟前切到 PR head 并在 finally 里切回）、把结果写成
+  TMP\smoke-pr-<PR>-<sha7>.md（干跑写 .dryrun.md，不覆盖真跑报告）。
 
   用法（必须在 D:\02_olbr_portal 根目录，或用 -File 绝对路径）：
     powershell -NoProfile -ExecutionPolicy Bypass -File ops\deploy\smoke-local.ps1 -PrNumber 44 -HeadSha <40位>
@@ -40,6 +42,12 @@ $HeadSha = $HeadSha.Trim().ToLowerInvariant()
 if ($HeadSha.Length -ge 7) { $ShortSha = $HeadSha.Substring(0, 7) } else { $ShortSha = $HeadSha }
 $ReportFile = Join-Path $TmpDir ("smoke-pr-{0}-{1}.md" -f $PrNumber, $ShortSha)
 $LogFile = Join-Path $TmpDir ("smoke-pr-{0}-{1}.log" -f $PrNumber, $ShortSha)
+if ($DryRun) {
+    # 干跑不得覆盖同 PR/同 SHA 的真跑报告与日志：加 .dryrun 后缀区分。
+    # （原先两者同名，跑一次 dry run 就把上一次真跑的证据冲掉了。）
+    $ReportFile = Join-Path $TmpDir ("smoke-pr-{0}-{1}.dryrun.md" -f $PrNumber, $ShortSha)
+    $LogFile = Join-Path $TmpDir ("smoke-pr-{0}-{1}.dryrun.log" -f $PrNumber, $ShortSha)
+}
 $LockPath = Join-Path $TmpDir 'smoke.lock'
 $SmokePs1 = Join-Path $Root 'ops\smoke\smoke.ps1'
 $Results = @{}
