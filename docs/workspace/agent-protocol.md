@@ -124,3 +124,53 @@ state:todo ──(TASK_ACCEPTED)──▶ state:claimed ──(TASK_COMPLETED + 
   合入后两者均为 0 次运行）。手动在网页上合并（用人 token）时
   pull_request closed 事件正常触发，两条路径都保留；两工作流也都支持
   手动 workflow_dispatch 补救。
+
+## 八、中央调度器权威化（2026-11-14 多 Worker 修复，ADR 见 `multi-worker-scheduler-design.md`）
+
+> 本节是对第一～七节的**修订**：GitHub Issue 评论不再是原子锁。任务描述、
+> 验收、PR/评审、展示与审计仍在 GitHub；**认领、租约、文件范围锁、执行代次、
+> 任务状态、完成幂等、分派登记由中央调度器裁决**（`apps/control-plane/backend/scheduler/`）。
+> 评论与标签是 outbox 异步回写的镜像，允许短暂落后，不参与裁决。
+
+### 8.1 身份四层
+
+| 字段 | 含义 | 生成 |
+| --- | --- | --- |
+| `agent_id` | 逻辑 Worker 身份（muse-2 / muse-3），用于标签与注册 | 配置 |
+| `instance_id` | 单次运行实例唯一身份 | Worker 进程启动时 |
+| `attempt_id` | 一次任务执行尝试 | 认领时生成 |
+| `fencing_token` | 任务级单调递增执行代次 | 每次认领成功 +1（调度器事务内） |
+
+续租、状态迁移、完成、释放范围锁、取消确认**必须**带 `attempt_id + fencing_token`；
+代次不符一律拒绝（旧实例恢复后不能提交或改写状态）。
+
+### 8.2 状态机（调度器权威状态）
+
+```
+queued → claimed → running → completed / failed / blocked
+                    ↓ 取消请求
+             cancel_requested → cancelled
+claimed/running --租约过期回收--> retryable/expired --新实例认领--> claimed
+```
+
+`completed / failed / cancelled` 是终态，不再接受认领；`blocked` / `retryable`
+可被重新认领。调度器拒绝任何未列入 `TRANSITIONS` 的迁移。
+
+### 8.3 与 GitHub 的对照
+
+- 认领成功：调度器返回带 fencing 的租约 → 镜像发 `TASK_ACCEPTED` + `state:claimed`；
+- 完成：调度器一个事务写终态/完成事件/outbox → 镜像发 `TASK_COMPLETED` + `state:in-review`；
+  镜像失败自动重试，**不再出现「完成评论已写、标签失败后永久卡死」**；
+- 失败 / 取消：调度器写终态后镜像发 `TASK_FAILED` / `TASK_CANCELLED`（本轮扩展的第 13/14 类
+  消息，机器可读头格式与第二节一致），标签分别收敛到 `state:blocked` / `state:todo`
+  （`state:qa-failed` 仍专指 QA 冒烟失败，不用于执行失败）；
+- 范围锁：`scope-lock` / `scope-unlock` 评论仅作审计，重叠判定以调度器锁表为准；
+- 分派：`TASK_ASSIGNED` 之前必须先做原子登记（git ref CAS + dispatch_id），
+  同一逻辑任务只形成一次有效分派。
+
+### 8.4 运行要求
+
+- Linux 训练机：Worker 以独立进程组运行，心跳线程默认 30s 原子写；看门狗阈值
+  默认 180s（显著大于心跳间隔）；重启前必须确认旧进程退出（SIGTERM→SIGKILL→wait）。
+- 调度器数据库默认 `<repo>/TMP/scheduler/scheduler.db`（`AGENT_SCHEDULER_DB` 可覆盖）；
+  单主机多 Worker 用 SQLite 事务保证原子性，多主机部署前必须替换为 PostgreSQL 实现。

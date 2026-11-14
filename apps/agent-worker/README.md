@@ -1,39 +1,51 @@
-# apps/agent-worker —— 分布式 Windows Agent Worker（TASK-03）
+# apps/agent-worker —— 分布式 Agent Worker（TASK-03）
 
-按 `docs/workspace/agent-protocol.md`（第一阶段语义）实现的 Worker：
-以 GitHub Issues 为唯一任务中心，在 Windows 目标机上以 Worker 自身的
-GitHub 身份运行，完成**注册、心跳、认领、执行、结果回传**全流程，
-并处理**断线恢复**与**一任务一 Worktree**。
+按 `docs/workspace/agent-protocol.md` 与多 Worker 中央调度器契约实现的 Worker：
+以 GitHub Issues 为**任务发现入口**，任务认领、租约、范围锁、完成与取消的
+**权威状态走中央调度器 `apps/control-plane/backend/scheduler/`**（`Scheduler` 协议）；
+Worker 完成注册、持续心跳、认领、执行、结果回传与统一清理，并处理断线恢复、
+取消与「一任务一 Worktree」。
 
 适配器在 `apps/control-plane/backend/adapters/github_issue.py`
-（`GitHubIssueAdapter`），本目录只放 Worker 侧四件：
+（`GitHubIssueAdapter`，Worker 侧只用于 `list_claimable()` 只读发现）。
+**GitHub 评论/状态标签回写仅由 `GitHubMirror` 的 outbox 重放镜像完成**，
+Worker 不再自己发 `TASK_COMPLETED`（避免双写与重复评论）。
 
 | 文件 | 职责 |
 | --- | --- |
-| `worker.py` | 主循环：注册 → 心跳 → 轮询认领 → 范围锁 → 执行 → 回传；断线恢复（结果先落盘、续租续传、过期放弃） |
-| `worktree.py` | Worktree 分配器（一任务一 Worktree、分支 `agent/<任务>`）+ 钩子校验（专查 AGENTS.md 记录的 worktree hooksPath 静默失效坑） |
-| `executor.py` | 在 Worktree 内执行命令/callable；范围守卫（超范围改动标出且不进提交）、超时、只提交范围内文件 |
-| `watchdog.py` | 看门狗：拉起 Worker、读心跳文件，卡死/退出即重启（有上限） |
-| `_bootstrap.py` | 按文件路径加载模块（两个目录名带连字符，不是合法包名） |
+| `worker.py` | 主循环编排：注册 → 心跳 → 只读发现 → 调度器认领 → 范围锁 → 执行 → 幂等完成；try/finally 覆盖全部退出路径 |
+| `task_lifecycle.py` | 任务生命周期写操作：调度器状态迁移（running/blocked/retryable/终态）、执行期续租、取消确认、`GitHubMirror.drain` 与统一清理 |
+| `executor.py` | 在 Worktree 内执行 argv/callable；独立进程组/Session，超时/取消时 SIGTERM→宽限→SIGKILL 整棵进程树（Windows `taskkill /T`）、`wait()` 回收并确认树退出；范围守卫与只提交范围内文件 |
+| `watchdog.py` | 看门狗：拉起 Worker、读心跳文件；卡死/退出即重启（有上限）；重启前确认旧实例退出，处理 SIGTERM/SIGINT，容忍心跳解析失败与上一次运行残留的旧心跳 |
+| `heartbeat.py` | Worker 存活心跳：临时文件 + `flush/fsync` + `os.replace` 原子写（含 Windows 并发读重试），后台线程默认 30s 刷新，内容含 agent/instance/pid/at/task/state |
+| `cancellation.py` | 取消轮询线程（默认 5s）：查 `scheduler.is_cancel_requested`，命中置 Event 供执行器终止进程组 |
+| `hostinfo.py` | 主机信息与能力标签：`HOSTNAME`→`socket.gethostname()`，按 `sys.platform` 生成 `windows-worker` / `linux-worker`（TASK-11） |
+| `command_parse.py` | 「执行命令」解析：结构化 `json` argv 优先，否则平台感知 shlex（Windows 保留反斜杠），永不 `shell=True`（TASK-13） |
+| `worktree.py` | Worktree 分配器（一任务一 Worktree、分支 `agent/<任务>`）+ 钩子校验（worktree hooksPath 静默失效坑、POSIX 可执行位 644 拒绝）+ 孤儿 worktree 回收接口 |
+| `_bootstrap.py` | 按文件路径加载模块（目录名带连字符不是合法包名）；`load_scheduler()` 加载中央调度器包 |
 
-## 协议映射
+## 协议映射（中央调度器 + 镜像）
 
-- **认领**：评论首行 `<!-- agent-claim: muse-2, <ISO 8601 UTC> -->` + `TASK_ACCEPTED` 头，标签 `state:todo → state:claimed`。
-- **租约**：认领后 4 小时无进展（无 push、无评论）即过期（协议第二节）；`TASK_PROGRESS` 评论即进展信号，续租就是发一条进展评论。租约时长可配（`lease_ttl`），测试用短租约仿真过期重派。
-- **防重复执行**：每次执行有唯一 `attempt` 号，写进 `TASK_PROGRESS`；回传（`TASK_COMPLETED`）时适配器校验「当前持有者 + 当前 attempt + 租约未过期」，任一不符以 `StaleAttempt` 拒绝——断线重派后原 Worker 的迟到回传不会二次生效。
-- **文件范围串行化**：任务范围从 Issue 正文「改动文件」一节解析；执行前用 `scope-lock:` 进展评论占锁，与任一在途任务重叠（同路径或目录前缀）即等待串行化；完成自动释放。
-- **断线恢复**：执行结果先写入 Worktree 的 `TMP/execution-result.json` 再回传；回传遇传输失败退避重试，重连后先核对租约——仍属我且未过期则续租续传（同一 attempt，幂等），已被重派则放弃本地结果并释放 Worktree。
+- **发现**：`GitHubIssueAdapter.list_claimable()` 只读拉取 Issue。
+- **认领**：`scheduler.upsert_task(...)`（幂等，不改状态）→ `scheduler.claim(task_id, agent_id, instance_id, attempt_id, lease_ttl)`；`task_id = issue-<N>`，回来带 `attempt_id + fencing_token` 作为本次执行身份。
+- **租约与心跳分离**：心跳线程只回答「Worker 进程活着」；任务租约由执行期 `scheduler.renew(...)` 续期（默认 600s TTL），两者互不代偿。
+- **防重复执行**：完成以 `attempt_id` 作幂等键，`scheduler.complete(...)` 重放返回 `created=False`；旧实例的完成/迁移收 `StaleFencing` 一律作废，绝不覆盖新实例状态。
+- **文件范围串行化**：范围从 Issue「改动文件」解析；执行前 `scheduler.acquire_scope`，与在途任务重叠即等待，超时转阻塞。
+- **取消**：独立轮询线程发现 `is_cancel_requested` → 执行器终止进程组 → `scheduler.ack_cancel` 落 `cancelled`；取消任务**不再** `complete`。
+- **断线恢复**：结果先写 Worktree 的 `TMP/execution-result.json`；GitHub 回写由 outbox + `GitHubMirror.drain` 重放（失败只留待重试，不回滚本地终态），重连/重启后自动收敛。
+- **统一清理**：成功保留 worktree；失败/超时/阻塞保留诊断产物但不留租约/范围锁；取消/内部异常在子进程确认退出后回收 worktree；清理异常只记录，不覆盖原始异常。
 
-## 运行（Windows 目标机）
+## 运行
 
 ```powershell
-# 环境变量：GITHUB_TOKEN（Worker 自身身份）、GITHUB_OWNER、GITHUB_REPO
+# 环境变量：GITHUB_TOKEN（Worker 自身身份）、GITHUB_OWNER、GITHUB_REPO；
+# 可选 AGENT_SCHEDULER_DB 指定调度器 SQLite 路径（默认走 store 的默认路径）
 python apps\agent-worker\worker.py --agent muse-2 --repo-root D:\02_olbr_portal --once   # 单周期
 python apps\agent-worker\watchdog.py --agent muse-2 --repo-root D:\02_olbr_portal          # 常驻（看门狗托管）
 ```
 
-任务的可执行内容来自 Issue 正文「执行命令」一节的代码块（第一行）；
-没有该节的任务会被标记 `TASK_BLOCKED` 等待补充，不会臆测执行。
+任务的可执行内容来自 Issue 正文「执行命令」一节：优先 `json` 代码块里的字符串数组，
+否则取代码块第一行按平台 shlex 解析；没有该节的任务会被标记阻塞等待补充，不会臆测执行。
 
 ## 离线自测
 
@@ -41,6 +53,13 @@ python apps\agent-worker\watchdog.py --agent muse-2 --repo-root D:\02_olbr_porta
 python -m pytest apps\agent-worker\tests -q
 ```
 
-覆盖验收标准：注册/心跳/认领/执行/回传全流程、一任务一 Worktree 与钩子
-校验、断网 5 分钟两种情形（租约未过期续租续传；过期重派且零重复执行）、
-两个并行任务范围重叠串行化。全部走内存传输 + 假时钟，不访问真实 GitHub。
+覆盖：持续心跳（长任务 / FakeClock 30 分钟不误杀 / 原子写并发读）、看门狗不拉起双实例
+（旧实例确认退出 + 旧心跳文件不误杀）、执行器超时/取消杀整棵进程树、取消后不提交结果、
+无执行命令 / Hook 失败 / 锁超时 / 执行失败 / 内部异常 / 断网的清理矩阵、POSIX Hook
+可执行位、平台能力标签、Windows/POSIX 命令解析，以及真实 `SQLiteStore +
+SchedulerService + GitHubMirror` 的端到端集成。全部离线（内存传输/GitHub 替身），
+不访问真实 GitHub。
+
+**POSIX 进程组与可执行位测试**（`test_executor_process_tree.py` /
+`test_worktree_guard.py` 中标记 `skipif(os.name != "posix")` 的用例）在 Windows 上跳过，
+由 CI 的 `ubuntu-latest` 作业真实执行；本机 Windows 不代跑。
