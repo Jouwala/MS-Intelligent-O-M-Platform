@@ -230,3 +230,21 @@ GitHub 镜像与审计语义，既有测试不删；新 Worker 走 `SchedulerSer
    真实多工作流并发的验证标注 NOT TESTED（需要隔离仓库+真实 Actions）。
 4. **GitHub 回写为异步 outbox**：极端情况下 GitHub 展示会短暂落后于权威状态，
    由 `mirror.drain()` 与对账任务收敛，这是有意的可用性权衡。
+
+### 独立验收（Muse 2 / Muse 3）后保留的后续项（2026-11-14）
+
+5. **W7 孤儿进程（非阻断，Muse 2 实测）**：Worker 根进程「自行退出」后遗留的子进程，
+   看门狗重启路径不会清理（watchdog 只管理自己拉起的 Worker 进程树）。执行中的
+   子进程树由 executor 负责（`64d2458` 后 Windows 也已覆盖），但若 Worker 在
+   执行器之外派生子进程并异常退出，仍可能泄漏。后续建议：Worker 启动时按
+   `workers` 表/心跳文件里的 pid 做孤儿回收，或由独立 Reaper 定时清理。
+6. **任务命令继承 Worker 环境（Muse 3 N4）**：执行器以继承环境启动子进程，Secret
+   与生产凭据对任务命令可见。建议后续提供最小环境白名单（部署侧先按运行用户隔离）。
+7. **`dispatch` ref 累积**：`refs/heads/dispatch/**` 随分派与 QA 触发增长；本轮不做
+   自动清理（删 ref 会让同一事件的重试被重复分派），人工清理策略见
+   `github-automation.md`。
+8. **`adapters/github_issue.py` 存量超 500 行（608→743）**：受 `_bootstrap.load_adapter`
+   单文件加载方式限制本轮未拆；后续单独任务拆分并同步改加载方式。
+9. **Worker 层「执行超时」分支缺仓库回归（Muse 2 N3）**：executor 超时已覆盖，
+   Worker 上层把 `killed_reason=timeout` 映射到 FAILED 的路径目前只有集成测试间接覆盖，
+   建议补一条显式用例。
