@@ -127,11 +127,24 @@ def test_run_once_writes_heartbeat_and_registers_host_fields(
 def test_heartbeat_continues_while_task_is_running(
     transport, clock, git_repo, scheduler, mirror
 ):
+    """执行期后台心跳仍在写（确定性同步，不依赖 wall-clock）。
+
+    旧写法用 `threading.Timer(0.25)` 放行 runner，再断言 `writes >= 3`：
+    `HeartbeatWriter` 把 interval 下限钳到 0.1s，0.25s 理论只够 3 拍、余量为 0；
+    Linux CI 上心跳线程启动/调度抖动 50~100ms 就只剩 2 拍，于是
+    `assert 2 >= 3` flake（run 43651353717）。
+
+    现在：runner 用 Event 把执行**确定性地**阻塞住；测试轮询等待
+    「执行开始后 HeartbeatWriter 至少再写 3 次」才放行 runner。
+    断言阈值不变，也不再依赖任何固定 sleep 时长。
+    """
     issue = _issue(transport)
-    gate = threading.Event()
+    running = threading.Event()
+    release = threading.Event()
 
     def slow_runner(path):
-        gate.wait(5.0)
+        running.set()
+        assert release.wait(10.0), "测试未放行 runner（执行期心跳等待超时）"
         (path / "result.txt").write_text("ok\n", encoding="utf-8")
         return 0
 
@@ -139,14 +152,30 @@ def test_heartbeat_continues_while_task_is_running(
         transport, git_repo, clock, scheduler, mirror, runner=slow_runner,
         heartbeat_interval_s=0.02,
     )
-    timer = threading.Timer(0.25, gate.set)
-    timer.start()
+    outcome: dict = {}
+    thread = threading.Thread(
+        target=lambda: outcome.setdefault("value", worker.run_once()), daemon=True
+    )
+    thread.start()
     try:
-        assert worker.run_once() == "completed"
+        assert running.wait(10.0), "任务执行未开始"
+        assert worker.heartbeat is not None
+        baseline = worker.heartbeat.writes
+        deadline = time.monotonic() + 10.0
+        while worker.heartbeat.writes - baseline < 3:
+            if time.monotonic() > deadline:
+                raise AssertionError(
+                    "执行期心跳停滞：runner 阻塞期间只写了 "
+                    f"{worker.heartbeat.writes - baseline} 次（期望 ≥3）"
+                )
+            time.sleep(0.005)
     finally:
-        timer.cancel()
-        gate.set()
-    assert worker.heartbeat.writes >= 3  # 执行期后台心跳仍在写
+        release.set()
+        thread.join(15.0)
+
+    assert not thread.is_alive()
+    assert outcome.get("value") == "completed"
+    assert worker.heartbeat.running is False
 
 
 # ---------------------------------------------------------------------------
