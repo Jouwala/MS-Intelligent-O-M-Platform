@@ -38,6 +38,12 @@ Worker 不再自己发 `TASK_COMPLETED`（避免双写与重复评论）。
 
 ## 运行
 
+> ⚠️ **多 VM 部署门槛（2026-11-14）**：当前调度器权威层是**单机 SQLite**，只在同一台主机
+> 的多个 Worker 实例之间保证互斥；**多台 VM 各自跑 Worker 会重复认领/重复执行**。
+> 生产拓扑是多 VM，因此在 GitHub 原生 ref-CAS 权威层合入前，**禁止把 Worker 部署到多台 VM**
+> （允许同机多实例）。详见 `docs/workspace/multi-worker-scheduler-design.md` 第十三节。
+
+
 ```powershell
 # 环境变量：GITHUB_TOKEN（Worker 自身身份）、GITHUB_OWNER、GITHUB_REPO；
 # 可选 AGENT_SCHEDULER_DB 指定调度器 SQLite 路径（默认走 store 的默认路径）

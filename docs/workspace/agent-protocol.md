@@ -173,4 +173,8 @@ claimed/running --租约过期回收--> retryable/expired --新实例认领--> c
 - Linux 训练机：Worker 以独立进程组运行，心跳线程默认 30s 原子写；看门狗阈值
   默认 180s（显著大于心跳间隔）；重启前必须确认旧进程退出（SIGTERM→SIGKILL→wait）。
 - 调度器数据库默认 `<repo>/TMP/scheduler/scheduler.db`（`AGENT_SCHEDULER_DB` 可覆盖）；
-  单主机多 Worker 用 SQLite 事务保证原子性，多主机部署前必须替换为 PostgreSQL 实现。
+  单主机多 Worker 用 SQLite 事务保证原子性。
+- **多 VM 部署门槛（2026-11-14）**：生产拓扑是多台 VM 各自跑 Worker，而当前权威层是
+  单机 SQLite —— 跨 VM 认领/fencing/范围锁不互斥。**在 GitHub 原生 ref-CAS 权威层合入前，
+  禁止把 Worker 部署到多台 VM**（只能同机多实例）。详见
+  `multi-worker-scheduler-design.md` 第十三节。

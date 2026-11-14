@@ -116,7 +116,7 @@ CI 作业（`.github/workflows/quality.yml`，2026-11-14 起由 5 个增至 7 �
 | --- | --- | --- |
 | 真实 GitHub Actions 上两个 workflow 真并发执行 | NOT TESTED / BLOCKED | 本机无 act/runner、无凭据；已用可注入假 GitHub API 做真实多线程 CAS 与故障注入测试。真实环境验证需在隔离仓库触发两条 workflow |
 | 真实 GitHub API 的 Link/422/限流在线行为 | NOT TESTED | 无 token、无网络写权限；实现按官方文档 + 假 API 覆盖 |
-| 真实多主机（跨机器）调度 | NOT TESTED | 本轮存储为单主机 SQLite；多主机需替换 PostgreSQL（ADR-2） |
+| 真实多主机（跨机器）调度 | **BLOCKED（部署门槛）** | 生产拓扑已确认为多台 VM 各自跑 Worker；当前权威层是单机 SQLite，跨 VM 不互斥。**在 GitHub 原生 ref-CAS 权威层合入前禁止多 VM 部署**（见 design 文档第十三节）；单机多实例可用 |
 | 生产训练机部署 | BLOCKED | 任务书 §3.2/§15：部署需项目所有者另行授权，第三方不得部署 |
 | 真实任务队列/生产 Worker 凭据破坏性测试 | BLOCKED | 同上，全程只用隔离测试环境 |
 
