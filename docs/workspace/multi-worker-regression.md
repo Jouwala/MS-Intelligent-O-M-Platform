@@ -78,7 +78,7 @@ CI 作业（`.github/workflows/quality.yml`，2026-11-14 起由 5 个增至 7 �
 | T19 | 范围锁等待超时无锁残留 | `test_worker_cleanup.py::test_blocked_scope_timeout_releases_lease` | PASS | — |
 | T20 | 执行超时进程树退出、资源清理 | `test_executor_process_tree.py::test_timeout_terminates_process_tree_and_sets_reason`、`test_windows_timeout_kills_grandchild_and_tree_exited_true`（含孙进程） | PASS（Windows 含孙进程，修复后） | PASS |
 | T21 | Worker 内部异常不失控且保留原始异常 | `test_worker_cleanup.py::test_internal_exception_cleans_then_reraises`、`test_failure_inside_runner_keeps_original_exception_after_cleanup` | PASS | — |
-| T22 | 外部取消任务及时停止且不提交结果 | `test_worker_cleanup.py::test_cancel_terminates_process_and_never_completes`、`test_executor_process_tree.py::test_cancel_event_terminates_process_group` | PASS | PASS |
+| T22 | 外部取消任务及时停止且不提交结果 | `test_worker_cleanup.py::test_cancel_terminates_process_and_never_completes`、`test_executor_process_tree.py::test_cancel_event_terminates_process_group`、`test_windows_cancel_kills_grandchild_and_tree_exited_true`（Windows 真跑） | PASS | PASS |
 | T23 | Worker 崩溃后租约/锁/任务可恢复 | `test_scheduler_claim.py::test_t07_*`、`test_scheduler_complete.py::test_c07_complete_after_reap_is_stale`、`test_worker_integration.py::test_real_scheduler_blocks_then_retry_recovers` | PASS | — |
 | T24 | 两个 auto-dispatch 同时启动不重复分派 | `dispatch/tests/test_dispatch_registry.py::test_register_concurrent_only_one_winner`、`test_auto_dispatch.py::test_two_concurrent_dispatch_runs_register_once` | PASS | — |
 | T25 | Workflow 重复触发幂等 | `test_auto_dispatch.py::test_repeated_event_delivery_is_idempotent`、`test_qa_dispatch.py::test_trigger_once_then_idempotent` | PASS | — |
@@ -101,7 +101,7 @@ CI 作业（`.github/workflows/quality.yml`，2026-11-14 起由 5 个增至 7 �
 | 4 | Watchdog 不等旧进程退出 | `test_watchdog.py::test_restart_never_starts_new_before_old_confirmed_exit`、`test_ignored_sigterm_escalates_to_sigkill` |
 | 5 | 过期范围锁不失效 | `test_scheduler_scope.py::test_s06/t_s07` |
 | 6 | 失败/阻塞/超时清理不完整 | `test_worker_cleanup.py`（清理矩阵 8 条） |
-| 7 | complete 缺少幂等恢复 | `test_scheduler_complete.py::test_c01–c12`、`test_scheduler_mirror.py::test_m01–m10` |
+| 7 | complete 缺少幂等恢复 | `test_scheduler_complete.py::test_c01–c12`、`test_mirror.py::test_m01–m11` |
 | 8 | auto-dispatch 并发重复分派 | `dispatch/tests/test_dispatch_registry.py`、`test_auto_dispatch.py` |
 | 9 | Linux 子进程/孙进程泄漏 | `test_executor_process_tree.py`（POSIX，Linux CI 执行） |
 | 10 | Worker 缺少取消处理 | `test_worker_cleanup.py::test_cancel_*`、`test_executor_process_tree.py::test_cancel_event_terminates_process_group` |
@@ -154,6 +154,15 @@ Windows 路径命令被解析为 ['C:toolspython.exe', ...]
 
 ## 八、CI 证据
 
-见 PR Checks：`quality / agent-tests`（windows-latest）与
-`quality / agent-linux-process-tests`（ubuntu-latest）。两个作业的结论与日志链接
-在交付报告里给出；本文件在 CI 完成后回填最终结果。
+验收 head：`64d2458`。GitHub Actions run **43648075661**（quality，7/7 作业 success）：
+
+| 作业 | Runner | 实际命令 | 结果 |
+| --- | --- | --- | --- |
+| agent-tests | windows-latest | `python -m pytest apps/agent-worker/tests apps/control-plane/backend/tests apps/control-plane/backend/dispatch/tests -q -p no:cacheprovider` | **271 passed, 6 skipped** |
+| agent-linux-process-tests | ubuntu-latest | `python -m pytest apps/agent-worker/tests -q -p no:cacheprovider` | **102 passed, 4 skipped**（POSIX 进程组/SIGTERM→SIGKILL 真实执行；Windows 专用用例合法跳过） |
+
+其余 5 个既有作业（compileall / ruff / portal / my_app 文档守卫 / my_app pytest）同样 success。
+Run 链接：https://github.com/Jouwala/noc-soc-intelligent-platform/actions/runs/43648075661
+
+> 更早一次 run 43646693148（0a91985）同样 7/7 success，但该 commit 上存在 Muse 2/3 发现的
+> Windows 进程树阻断项，已在 64d2458 修复；上表为最终 head 的证据。
