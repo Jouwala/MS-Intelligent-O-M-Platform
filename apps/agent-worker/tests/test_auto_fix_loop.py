@@ -138,10 +138,14 @@ def test_run_block_bash_syntax(wf: str) -> None:
             break
         block.append(ln[indent + 2 :])
     script = "\n".join(block)
+    # 输入按 UTF-8 字节传：Windows 的 text 模式走 cp1252，
+    # 脚本里的中文会编码失败（CI 实测 UnicodeEncodeError）。
     proc = subprocess.run(
-        [bash, "-n"], input=script, capture_output=True, text=True, check=False
+        [bash, "-n"], input=script.encode("utf-8"), capture_output=True, check=False
     )
-    assert proc.returncode == 0, f"bash -n 失败：{proc.stderr}"
+    assert proc.returncode == 0, (
+        f"bash -n 失败：{proc.stderr.decode('utf-8', errors='replace')}"
+    )
 
 
 _SHA_A = "a" * 40
@@ -168,9 +172,8 @@ def _count_root_markers(issues: list[dict], root: int) -> int:
 
     jq = subprocess.run(
         ["jq", "-r", '.[].body // ""'],
-        input=json.dumps(issues),
+        input=json.dumps(issues).encode("utf-8"),
         capture_output=True,
-        text=True,
         check=True,
     )
     grep = subprocess.run(
@@ -178,7 +181,6 @@ def _count_root_markers(issues: list[dict], root: int) -> int:
         check=False,
         input=jq.stdout,
         capture_output=True,
-        text=True,
     )
     awk = subprocess.run(
         [
@@ -190,9 +192,9 @@ def _count_root_markers(issues: list[dict], root: int) -> int:
         input=grep.stdout,
         check=False,
         capture_output=True,
-        text=True,
     )
-    lines = [ln for ln in awk.stdout.splitlines() if ln.strip()]
+    out = awk.stdout.decode("utf-8", errors="replace")
+    lines = [ln for ln in out.splitlines() if ln.strip()]
     return len(lines)
 
 
