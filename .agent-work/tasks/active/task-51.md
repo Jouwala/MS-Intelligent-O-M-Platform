@@ -33,8 +33,8 @@ TASK-06 子任务 D：把「自动测试 → Review → 失败修复 → 重新�
 
 ## 未完成
 
-- [ ] 按 Issue 验收标准实现
-- [ ] agent-done-check 自检并把命令与结果贴到 Issue 评论
+- [x] 按 Issue 验收标准实现
+- [x] agent-done-check 自检并把命令与结果贴到 Issue 评论
 
 ## 下一步
 

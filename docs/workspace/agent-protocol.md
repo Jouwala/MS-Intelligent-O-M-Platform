@@ -24,53 +24,79 @@
 | 3 | TASK_PROGRESS | `<!-- agent-msg: TASK_PROGRESS, task: #12, from: muse-2, at: ... -->` | Muse 2/3 | 做到哪一步、还剩什么、是否遇到阻塞（阻塞另发 TASK_BLOCKED） |
 | 4 | TASK_BLOCKED | `<!-- agent-msg: TASK_BLOCKED, task: #12, from: muse-2, at: ... -->` | 任何 Worker | 卡在哪、已尝试什么、需要什么（等依赖 / 等决定 / 等修复） |
 | 5 | TASK_COMPLETED | `<!-- agent-msg: TASK_COMPLETED, task: #12, from: muse-2, at: ... -->` | Muse 2/3 | 改了什么、分支、提交、自检结果（贴 `agent-done-check.mjs` 命令与结果）；同时打 `state:in-review` 标签 |
-| 6 | QA_STARTED | `<!-- agent-msg: QA_STARTED, task: #12, from: smoke-watcher, at: ... -->` | smoke-watcher（D:\02 本机） | 冒烟已开始：PR 号、HEAD SHA、预计时长 |
-| 7 | QA_FAILED | `<!-- agent-msg: QA_FAILED, task: #12, from: smoke-watcher, at: ... -->` | smoke-watcher（D:\02 本机） | 结构化失败报告：PR、HEAD SHA、失败项、错误信息、日志链接；同时打 `state:qa-failed` 标签 |
-| 8 | QA_PASSED | `<!-- agent-msg: QA_PASSED, task: #12, from: smoke-watcher, at: ... -->` | smoke-watcher（D:\02 本机） | 冒烟通过：PR、HEAD SHA、通过项；同时打 `smoke-passed` 与 `state:qa-passed` 标签 |
-| 9 | FIX_REQUESTED | `<!-- agent-msg: FIX_REQUESTED, task: #12, from: muse-1, at: ... -->` | Muse 1 | 修复任务已建：新 Issue 编号、失败报告链接、修复轮次（第 1/2/3 次） |
-| 10 | FIX_COMPLETED | `<!-- agent-msg: FIX_COMPLETED, task: #12, from: muse-2, at: ... -->` | Muse 2/3 | 修复内容、新提交、回归自检结果；重新进入评审与测试 |
+| 6 | QA_STARTED | `<!-- agent-msg: QA_STARTED, task: #12, from: smoke-watcher, at: ... -->` | smoke-watcher（D:\02 本机） | 触发：watcher 检出 quality 全绿的 PR head、开始冒烟前。冒烟已开始：PR 号、HEAD SHA、预计时长；带去重标记 `qa-started: pr-<PR>-sha-<短SHA>`；同时打 `state:qa-ready` 标签（QA 状态单值化，见第三节） |
+| 7 | QA_FAILED | `<!-- agent-msg: QA_FAILED, task: #12, from: smoke-watcher, at: ... -->` | smoke-watcher（D:\02 本机） | 结构化失败报告：PR、HEAD SHA（完整 40 位）、失败项（`  - ` 缩进列表行）、错误信息与报告入口；带去重标记 `qa-result: pr-<PR>-sha-<短SHA>`；同时打 `state:qa-failed` 标签 |
+| 8 | QA_PASSED | `<!-- agent-msg: QA_PASSED, task: #12, from: smoke-watcher, at: ... -->` | smoke-watcher（D:\02 本机） | 冒烟通过：PR、HEAD SHA、通过项；带去重标记 `qa-result: pr-<PR>-sha-<短SHA>`；同时给 PR 打 `smoke-passed`、给 Issue 打 `state:qa-passed` 标签 |
+| 9 | FIX_REQUESTED | `<!-- agent-msg: FIX_REQUESTED, task: #12, from: auto-fix, at: ... -->` | auto-fix 工作流（GitHub Actions） | 触发：Issue 被打 `state:qa-failed` 且有 QA_FAILED 评论（双信号）。修复任务已建：新 Issue 编号、失败报告链接、修复轮次（第 1/2/3 次）、负责人（回派原开发 Agent；取不到则注明待 Muse 1 指派） |
+| 10 | FIX_COMPLETED | `<!-- agent-msg: FIX_COMPLETED, task: #12, from: muse-2, at: ... -->` | Muse 2/3（修复 Agent） | 发在**原 Issue** 上：修复内容、新提交、回归自检结果；修复 PR 重新进入评审与测试。无自动化代发，由修复 Issue 的验收清单要求修复者手工发 |
 | 11 | PR_CREATED | `<!-- agent-msg: PR_CREATED, task: #12, from: muse-2, at: ... -->` | Muse 2/3 | PR 链接、改动摘要、CI 状态；PR 描述须自动汇总改动与测试结果 |
-| 12 | PR_MERGED | `<!-- agent-msg: PR_MERGED, task: #12, from: muse-1, at: ... -->` | Muse 1 | 合并提交、关闭 Issue；同时打 `state:merged` 标签 |
+| 12 | PR_MERGED | `<!-- agent-msg: PR_MERGED, task: #12, from: github-actions, at: ... -->` | github-actions（pr-merged-writeback 工作流） | 合并提交、关闭 Issue；同时打 `state:merged` 标签、摘其余 `state:` 标签 |
+
+### 五类 QA/FIX 消息的落地口径（TASK-06-A #48 / TASK-06-B #49，2026-11-15）
+
+第 6/7/8/9/10 类消息已全部有实现（第 10 类为人工发送），逐类口径如下；完整链路与逐环文件对照见 `docs/workspace/qa-fix-loop.md`。
+
+- **QA_STARTED（第 6 类）**：smoke-watcher 在开始冒烟前发（`ops/deploy/smoke-watcher.ps1:519` 调用，`:380` 实现）。先经 `Set-IssueQaState`（`:342`）把 Issue 的 QA 状态单值化为 `state:qa-ready`——摘 `state:in-review` 与其余三个 qa 状态、只留目标状态，下同。正文第二行带去重标记 `qa-started: pr-<PR>-sha-<短SHA>`；发前查 Issue 评论里有无同标记（`Test-IssueMarker`，`:352`），有则不重发，不依赖本机状态文件。
+- **QA_PASSED / QA_FAILED（第 7/8 类）**：smoke-watcher 冒烟结束后发（`:574` 调用，`:402` 实现）。标签先行单值化（通过 → `state:qa-passed`，失败 → `state:qa-failed`），去重标记 `qa-result: pr-<PR>-sha-<短SHA>` 同上。QA_FAILED 的失败项是正文中以两空格缩进的列表行（`  - …`，从冒烟报告里抽取含「失败/✗/FAIL/未通过/结论」的行，上限 12 条）——这是 auto-fix 解析失败项的固定格式，改格式必须两边同改。QA 回写失败只记 watcher 日志、不挡冒烟主流程（`:520`/`:574` 的 try/catch）。
+- **FIX_REQUESTED（第 9 类）**：auto-fix 工作流发（`.github/workflows/auto-fix.yml:211-227`），`from: auto-fix`，不是 Muse 1 手工发。触发是双信号：Issue 被打 `state:qa-failed`（`issues: labeled` 事件，`:44-61`）且评论里有最新一条 QA_FAILED 机器可读头——缺一不动手（`:86-101` 复核）。工作流从 QA_FAILED 正文解析 PR 编号（`qa-result: pr-<N>` 标记）、HEAD SHA（第一个 40 位十六进制串）与失败项（`  - ` 行），见 `:95-109`。
+- **FIX_COMPLETED（第 10 类）**：无自动化代发。修复 Issue 的验收清单要求修复者在**原 Issue** 发此评论（清单由 auto-fix 写进修复 Issue 正文，`.github/workflows/auto-fix.yml:187`）；发没发、内容全不全目前靠 Muse 1 评审时核对，**无机器校验（待实现）**。
 
 补充规则：
 
 - **认领评论**（TASK_ACCEPTED 的一种固定写法）：`<!-- agent-claim: muse-2, 2026-11-13T19:30:00Z -->`，认领后 4 小时无进展（无 push、无评论）即租约过期，Muse 1 摘 `state:claimed` 标签重派。
-- **测试结果必须与 Commit 一致**：QA_PASSED / QA_FAILED 里的 HEAD SHA 必须等于 PR 当前 head SHA；过期测试结果（HEAD 已变）不得触发合并，`auto-merge.yml` 只认 head SHA 上的检查结果。
+- **测试结果必须与 Commit 一致（可实现判据，#48 落地口径）**：冒烟结果以**绑定标记**而不是标签本身承载 SHA——watcher 贴到 PR 的冒烟报告评论首行是 `<!-- smoke-result: pr-<N> sha-<40 位 SHA> result=passed|failed -->`（`ops/deploy/smoke-watcher.ps1:560`），`smoke-passed` 标签只是指针。`auto-merge.yml` 合并前独立复核（不依赖 watcher 在场）：取 PR 评论里**最后一条** `result=passed` 标记的 SHA（`:160`），与 PR 当前 head SHA（`:143`）比对——无标记（`:161`）或对不上（`:162`）一律跳过合并；之后再验该 head 上的 quality 运行（`:168`）与全部 check-runs（`:180`）为成功，最后合并请求自身也带 `sha` 锁定（`:189`）。反向地，watcher 发现 PR 上的 `smoke-passed` 绑定的是旧 head 时，先摘标签再对新 head 重跑（`smoke-watcher.ps1:471-491`），不让过期标签长期挂着。
 - **QA 不写代码**（第一阶段，用户决定）：QA 只发 QA_STARTED / QA_FAILED / QA_PASSED，不发 TASK_COMPLETED / FIX_COMPLETED，不提交修复代码。2026-11-14 起 QA 由 D:\02 本机 smoke-watcher 承担，Grok Bot 已退役。
-- **QA 消息回写尚未落地**：第 6/7/8 类消息口径上由 smoke-watcher 发出，但目前没有任何实现会发出这三类消息——smoke-watcher 现只在 PR 贴结果评论并打 `smoke-passed` 标签。消息回写的实现见 TASK-06-A（#48），落地前不要按这三类消息已存在来写代码。
+- **QA/FIX 消息的消费方**：QA_FAILED 是 auto-fix 的输入信号（见上）；QA_STARTED / QA_PASSED 目前**没有自动消费方**，是给人与其他 Agent 看的回写（信息性），不要假设有工作流在等它们。FIX_REQUESTED 由 auto-fix 自己发出，不需要谁再转发。
 
 ## 三、标签状态机
 
+边分两类：**[自动]** = GitHub Actions 工作流或 D:\02 本机 smoke-watcher 机械执行；**[人/Agent]** = Muse 1 或开发/修复 Agent 的动作。图里标 [自动] 的边没人需要盯着推；标 [人/Agent] 的边没有自动化兜底，卡住只能靠轮询规则（第五节）发现。
+
 ```
-state:todo ──(TASK_ACCEPTED)──▶ state:claimed ──(TASK_COMPLETED + PR)──▶ state:in-review
-     ▲                                                                          │
-     │ 4 小时无进展，租约过期重派                                              ▼
-     │                                                              state:qa-ready ──(smoke-watcher 触发)
-     │                                                                          │
-     │                                                          ┌───────────────┴───────────────┐
-     │                                                          ▼                               ▼
-     │                                              state:qa-passed                    state:qa-failed
-     │                                              (smoke-passed, 可合)               (修复任务，见第四节)
-     │                                                          │                               │
-     │                                                          ▼                               │
-     └────────────────── state:merged ◀──(auto-merge)──────────┘                               │
-                                                                                                ▼
-                                                                                   修复后重新走
-                                                                                   in-review → qa-ready
+state:todo ──(TASK_ACCEPTED [人/Agent])──▶ state:claimed ──(TASK_COMPLETED + PR [人/Agent])──▶ state:in-review
+     ▲                                                                                                │
+     │ 4 小时无进展，租约过期重派 [人/Agent: Muse 1]                                                  ▼
+     │                                                                                     state:qa-ready
+     │                                                                               [自动: watcher 冒烟开始时打,
+     │                                                                                先摘 in-review 与其余 qa 状态]
+     │                                                                                                │
+     │                                                                ┌───────────────┴───────────────┐
+     │                                                                ▼                               ▼
+     │                                                state:qa-passed                    state:qa-failed
+     │                                                [自动: watcher 发 QA_PASSED]        [自动: watcher 发 QA_FAILED]
+     │                                                (PR 同时打 smoke-passed, 可合)                  │
+     │                                                                │                               ▼
+     │                                                                │                  [自动: auto-fix 建修复 Issue
+     │                                                                │                    (state:todo, 回派原开发 Agent)
+     │                                                                │                    + 在原 Issue 发 FIX_REQUESTED]
+     │                                                                │                               │
+     │                                                                │                               ▼
+     │                                                                │                  修复 Issue 独立走同一状态机:
+     │                                                                │                  todo → claimed → in-review
+     │                                                                │                  → qa-ready → qa-passed / qa-failed
+     │                                                                │                  (链式返工按根任务计轮次, 见第四节)
+     │                                                                ▼                               │
+     └────────────────── state:merged ◀──(auto-merge [自动])──────────┘                               │
+                                                                                                      ▼
+                                                              根任务第 4 次 QA 失败 [自动: auto-fix 打 needs-replan
+                                                              + 说明评论, 不再建修复 Issue] ──▶ Muse 1 重新规划 [人/Agent]
 ```
 
+- **QA 四个标签的进入/退出**：`state:qa-ready` 由 watcher 在冒烟开始时进入；`state:qa-passed` / `state:qa-failed` 由 watcher 在冒烟结束时进入。退出方式统一：watcher 的 `Set-IssueQaState`（`ops/deploy/smoke-watcher.ps1:342`）每次写 QA 状态都先摘掉 `state:in-review` 与其余三个 qa 状态，保证 Issue 任一时刻至多一个 QA 状态标签；合并后 `state:merged` 由 pr-merged-writeback 打上并摘掉其余全部 `state:` 标签。QA 状态的进入全部是 [自动] 边，没有人工打 qa 标签的口径。
 - `state:blocked` 可从任何状态进入（依赖未满足、等用户决定），解除阻塞后回到原状态。
-- `needs-replan` 不是状态，是终止标记：自动修复达 3 次上限时打上，Muse 1 重新规划。
+- `needs-replan` 不是状态，是终止标记：进入条件是**同一根任务第 4 次 QA 失败**（已有 3 轮修复 Issue 后再失败），由 auto-fix 打上并停手（`.github/workflows/auto-fix.yml:126-146`）；已带 `needs-replan` 的 Issue，auto-fix 整体跳过（`:90-93`）。退出只能靠 Muse 1 重新规划后人工处理 [人/Agent]。
 - `risk:high` 与状态标签并存：涉及生产环境、数据库结构、VMAX、nginx、生产服务重启的任务必须打，合并前须用户明确批准。
-- `do-not-merge` 一票否决：有它在，`auto-merge.yml` 绝不合并。
+- `do-not-merge` 一票否决：有它在，`auto-merge.yml` 绝不合并（`.github/workflows/auto-merge.yml:153`）。
 
 ## 四、失败与返工流程
 
-1. QA 失败：D:\02 本机 smoke-watcher 发 QA_FAILED 结构化报告（PR、HEAD SHA、错误信息、日志链接），打 `state:qa-failed` 标签（消息回写实现见 TASK-06-A #48；落地前失败以 PR 评论 + 标签呈现）。
-2. Muse 1 建修复 Issue（用 `agent-task.md` 模板），附失败报告链接，写明修复轮次（第 1/2/3 次），发 FIX_REQUESTED，指派回原开发 Agent。
-3. 原开发 Agent 修复后发 FIX_COMPLETED，重新走评审与测试。
-4. 同一任务修复达 3 次仍失败：打 `needs-replan` 标签，Muse 1 重新规划（拆分任务、换方案或升级给用户），不再自动重派。
-5. 无效冒烟不算数：D:\02 被其他任务占用、MSNOC1 掉线等原因导致冒烟中断的，该次结果作废，重新 dispatch，不记为通过也不记为失败。
+1. **QA 失败（信号成立）**：D:\02 本机 smoke-watcher 发 QA_FAILED 结构化报告（PR、HEAD SHA、失败项、错误信息、报告入口），打 `state:qa-failed` 标签（TASK-06-A #48，`ops/deploy/smoke-watcher.ps1:402`）。下游只认**双信号**：标签 + 最新一条 QA_FAILED 机器可读头评论同时成立，缺一不动手。
+2. **自动建修复 Issue（auto-fix 工作流，TASK-06-B #49）**：`.github/workflows/auto-fix.yml` 在 `state:qa-failed` 被打上时触发（或人工 `workflow_dispatch` 重放，`:44-61`）。它解析 QA_FAILED 拿到 PR/SHA/失败项，按 `agent-task.md` 模板八节建修复 Issue：正文写 `依赖：depends on #<原 Issue>`、失败项逐条转成验收项、标题 `[修复] #<原> QA 失败（第 R 轮）：<原标题>`；回派只认原 Issue 上的 `agent:muse-2` / `agent:muse-3` 标签（Muse 1 是协调者不回派），取不到就**不派给任何人**、在正文与 FIX_REQUESTED 里注明请 Muse 1 介入指派，绝不猜人（`:149-154`、`:210-227`）。建完在原 Issue 发 FIX_REQUESTED（第 9 类，`from: auto-fix`），带新 Issue 编号、失败报告链接与轮次。**幂等**：同一根任务 + 同一失败 HEAD SHA 只建一个修复 Issue，重复触发直接跳过（`:111-124`）。
+3. **修复与回写**：原开发 Agent 认领修复 Issue、修复、开修复 PR；修完在**原 Issue** 发 FIX_COMPLETED（第 10 类，新提交 + 回归自检结果）。修复 PR 重新走 quality + 冒烟全流程（同一状态机递归，见第三节）。
+4. **链式返工按根任务计数**：修复 Issue 的 PR 再失败时，QA_FAILED 落在修复 Issue 上，auto-fix 照样触发；轮次不按单个 Issue 数，而按**根任务**数——修复 Issue 正文首行带机器可读标记 `<!-- auto-fix: for-issue-<直属任务> root-issue-<根任务> round-<R> sha-<失败HEAD> -->`，计数 = 全仓 Issue 里 `root-issue` 等于本链根任务的标记数（`:15-24`、`:156`），整条链共用一个 3 次上限，不会无限套娃。修复 Issue 与原 Issue 的依赖关系有两条：正文 `depends on #<直属任务>`，以及标记里的 `root-issue` 指回链首任务。
+5. **达上限停手**：已有 3 轮修复 Issue 后再出现 QA 失败（即第 4 次失败），auto-fix **不再建 Issue**，只给当前 Issue 打 `needs-replan` + 发说明评论（根任务、失败报告、PR 与 SHA），然后退出（`:126-146`）。之后由 Muse 1 重新规划（拆分任务、换方案或升级给用户）[人/Agent]，系统不再自动重派。
+
+无效冒烟不算数（不进返工计数）：D:\02 被其他任务占用、MSNOC1 掉线等原因导致冒烟中断的，该次结果作废——watcher 不发 QA_PASSED/QA_FAILED、不打 qa 状态标签，重新冒烟即可；它既不是通过也不是失败，不触发 auto-fix。
 
 ## 五、轮询规则（三个必查时点，不依赖人工转发）
 
