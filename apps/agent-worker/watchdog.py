@@ -257,7 +257,9 @@ class Watchdog:
            它的子进程不是孤儿）；
         3. 防 pid 复用误杀：子进程的实际进程组须与记录一致（POSIX），
            且其工作目录位于 worktree 根目录之下（任务子进程的 cwd 恒为
-           其 worktree）；两项都取不到证据时保守跳过。
+           其 worktree）；两项都取不到证据时保守跳过。此项为 POSIX
+           口径——Windows 无进程组/cwd 证据，只靠「上一代已死 + 记录
+           pid」判定，与既有 _signal 的 taskkill 路径同一风险口径。
         回收动作与 _stop 同口径：整组 SIGTERM → 宽限 → SIGKILL。
         """
         payload = _heartbeat.read_heartbeat_payload(self.heartbeat_file)

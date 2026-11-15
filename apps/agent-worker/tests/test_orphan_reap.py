@@ -156,6 +156,7 @@ def test_no_reap_when_task_already_dead(tmp_path, monkeypatch, kills):
     assert kills == []
 
 
+@pytest.mark.skipif(os.name != "posix", reason="进程组校验为 POSIX 口径，Windows 不走该分支")
 def test_no_reap_on_pgid_mismatch(tmp_path, monkeypatch, kills):
     dog, heartbeat = _watchdog(tmp_path)
     _write_payload(heartbeat)
@@ -170,6 +171,7 @@ def test_no_reap_on_pgid_mismatch(tmp_path, monkeypatch, kills):
     assert kills == []
 
 
+@pytest.mark.skipif(os.name != "posix", reason="工作目录校验为 POSIX 口径，Windows 不走该分支")
 def test_no_reap_when_cwd_outside_worktrees(tmp_path, monkeypatch, kills):
     dog, heartbeat = _watchdog(tmp_path)
     _write_payload(heartbeat)
