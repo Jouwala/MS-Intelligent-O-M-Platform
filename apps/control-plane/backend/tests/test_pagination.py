@@ -10,8 +10,6 @@ from __future__ import annotations
 import pytest
 
 import sched_testkit as tk
-from scheduler import GitHubMirror
-from scheduler.completion import completion_marker
 
 BASE = "/repos/o/r"
 ISSUES = f"{BASE}/issues"
@@ -69,7 +67,8 @@ def test_p04_comments_full_pagination_150(adapter_module):
 
 
 def test_p05_completion_record_on_page_two_is_found(adapter_module):
-    marker = completion_marker("key-page2")
+    # GitHub 原生权威层的完成标记（ref_completion 使用；这里只验证分页能读到它）
+    marker = "<!-- ref-completion-id: key-page2 -->"
     comments = [tk.comment_json(index, f"进展 {index}") for index in range(1, 151)]
     comments[120]["body"] = f"TASK_COMPLETED\n{marker}"
     transport, fake, _ = make_transport(adapter_module, {comments_path(42): tk.chunks(comments)})
@@ -253,36 +252,6 @@ def test_p20_default_opener_resolves_at_call_time(adapter_module, monkeypatch):
     transport = adapter_module.RestGitHubTransport("o", "r", token="t", sleep=lambda s: None)
     assert len(transport.list_issues()) == 3
     assert fake.calls
-
-
-def test_p19_mirror_scans_all_comment_pages_before_posting(svc, adapter_module):
-    """完成评论标记在第 2 页时 mirror 不重复发评论（分页 + 幂等联动）。"""
-    task_id, number, key = "issue-42", 42, "key-page2"
-    svc.upsert_task(task_id, number, repo="o/r")
-    lease = tk.claim(svc, task_id)
-    svc.transition(task_id, attempt_id="a-1", fencing_token=lease.fencing_token, state="running")
-    svc.complete(
-        task_id,
-        attempt_id="a-1",
-        fencing_token=lease.fencing_token,
-        idempotency_key=key,
-        summary="完成",
-    )
-    marker = completion_marker(key)
-    comments = [tk.comment_json(index, f"历史评论 {index}") for index in range(1, 151)]
-    comments[130]["body"] = f"TASK_COMPLETED\n{marker}"
-    pages = {
-        comments_path(number): tk.chunks(comments),
-        issue_path(number): [tk.issue_json(number, labels=("agent:muse-2", "state:claimed"))],
-    }
-    transport, fake, _ = make_transport(adapter_module, pages)
-    mirror = GitHubMirror(transport)
-    assert mirror.drain(svc) == 3
-    assert mirror.last_errors == []
-    comment_calls = [call for call in fake.calls if call["path"] == comments_path(number)]
-    assert len(comment_calls) == 2  # 两页都读了
-    assert all(call["method"] == "GET" for call in comment_calls)  # 没有重复 POST
-    assert svc.pending_outbox() == []
 
 
 @pytest.mark.parametrize("failure", [500, TimeoutError("模拟超时")])

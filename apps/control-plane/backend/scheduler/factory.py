@@ -1,8 +1,8 @@
 """调度器工厂（ADR-7 §五 / §八 PR-5：Worker 一次性切到 GitHub 权威层）。
 
 **权威唯一性**（ADR-7 §零）：GitHub refs 是唯一权威。本工厂只组装
-`ref_service.GitHubRefScheduler`，不提供 SQLite 回退——本地 SQLite 调度器在 PR-6
-整体退场，任何「两个权威并存」的选择都会导致状态分叉，禁止保留。
+`ref_service.GitHubRefScheduler`，不提供 SQLite 回退——本地 SQLite 调度器已在 PR-6
+删除（代码/测试/文档一并退场），任何「两个权威并存」都会导致状态分叉，禁止保留。
 
 构造：`make_scheduler(transport=..., repo=...)`
 - `transport`：`adapters/github_issue.RestGitHubTransport`（评论/标签通道，duck-typed）；

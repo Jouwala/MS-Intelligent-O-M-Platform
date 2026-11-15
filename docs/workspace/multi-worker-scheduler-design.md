@@ -3,6 +3,10 @@
 > 状态：**已实施**（分支 `fix/multi-worker-scheduler`）　|　基线：`7bbe5ec`（main，2026-11-14）
 > 关联：`agent-protocol.md`（任务协议）、`multi-worker-regression.md`（T01–T30 回归矩阵）
 > 本文是本次修复的**唯一架构决策记录**，后续维护者改调度语义前先读这里。
+>
+> **PR-6（2026-11-14）**：SQLite 权威实现（ADR-2 及下文组件图/文件清单中的
+> `store.py` / `service.py` / `mirror.py` 等）已**删除**，权威唯一为 GitHub refs；
+> 现行架构见 `multi-worker-github-native-authority.md`（ADR-7），本文相关段落仅作历史记录。
 
 ## 一、问题与范围
 
@@ -31,6 +35,9 @@ fencing token、任务状态、完成幂等、分派登记由中央调度器（`
 唯一约束 + `BEGIN IMMEDIATE` 写事务把认领变成一次线性化的插入。
 
 ### ADR-2：存储用 SQLite（WAL + BEGIN IMMEDIATE），并为多机预留迁移点
+
+> **已被 ADR-7 取代（PR-5/PR-6）**：GitHub 原生 ref-CAS 成为唯一权威，SQLite 实现已在
+> PR-6 删除；本 ADR 仅记录当时的单机方案与迁移点，不再是现状。
 
 **决定**：本轮用标准库 `sqlite3`，库文件默认 `<repo>/TMP/scheduler/scheduler.db`
 （`TMP/` 已被 `.gitignore` 忽略；可用 `AGENT_SCHEDULER_DB` 或构造参数覆盖）。

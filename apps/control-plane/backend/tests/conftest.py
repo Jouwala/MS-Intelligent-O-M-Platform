@@ -1,15 +1,16 @@
 """控制面测试的公共夹具（apps/control-plane/backend/tests）。
 
 - 把 `apps/control-plane/backend` 放进 sys.path，按标准包导入 `scheduler`；
-- 通过 `sched_testkit` 提供假时钟 / 假 GitHub 传输 / 多进程竞争 helper；
-- 本目录测试只碰临时 SQLite（tmp_path）与本地 fake GitHub HTTP server，
-  **不访问真实 GitHub / 真实网络**。
+- 通过 `sched_testkit` 提供假时钟 / 假 GitHub 传输（分页测试用）；
+- 本目录测试只碰本地 fake GitHub HTTP server 与临时文件，**不访问真实 GitHub**。
 
 ADR-7（GitHub 原生权威层）相关夹具：
 - `fake_github`：本地 fake GitHub HTTP server（真实 TCP + 服务端裁决 ref 唯一性）；
 - `ref_store` / `ref_transport`：指向同一 fake server 的 `RestRefStore` 与
   `RestGitHubTransport`（走真实 HTTP 代码路径，不 mock 逻辑）；
 - `ref_clock` / `ref_scheduler`：Ref 后端的假时钟与 `GitHubRefScheduler`。
+
+PR-6 起 SQLite 权威实现已删除，本文件不再提供 `db_path` / `svc` 夹具。
 """
 
 from __future__ import annotations
@@ -26,7 +27,6 @@ for _path in (str(TESTS_DIR), str(BACKEND)):
     if _path not in sys.path:
         sys.path.insert(0, _path)
 
-from scheduler import SchedulerService  # noqa: E402
 import sched_testkit as tk  # noqa: E402
 
 
@@ -56,20 +56,6 @@ def adapter_module():
 @pytest.fixture()
 def clock() -> tk.FakeClock:
     return tk.FakeClock()
-
-
-@pytest.fixture()
-def db_path(tmp_path: Path) -> Path:
-    return tmp_path / "scheduler.db"
-
-
-@pytest.fixture()
-def svc(db_path: Path, clock: tk.FakeClock):
-    service = SchedulerService(db_path, clock=clock)
-    try:
-        yield service
-    finally:
-        service.close()
 
 
 # ---------------------------------------------------------------------------
@@ -126,4 +112,3 @@ def ref_scheduler(ref_store: "object", ref_transport: "object", ref_clock: tk.Fa
         repo="o/r",
         clock=ref_clock,
     )
-

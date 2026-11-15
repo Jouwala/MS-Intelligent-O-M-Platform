@@ -1,7 +1,8 @@
 """GitHub 原生权威层契约（ADR-7，冻结层）。
 
 本文件是 ref-CAS 调度实现的**唯一接口真相源**：ref 命名、解析、存活判定、评论标记、
-`RefStore` 协议与后端选择常量。实现（`github_refs.py` / `ref_lease.py` / `ref_service.py` /
+`RefStore` 协议。**权威唯一**：PR-6 已删除 SQLite 权威实现，不存在运行时后端选择
+（`AGENT_SCHEDULER_BACKEND` / sqlite 选项随 PR-6 一并移除）。实现（`github_refs.py` / `ref_lease.py` / `ref_service.py` /
 `ref_scope.py` / `factory.py`）与测试只依赖这里声明的名字，不互相 import 私有细节。
 
 设计依据：`docs/workspace/multi-worker-github-native-authority.md`（ADR-7）。
@@ -26,16 +27,6 @@ from .api import (  # 错误类型直接复用 api 契约
     LeaseHeld,
     StaleFencing,
 )
-
-# ---------------------------------------------------------------------------
-# 后端选择
-# ---------------------------------------------------------------------------
-
-#: 环境变量：调度器权威后端。生产多 VM 用 github；单机/dev 可用 sqlite。
-ENV_BACKEND = "AGENT_SCHEDULER_BACKEND"
-BACKEND_GITHUB = "github"
-BACKEND_SQLITE = "sqlite"
-DEFAULT_BACKEND = BACKEND_GITHUB
 
 #: 认领/续租遇到 ref 冲突时的最大重试次数（并发失败者重读后重试）。
 DEFAULT_CLAIM_RETRIES = 3

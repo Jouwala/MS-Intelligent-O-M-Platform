@@ -158,13 +158,15 @@ claimed/running --租约过期回收--> retryable/expired --新实例认领--> c
 
 ### 8.3 与 GitHub 的对照
 
-- 认领成功：调度器返回带 fencing 的租约 → 镜像发 `TASK_ACCEPTED` + `state:claimed`；
-- 完成：调度器一个事务写终态/完成事件/outbox → 镜像发 `TASK_COMPLETED` + `state:in-review`；
-  镜像失败自动重试，**不再出现「完成评论已写、标签失败后永久卡死」**；
-- 失败 / 取消：调度器写终态后镜像发 `TASK_FAILED` / `TASK_CANCELLED`（本轮扩展的第 13/14 类
-  消息，机器可读头格式与第二节一致），标签分别收敛到 `state:blocked` / `state:todo`
-  （`state:qa-failed` 仍专指 QA 冒烟失败，不用于执行失败）；
-- 范围锁：`scope-lock` / `scope-unlock` 评论仅作审计，重叠判定以调度器锁表为准；
+- 认领成功：调度器用 GitHub ref CAS（`agent-hwm/<issue>/<token>`）认领 → 写 `TASK_ACCEPTED`
+  与 `state:claimed` 评论/标签（评论与标签是派生/审计，权威在 refs）；
+- 完成：完成评论（含 `<!-- ref-completion-id: KEY -->`）是**权威幂等标记**，标签收敛到
+  `state:in-review`；写失败整体失败并重试，重放先分页扫标记 → 不会产生第二条完成评论，
+  **不再出现「完成评论已写、标签失败后永久卡死」**；
+- 失败 / 取消：写 `ref-state` 标记并按代次收敛标签（`state:blocked` / `state:todo`），
+  对应 `TASK_FAILED` / `TASK_CANCELLED`（本轮扩展的第 13/14 类消息，机器可读头格式与第二节一致；
+  `state:qa-failed` 仍专指 QA 冒烟失败，不用于执行失败）；
+- 范围锁：`agent-scope/*` refs 是权威；`scope-lock` / `scope-unlock` 评论仅作审计；
 - 分派：`TASK_ASSIGNED` 之前必须先做原子登记（git ref CAS + dispatch_id），
   同一逻辑任务只形成一次有效分派。
 
@@ -172,9 +174,8 @@ claimed/running --租约过期回收--> retryable/expired --新实例认领--> c
 
 - Linux 训练机：Worker 以独立进程组运行，心跳线程默认 30s 原子写；看门狗阈值
   默认 180s（显著大于心跳间隔）；重启前必须确认旧进程退出（SIGTERM→SIGKILL→wait）。
-- 调度器数据库默认 `<repo>/TMP/scheduler/scheduler.db`（`AGENT_SCHEDULER_DB` 可覆盖）；
-  单主机多 Worker 用 SQLite 事务保证原子性。
-- **多 VM 部署门槛（2026-11-14）**：生产拓扑是多台 VM 各自跑 Worker，而当前权威层是
-  单机 SQLite —— 跨 VM 认领/fencing/范围锁不互斥。**在 GitHub 原生 ref-CAS 权威层合入前，
-  禁止把 Worker 部署到多台 VM**（只能同机多实例）。详见
-  `multi-worker-scheduler-design.md` 第十三节。
+- **权威唯一（PR-6，2026-11-14）**：调度器权威是 GitHub refs（ref-CAS，`agent-hwm` /
+  `agent-lease` / `agent-scope` 等），不再有本地 SQLite 调度器数据库；`AGENT_SCHEDULER_DB`
+  与 SQLite 权威实现在 PR-6 已删除，**不保留缓存或回退**（任何双权威都会导致状态分叉）。
+- **多 VM**：ref-CAS 权威层跨 VM 由 GitHub 服务端原子裁决认领/fencing/范围锁；生产部署前
+  仍须按部署清单做一次双机联调验证（见 `multi-worker-github-native-authority.md`）。

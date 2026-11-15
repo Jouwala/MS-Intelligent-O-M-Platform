@@ -12,7 +12,7 @@
 
 **权威唯一**（ADR-7 §零）：本实现不依赖任何本地 DB/文件保存权威状态——refs 是
 唯一权威，评论是派生/审计输入，进程内 `_known`/`_workers`/`_dispatches` 只是展示
-缓存。SQLite 后端不参与裁决（后续 PR-6 删除）。
+缓存。SQLite 权威实现已在 PR-6 删除，没有缓存或回退分支。
 """
 
 from __future__ import annotations

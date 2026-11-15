@@ -1,6 +1,6 @@
 # GitHub 原生权威层设计（ADR-7）—— 多 VM Worker 的认领/租约/fencing/范围锁
 
-> 状态：**设计冻结，待实现**（owner 2026-11-14 选择「GitHub 原生 ref-CAS，不搞中央服务」）
+> 状态：**已实施**（PR-1～PR-6，分支 `feat/ref-authority-switch`；PR-6 已删除 SQLite 权威实现）
 > 前置：ADR-2026-11-14（`multi-worker-scheduler-design.md`）—— 其中 SQLite 调度器是**单机**实现；
 > 生产拓扑为**多台 VM 各自跑 Worker**，跨机认领/verifying 不互斥，部署门槛见该文第十三节。
 > 本文件只描述「权威层换成 GitHub 原子原语」后的设计，Worker 其余修复（心跳/清理/取消/进程树/
@@ -151,8 +151,9 @@ refs/heads/agent-scope/<encoded-path>/<task_id>-<token:08d>
 ## 五、Worker / 后端切换
 
 - `scheduler/api.py` 协议不变；新增实现 `GitHubRefScheduler`（`scheduler/ref_service.py`）；
-- Worker 通过 `AGENT_SCHEDULER_BACKEND` 选择：`github`（多 VM 生产，默认）/ `sqlite`（单机/dev）；
-- 构造：`make_scheduler(backend, transport=..., repo=..., clock=..., ttl=...)`；
+- Worker 用 `scheduler.factory.make_scheduler(transport=..., repo=..., clock=..., lease_ttl=...)`
+  构造；**PR-6 起没有 `backend` / `AGENT_SCHEDULER_BACKEND` 选择**，GitHub refs 是唯一权威
+  （sqlite 选项与实现一并删除，不保留缓存/回退）；
 - `register_worker` / `heartbeat_worker` / `list_workers`：GitHub 后端用注册表 Issue 评论实现
   （与现有协议一致；无 registry issue 时本地 no-op）；
 - `upsert_task` / `get_task`：状态从 refs+评论派生（终态标记 → terminal；存活租约 → claimed/running；
@@ -167,7 +168,7 @@ refs/heads/agent-scope/<encoded-path>/<task_id>-<token:08d>
   续租推进 token 后旧 token 失效、过期租约被 reaper 回收并可重新认领、scope 并发只一个成功、
   不重叠 scope 并发、complete 幂等、reaper 幂等、分页/422/失败注入；
 - 真实 GitHub API 多 VM 并发：本机无凭据 → **NOT TESTED/BLOCKED**，在验收矩阵如实标注；
-- 迁移/回滚：`AGENT_SCHEDULER_BACKEND=sqlite` 可退回单机实现；refs 权威层可整体 revert。
+- 迁移/回滚：回滚靠整体 revert PR（PR-6 已删除 SQLite 实现，不保留运行时后端切换开关）。
 
 ## 七、已知限制（需在验收文档写明）
 
