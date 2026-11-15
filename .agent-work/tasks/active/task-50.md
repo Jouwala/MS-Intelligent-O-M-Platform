@@ -28,8 +28,8 @@ Grok Bot 于 2026-11-14 退役（PR #46，`chore(ci): Grok Bot 退役，冒烟�
 
 ## 未完成
 
-- [ ] 按 Issue 验收标准实现
-- [ ] agent-done-check 自检并把命令与结果贴到 Issue 评论
+- [x] 按 Issue 验收标准实现
+- [x] agent-done-check 自检并把命令与结果贴到 Issue 评论
 
 ## 下一步
 
