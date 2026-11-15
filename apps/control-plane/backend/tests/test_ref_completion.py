@@ -10,6 +10,7 @@ from datetime import timedelta
 
 import pytest
 
+from scheduler import ref_api
 from scheduler.api import (
     CLAIMED,
     COMPLETED,
@@ -225,3 +226,33 @@ def test_completion_labels_mapping_matches_sqlite_semantics():
     assert COMPLETION_LABELS[COMPLETED] == "state:in-review"
     assert COMPLETION_LABELS[FAILED] == "state:blocked"
     assert COMPLETION_LABELS["cancelled"] == "state:todo"
+
+
+def test_old_token_complete_rejected_when_hwm_advanced_but_old_lease_ref_present(
+    fake_github, ref_store, ref_transport, ref_clock
+):
+    """B1/R2 回归（完成路径）：HWM 已推进、旧 lease ref 仍在时，旧 token 完成必须被拒。
+
+    complete 没有后续 CAS，只能依赖 `_require_current` 的代次校验；去掉比较后本用例变红。
+    """
+    fake_github.add_issue(1)
+    authority = completer(ref_store, ref_transport, ref_clock)
+    lease = claim(authority)
+    authority.transition(
+        "issue-1", attempt_id=ATTEMPT, fencing_token=lease.fencing_token, state=RUNNING
+    )
+    anchor = ref_store.branch_sha("main")
+    assert ref_store.create(ref_api.hwm_ref(1, 2), anchor) is True
+    assert len(lease_refs(fake_github)) == 1
+
+    with pytest.raises(StaleFencing):
+        authority.complete(
+            "issue-1",
+            attempt_id=ATTEMPT,
+            fencing_token=lease.fencing_token,
+            idempotency_key="b1-old-token",
+            summary="旧执行者不应写出完成",
+        )
+    # 旧 token 没有写出任何完成评论
+    bodies = fake_github.comment_bodies(1)
+    assert not any("ref-completion-id" in b for b in bodies), bodies

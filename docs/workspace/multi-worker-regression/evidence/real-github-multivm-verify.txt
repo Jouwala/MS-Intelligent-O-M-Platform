@@ -1,0 +1,90 @@
+# 真实 GitHub 多 checkout 验证日志（敏感信息已排除：无 token / 无鉴权头）
+# repo=Jouwala/noc-soc-ref-verify at=2026-11-15T00:44:22Z
+# checkoutA=D:\tmp\verify-a checkoutB=D:\tmp\verify-b
+
+[00:41:16] DRIVER start repo=Jouwala/noc-soc-ref-verify-muse2 run_id=595dbddb
+[00:41:20] ISSUE concurrent-claim #1
+[00:41:20] SPAWN(concurrent) verify-a: --op claim --role a --issue 1 --ttl 600 --start-at 1794703282.2459898
+[00:41:20] SPAWN(concurrent) verify-b: --op claim --role b --issue 1 --ttl 600 --start-at 1794703282.2459898
+[00:41:32]   RESULT: {"op": "claim", "role": "a", "ok": true, "error": "", "token": 1, "attempt": "8f611133b66a", "instance": "a626ba02", "agent": "verify-a"}
+[00:41:32]   RESULT: {"op": "claim", "role": "b", "ok": false, "error": "LeaseHeld"}
+[00:41:32] CHECK a1 并发认领恰好一个成功: PASS winners=['a'] errors={a:,b:LeaseHeld}
+[00:41:32] CHECK a2 失败者是 LeaseHeld: PASS error=LeaseHeld
+[00:41:32] CHECK a3 真实 refs 只 1 条存活租约: PASS lease_refs=[{'ref': 'refs/heads/agent-lease/issue-1/00000001/1794703284025/verify-a/a626ba02/8f611133b66a', 'token': 1, 'epoch': 1794703284025}]
+[00:41:33] CHECK a4 HWM 恰好 token=1: PASS hwm=[1]
+[00:41:33] SPAWN verify-a: --op renew --role a --issue 1 --attempt 8f611133b66a --token 1
+[00:41:41]   RESULT: {"op": "renew", "role": "a", "ok": true, "error": "", "token": 2}
+[00:41:41] CHECK b1 赢家续租推进 token: PASS renew={'op': 'renew', 'role': 'a', 'ok': True, 'error': '', 'token': 2}
+[00:41:41] SPAWN verify-a: --op renew --role a --issue 1 --attempt 8f611133b66a --token 1
+[00:41:44]   RESULT: {"op": "renew", "role": "a", "ok": false, "error": "StaleFencing"}
+[00:41:44] CHECK b2 旧 token renew 被 StaleFencing 拒绝: PASS {'op': 'renew', 'role': 'a', 'ok': False, 'error': 'StaleFencing'}
+[00:41:44] SPAWN verify-a: --op complete --role a --issue 1 --attempt 8f611133b66a --token 1 --key stale-595dbddb
+[00:41:47]   RESULT: {"op": "complete", "role": "a", "ok": false, "error": "StaleFencing"}
+[00:41:47] CHECK b3 旧 token complete 被 StaleFencing 拒绝: PASS {'op': 'complete', 'role': 'a', 'ok': False, 'error': 'StaleFencing'}
+[00:41:48] CHECK b4 推进后仍只 1 条租约且 token=2: PASS [{'ref': 'refs/heads/agent-lease/issue-1/00000002/1794703298229/verify-a/a626ba02/8f611133b66a', 'token': 2, 'epoch': 1794703298229}]
+[00:41:48] SPAWN verify-a: --op release --role a --issue 1 --attempt 8f611133b66a --token 2
+[00:41:58]   RESULT: {"op": "release", "role": "a", "ok": true, "error": "", "state": "retryable"}
+[00:41:58] CHECK b5 主动释放租约成功: PASS {'op': 'release', 'role': 'a', 'ok': True, 'error': '', 'state': 'retryable'}
+[00:41:59] CHECK b6 释放后 issue-2 无 lease ref: PASS []
+[00:42:00] ISSUE expiry-reap #2
+[00:42:00] SPAWN verify-a: --op claim --role a --issue 2 --ttl 2
+[00:42:10]   RESULT: {"op": "claim", "role": "a", "ok": true, "error": "", "token": 1, "attempt": "07e35a15a360", "instance": "adf9e98b", "agent": "verify-a"}
+[00:42:10] CHECK c1 短 TTL 认领成功: PASS {'op': 'claim', 'role': 'a', 'ok': True, 'error': '', 'token': 1, 'attempt': '07e35a15a360', 'instance': 'adf9e98b', 'agent': 'verify-a'}
+[00:42:16] CHECK c2 Reaper CAS 回收过期租约（仅 issue-3 一条）: PASS records=[{'issue_number': 2, 'token': 1, 'epoch_ms': 1794703321881, 'instance_id': 'adf9e98b', 'agent_id': 'verify-a', 'ref': 'refs/heads/agent-lease/issue-2/00000001/1794703321881/verify-a/adf9e98b/07e35a15a360', 'outcome': 'reaped'}]
+[00:42:17] CHECK c3 回收后 lease ref 已删: PASS []
+[00:42:18] CHECK c4 HWM 保留（token 不复用）: PASS hwm=[1]
+[00:42:18] SPAWN verify-b: --op claim --role b --issue 2 --ttl 600
+[00:42:28]   RESULT: {"op": "claim", "role": "b", "ok": true, "error": "", "token": 2, "attempt": "7356763b4cc5", "instance": "701eab3d", "agent": "verify-b"}
+[00:42:28] CHECK c5 另一 checkout 重新认领成功且 token=2: PASS {'op': 'claim', 'role': 'b', 'ok': True, 'error': '', 'token': 2, 'attempt': '7356763b4cc5', 'instance': '701eab3d', 'agent': 'verify-b'}
+[00:42:29] ISSUE scope-overlap-1 #3
+[00:42:30] ISSUE scope-overlap-2 #4
+[00:42:30] SPAWN verify-a: --op claim_scope --role a --issue 3 --scopes src/shared/overlap.py --ttl 600
+[00:42:44]   RESULT: {"op": "claim_scope", "role": "a", "ok": true, "error": "", "token": 1, "attempt": "55cf245ff970", "scope_ok": true}
+[00:42:44] CHECK d1 任务1 认领+获取重叠 scope 成功: PASS {'op': 'claim_scope', 'role': 'a', 'ok': True, 'error': '', 'token': 1, 'attempt': '55cf245ff970', 'scope_ok': True}
+[00:42:44] SPAWN verify-b: --op claim_scope --role b --issue 4 --scopes src/shared/overlap.py --ttl 600
+[00:43:01]   RESULT: {"op": "claim_scope", "role": "b", "ok": false, "error": "ScopeConflict", "token": 1, "attempt": "6054e0d18423"}
+[00:43:01] CHECK d2 任务2 认领成功但 scope 冲突: PASS {'op': 'claim_scope', 'role': 'b', 'ok': False, 'error': 'ScopeConflict', 'token': 1, 'attempt': '6054e0d18423'}
+[00:43:01] SPAWN verify-b: --op acquire_scope --role b --issue 4 --attempt 6054e0d18423 --token 1 --scopes docs/guide.md
+[00:43:07]   RESULT: {"op": "acquire_scope", "role": "b", "ok": true, "error": "", "scope_ok": true}
+[00:43:07] CHECK d3 不重叠 scope 并发成功: PASS {'op': 'acquire_scope', 'role': 'b', 'ok': True, 'error': '', 'scope_ok': True}
+[00:43:07] CHECK d4 真实 scope refs 记录了两把锁: PASS scope_refs=['refs/heads/agent-scope/docs/guide.md/issue-4-00000001', 'refs/heads/agent-scope/src/shared/overlap.py/issue-3-00000001']
+[00:43:07] SPAWN verify-a: --op release_scope --role a --issue 3 --attempt 55cf245ff970 --token 1
+[00:43:11]   RESULT: {"op": "release_scope", "role": "a", "ok": true, "error": "", "released": true}
+[00:43:11] SPAWN verify-b: --op release_scope --role b --issue 4 --attempt 6054e0d18423 --token 1
+[00:43:15]   RESULT: {"op": "release_scope", "role": "b", "ok": true, "error": "", "released": true}
+[00:43:15] CHECK d5 释放 scope 成功: PASS release1={'op': 'release_scope', 'role': 'a', 'ok': True, 'error': '', 'released': True} release2={'op': 'release_scope', 'role': 'b', 'ok': True, 'error': '', 'released': True}
+[00:43:16] CHECK d6 释放后 scope refs 清空: PASS []
+[00:43:17] ISSUE completion-idempotent #5
+[00:43:17] SPAWN verify-a: --op complete_flow --role a --issue 5 --key complete-595dbddb --ttl 600
+[00:43:40]   RESULT: {"op": "complete_flow", "role": "a", "ok": true, "error": "", "token": 1, "attempt": "931734a2097d", "created": [true, false]}
+[00:43:40] CHECK e1 完成流程成功且重复提交被幂等吸收: PASS {'op': 'complete_flow', 'role': 'a', 'ok': True, 'error': '', 'token': 1, 'attempt': '931734a2097d', 'created': [True, False]}
+[00:43:41] CHECK e2 只有 1 条完成标记评论: PASS completion_comments=1
+[00:43:42] CHECK e3 标签收敛为 state:in-review: PASS labels=['state:in-review']
+[00:43:43] CHECK e4 完成后 lease ref 已删: PASS []
+[00:43:43] ISSUE pagination-422 #6
+[00:43:49] CHECK g1 真实 matching-refs 分页返回全部 ref（page_size=2）: PASS listed=['refs/heads/agent-hwm/issue-6/00000001', 'refs/heads/agent-hwm/issue-6/00000002', 'refs/heads/agent-hwm/issue-6/00000003']
+[00:43:49] CHECK g2 真实 422=已存在→False（POST 不重试）: PASS duplicate=False
+[00:43:49] CLEANUP 删除测试 ref
+[00:43:51]   delete refs/heads/agent-hwm/issue-1/00000001 -> True
+[00:43:52]   delete refs/heads/agent-hwm/issue-1/00000002 -> True
+[00:43:53]   delete refs/heads/agent-hwm/issue-2/00000001 -> True
+[00:43:54]   delete refs/heads/agent-hwm/issue-2/00000002 -> True
+[00:43:55]   delete refs/heads/agent-hwm/issue-3/00000001 -> True
+[00:43:56]   delete refs/heads/agent-hwm/issue-4/00000001 -> True
+[00:43:57]   delete refs/heads/agent-hwm/issue-5/00000001 -> True
+[00:43:58]   delete refs/heads/agent-hwm/issue-6/00000001 -> True
+[00:43:59]   delete refs/heads/agent-hwm/issue-6/00000002 -> True
+[00:44:00]   delete refs/heads/agent-hwm/issue-6/00000003 -> True
+[00:44:02]   delete refs/heads/agent-lease/issue-2/00000002/1794703340347/verify-b/701eab3d/7356763b4cc5 -> True
+[00:44:03]   delete refs/heads/agent-lease/issue-3/00000001/1794703351965/verify-a/8a2fbe88/55cf245ff970 -> True
+[00:44:03]   delete refs/heads/agent-lease/issue-4/00000001/1794703366166/verify-b/a6c3a3e1/6054e0d18423 -> True
+[00:44:06]   delete refs/heads/agent-reap/issue-2/00000001 -> True
+[00:44:06] CLEANUP 删除/关闭测试 Issue
+[00:44:08]   issue #1 -> deleted
+[00:44:10]   issue #2 -> deleted
+[00:44:13]   issue #3 -> deleted
+[00:44:15]   issue #4 -> deleted
+[00:44:18]   issue #5 -> deleted
+[00:44:20]   issue #6 -> deleted
+[00:44:22] CHECK f1 测试 refs 已清理: PASS remaining=[]
+[00:44:22] DRIVER done failures=[]

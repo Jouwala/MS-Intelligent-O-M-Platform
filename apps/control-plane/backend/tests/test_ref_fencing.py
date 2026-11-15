@@ -255,3 +255,41 @@ def test_transition_from_blocked_to_queued_removes_lease_ref(
                                 fencing_token=lease.fencing_token, state="queued")
     assert task.state == "queued"
     assert lease_refs(fake_github) == []
+
+
+def test_old_token_writes_rejected_when_hwm_advanced_but_old_lease_ref_present(
+    fake_github, ref_store, ref_transport, ref_clock
+):
+    """B1/R2 回归：HWM 已推进、但旧 lease ref 尚未删除的窗口必须拦住旧执行者。
+
+    该窗口里 renew 的下一跳 CAS 不会触发；transition/release/ack_cancel 只能靠
+    `_require_current` 的 `presented_token == max_token` 校验拦住旧 token。
+    Muse 3 变异测试发现原测试对该窗口无效（去掉校验仍全绿），本用例专门覆盖它。
+    """
+    fake_github.add_issue(1)
+    authority = fencer(ref_store, ref_transport, ref_clock)
+    first = claim(authority)
+    assert first.fencing_token == 1
+
+    # 模拟另一实例/外部把 HWM 推进到 2，但尚未删除旧 lease ref（真实竞态窗口）
+    anchor = ref_store.branch_sha("main")
+    assert ref_store.create(ref_api.hwm_ref(1, 2), anchor) is True
+    assert len(lease_refs(fake_github)) == 1  # 旧 lease ref 仍在
+    assert [ref_api.parse_hwm_token(r) for r in hwm_refs(fake_github)] == [1, 2]
+
+    for call in (
+        lambda: authority.transition(
+            "issue-1", attempt_id=ATTEMPT, fencing_token=1, state=RUNNING
+        ),
+        lambda: authority.release("issue-1", attempt_id=ATTEMPT, fencing_token=1),
+        lambda: authority.release(
+            "issue-1", attempt_id=ATTEMPT, fencing_token=1, terminal_state="failed"
+        ),
+    ):
+        with pytest.raises(StaleFencing):
+            call()
+
+    # cancel 流程：先请求取消（进入 cancel_requested 状态），旧 token 的 ack 也必须被拒
+    authority.request_cancel("issue-1", reason="B1/R2 窗口")
+    with pytest.raises(StaleFencing):
+        authority.ack_cancel("issue-1", attempt_id=ATTEMPT, fencing_token=1)

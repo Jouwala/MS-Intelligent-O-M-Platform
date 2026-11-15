@@ -60,7 +60,7 @@ CI 作业（`.github/workflows/quality.yml`，2026-11-14 起由 5 个增至 7 �
 > `test_worker_integration.py`）；权威唯一，不存在第二套裁决。
 >
 > **2026-11-15 真实 GitHub 验证（PR #64）**：`Jouwala/noc-soc-ref-verify` 两个独立
-> checkout 打真实 API，28 项 CHECK 全 PASS（证据 `evidence/real-github-multivm-verify.log`），
+> checkout 打真实 API，28 项 CHECK 全 PASS（证据 `evidence/real-github-multivm-verify.txt`），
 > 覆盖并发认领/ fencing/过期回收/范围锁/完成幂等与真实 API 分页语义。
 
 | 编号 | 验收项目 | 自动化测试（文件::用例） | 本地 | Linux |
@@ -103,7 +103,7 @@ CI 作业（`.github/workflows/quality.yml`，2026-11-14 起由 5 个增至 7 �
 
 | # | 缺陷 | 主要回归测试 |
 | --- | --- | --- |
-| 1 | API 分页不完整 | `test_pagination.py::test_p01–p20`、`dispatch/tests/test_github_client.py` |
+| 1 | API 分页不完整 | `test_pagination.py`（31 例：adapter 分页/重试/完成标记）、`dispatch/tests/test_github_client.py` |
 | 2 | 同 Agent 不同实例重复认领 | `test_ref_concurrency.py`（线程/双进程）、`test_ref_claim.py` |
 | 3 | 心跳不覆盖长任务 | `test_heartbeat.py`（200s / 30min / 执行期持续） |
 | 4 | Watchdog 不等旧进程退出 | `test_watchdog.py::test_restart_never_starts_new_before_old_confirmed_exit`、`test_ignored_sigterm_escalates_to_sigkill` |
@@ -124,7 +124,7 @@ CI 作业（`.github/workflows/quality.yml`，2026-11-14 起由 5 个增至 7 �
 | --- | --- | --- |
 | 真实 GitHub Actions 上两个 workflow 真并发执行 | NOT TESTED / BLOCKED | 本机无 act/runner、无凭据；已用可注入假 GitHub API 做真实多线程 CAS 与故障注入测试。真实环境验证需在隔离仓库触发两条 workflow |
 | 真实 GitHub API 的 Link/422/限流在线行为 | **PASS（PR #64）** | 真实仓库验证覆盖 matching-refs 真实语义、重复 create 422、分页；并发现并修复「matching-refs 不分页」的真实语义差异（假 server 模拟不到） |
-| 真实 GitHub 多 checkout（模拟多 VM，真实 API） | **PASS（PR #64）** | 隔离私库 `Jouwala/noc-soc-ref-verify` + 两个独立 checkout + 真实 API：并发认领唯一赢家、旧 token fencing、Reaper CAS 回收后重认领、重叠/不重叠 scope、完成幂等与标签收敛，28/28 CHECK PASS；证据 `evidence/real-github-multivm-verify.log` |
+| 真实 GitHub 多 checkout（模拟多 VM，真实 API） | **PASS（PR #64）** | 隔离私库 `Jouwala/noc-soc-ref-verify` + 两个独立 checkout + 真实 API：并发认领唯一赢家、旧 token fencing、Reaper CAS 回收后重认领、重叠/不重叠 scope、完成幂等与标签收敛，28/28 CHECK PASS；证据 `evidence/real-github-multivm-verify.txt` |
 | 真实多主机（跨机器）生产部署 | **BLOCKED（部署门槛）** | 代码权威层已跨机可用并有真实 API 证据；但**生产多 VM 部署仍需 owner 批准解除 #53 门槛**（Muse 2/3 独立验收 + owner 批准后才能解除） |
 | 生产训练机部署 | BLOCKED | 任务书 §3.2/§15：部署需项目所有者另行授权，第三方不得部署 |
 | 真实任务队列/生产 Worker 凭据破坏性测试 | BLOCKED | 同上，全程只用隔离测试环境 |
@@ -144,7 +144,13 @@ Muse 2 / Muse 3 在验收 commit `0a91985` 上**独立复现**同一个阻断缺
   `test_windows_cancel_kills_grandchild_and_tree_exited_true`、
   `test_windows_root_exit_leaving_orphans_is_cleaned`；去掉 `/F /T` 的变异自检会让三条全红。
 - 原矩阵中 T09/T20 的 Windows「PASS」曾在 `0a91985` 上过强声明，已按实际证据更正；
-  Muse 2/3 的独立验收报告见 `muse2-verification.md` / `muse3-verification.md`。
+  Muse 2/3 的独立验收报告见 `muse2-verification.md` / `muse3-verification.md`；
+> **最终验收**（最终 main `4586d8b` + 本 PR 的 B1/R2 回归测试）见
+> `muse2-final-verification.md` / `muse3-final-verification.md`。
+> Muse 3 在最终层发现并复现的 **B1/R2 测试缺口**（HWM 已推进但旧 lease ref 未删的窗口）
+> 已在本追加回归：`test_ref_fencing.py::test_old_token_writes_rejected_when_hwm_advanced_but_old_lease_ref_present`、
+> `test_ref_completion.py::test_old_token_complete_rejected_when_hwm_advanced_but_old_lease_ref_present`；
+> 变异自检（去掉 `require_current_token` 的 token 比较）下这两条必红、原有 23 条仍绿，证明覆盖有效。
 
 ## 七、基线证据
 
@@ -163,15 +169,17 @@ Windows 路径命令被解析为 ['C:toolspython.exe', ...]
 
 ## 八、CI 证据
 
-验收 head：`64d2458`。GitHub Actions run **43648075661**（quality，7/7 作业 success）：
+最终验收 head：PR #65 head `c8dd86e`（最终 main `4586d8b` 与该 head 树完全相同）。
+GitHub Actions quality（7/7 作业 success）：
 
 | 作业 | Runner | 实际命令 | 结果 |
 | --- | --- | --- | --- |
-| agent-tests | windows-latest | `python -m pytest apps/agent-worker/tests apps/control-plane/backend/tests apps/control-plane/backend/dispatch/tests -q -p no:cacheprovider` | **271 passed, 6 skipped** |
-| agent-linux-process-tests | ubuntu-latest | `python -m pytest apps/agent-worker/tests -q -p no:cacheprovider` | **102 passed, 4 skipped**（POSIX 进程组/SIGTERM→SIGKILL 真实执行；Windows 专用用例合法跳过） |
+| agent-tests | windows-latest | `python -m pytest apps/agent-worker/tests apps/control-plane/backend/tests apps/control-plane/backend/dispatch/tests -q -p no:cacheprovider` | **330 passed, 6 skipped**（本 PR 新增 B1 回归后 332） |
+| agent-linux-process-tests | ubuntu-latest | `python -m pytest apps/agent-worker/tests -q -p no:cacheprovider` | **102 passed, 4 skipped**（POSIX 进程组/SIGTERM→SIGKILL 真实执行） |
 
-其余 5 个既有作业（compileall / ruff / portal / my_app 文档守卫 / my_app pytest）同样 success。
-Run 链接：https://github.com/Jouwala/noc-soc-intelligent-platform/actions/runs/43648075661
+Run：push `43658004859` / pull_request `43658008019`，7/7 success。
 
-> 更早一次 run 43646693148（0a91985）同样 7/7 success，但该 commit 上存在 Muse 2/3 发现的
-> Windows 进程树阻断项，已在 64d2458 修复；上表为最终 head 的证据。
+> 最终 merge commit 在 main 上**没有** quality push run：auto-merge 用默认 `GITHUB_TOKEN`
+> 合并，GitHub 不为该 token 触发 push 工作流（仓库已知行为，见 `github-automation.md`）；
+> 同树 PR head 的 CI 是有效证据。若要求 main 自身有 CI 记录，可手动 `workflow_dispatch`
+> quality 或改用 PAT 合并。
