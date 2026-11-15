@@ -51,7 +51,7 @@ python apps\agent-worker\watchdog.py --agent muse-2 --repo-root D:\02_olbr_porta
 全部落在 GitHub（ref + 带幂等标记的评论），不存在本地权威或第二真相源。
 `scheduler/api.py` 的 `Scheduler` 协议不变，Worker 代码只走协议；`main()` 经
 `scheduler/factory.py` 组装 `GitHubRefScheduler`，**不再有 SQLite 后端回退**
-（SQLite 权威实现按 PR-6 退场；要回滚就 revert PR，不做运行时切换权威）。
+（SQLite 权威实现已在 PR-6 删除；要回滚就 revert PR，不做运行时切换权威）。
 
 多 VM 运行要点：
 
@@ -79,8 +79,8 @@ python -m pytest apps\agent-worker\tests -q
 覆盖：持续心跳（长任务 / FakeClock 30 分钟不误杀 / 原子写并发读）、看门狗不拉起双实例
 （旧实例确认退出 + 旧心跳文件不误杀）、执行器超时/取消杀整棵进程树、取消后不提交结果、
 无执行命令 / Hook 失败 / 锁超时 / 执行失败 / 内部异常 / 断网的清理矩阵、POSIX Hook
-可执行位、平台能力标签、Windows/POSIX 命令解析，以及真实 `SQLiteStore +
-SchedulerService + GitHubMirror` 的端到端集成。全部离线（内存传输/GitHub 替身），
+可执行位、平台能力标签、Windows/POSIX 命令解析，以及真实 `GitHubRefScheduler +
+RestRefStore + fake GitHub HTTP server`（ref-CAS 权威层）的端到端集成。全部离线（本地 fake server），
 不访问真实 GitHub。
 
 **POSIX 进程组与可执行位测试**（`test_executor_process_tree.py` /

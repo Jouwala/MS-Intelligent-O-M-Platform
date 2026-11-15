@@ -44,9 +44,9 @@ CI 作业（`.github/workflows/quality.yml`，2026-11-14 起由 5 个增至 7 �
 
 | 层 | 落地 |
 | --- | --- |
-| Unit | `test_scheduler_*`（状态机/租约/fencing/锁/幂等）、`test_command_parse`、`test_hostinfo`、`test_heartbeat` |
-| Integration | `test_worker_integration`（真实 SQLiteStore + SchedulerService + GitHubMirror）、`test_mirror_*`、`test_dispatch_*` |
-| Concurrency | 多线程 + 多进程竞争同一 SQLite 文件（`test_t02/t03`、`test_s09`、`test_two_concurrent_dispatch_runs_register_once`） |
+| Unit | `test_ref_*`（GitHub 原生 ref-CAS：认领/fencing/锁/回收/完成/视图）、`test_command_parse`、`test_hostinfo`、`test_heartbeat` |
+| Integration | `test_worker_integration`（真实 `GitHubRefScheduler + RestRefStore + fake GitHub HTTP server`）、`test_scheduler_backend_factory`、`test_dispatch_*` |
+| Concurrency | 多线程 + 多进程竞争同一 fake GitHub server 的 ref CAS（`test_ref_concurrency`、`_ref_race_helper`、`test_two_concurrent_dispatch_runs_register_once`） |
 | Fault Injection | 分页第 2 页失败、POST 超时后成功、标签失败重试、outbox 故障、断网 5 分钟恢复、取消/完成竞争 |
 | Linux Process | `test_executor_process_tree`、`test_watchdog`（POSIX 分支在 ubuntu CI 执行） |
 | Workflow | `dispatch/tests`（假 GitHub API 强制 ref 唯一性 + 分页 + 故障注入；真实 Actions 并发标注 NOT TESTED） |
@@ -54,6 +54,10 @@ CI 作业（`.github/workflows/quality.yml`，2026-11-14 起由 5 个增至 7 �
 ## 四、T01–T30 矩阵
 
 > 「本地」= Windows 本机实测；「Linux」= 由 ubuntu-latest CI 作业执行（POSIX 专用项）。
+>
+> **PR-6（2026-11-14）**：SQLite 权威实现及其专用测试（`test_scheduler_*` / `test_mirror.py`）
+> 已删除，对应能力由 `test_ref_*`、迁移后的 `test_worker_integration.py` 覆盖；下表逐行
+> 重编号由 Lead 统一校订，先以本节测试分层与 `multi-worker-github-native-authority.md` 为准。
 
 | 编号 | 验收项目 | 自动化测试（文件::用例） | 本地 | Linux |
 | --- | --- | --- | --- | --- |
@@ -79,14 +83,14 @@ CI 作业（`.github/workflows/quality.yml`，2026-11-14 起由 5 个增至 7 �
 | T20 | 执行超时进程树退出、资源清理 | `test_executor_process_tree.py::test_timeout_terminates_process_tree_and_sets_reason`、`test_windows_timeout_kills_grandchild_and_tree_exited_true`（含孙进程） | PASS（Windows 含孙进程，修复后） | PASS |
 | T21 | Worker 内部异常不失控且保留原始异常 | `test_worker_cleanup.py::test_internal_exception_cleans_then_reraises`、`test_failure_inside_runner_keeps_original_exception_after_cleanup` | PASS | — |
 | T22 | 外部取消任务及时停止且不提交结果 | `test_worker_cleanup.py::test_cancel_terminates_process_and_never_completes`、`test_executor_process_tree.py::test_cancel_event_terminates_process_group`、`test_windows_cancel_kills_grandchild_and_tree_exited_true`（Windows 真跑） | PASS | PASS |
-| T23 | Worker 崩溃后租约/锁/任务可恢复 | `test_scheduler_claim.py::test_t07_*`、`test_scheduler_complete.py::test_c07_complete_after_reap_is_stale`、`test_worker_integration.py::test_real_scheduler_blocks_then_retry_recovers` | PASS | — |
+| T23 | Worker 崩溃后租约/锁/任务可恢复 | `test_worker_integration.py::test_github_ref_scheduler_expired_lease_reaped_then_reclaimed`、`test_ref_reap.py`、`test_ref_fencing.py` | PASS | — |
 | T24 | 两个 auto-dispatch 同时启动不重复分派 | `dispatch/tests/test_dispatch_registry.py::test_register_concurrent_only_one_winner`、`test_auto_dispatch.py::test_two_concurrent_dispatch_runs_register_once` | PASS | — |
 | T25 | Workflow 重复触发幂等 | `test_auto_dispatch.py::test_repeated_event_delivery_is_idempotent`、`test_qa_dispatch.py::test_trigger_once_then_idempotent` | PASS | — |
 | T26 | API 成功但客户端超时不产生重复副作用 | `test_auto_dispatch.py::test_registered_ref_without_comment_reconciles_once`、`test_auto_dispatch.py::test_comment_post_timeout_after_apply_does_not_duplicate`、`test_qa_dispatch.py::test_webhook_timeout_keeps_claim_to_avoid_duplicate` | PASS | — |
 | T27 | Linux Hook 权限 644 不得误报通过 | `test_worktree_guard.py::test_validate_hooks_fails_when_pre_commit_is_644`、`test_hook_exec_check_rejects_644_on_posix` | SKIP(POSIX) / PASS(Windows 跳过逻辑) | PASS |
 | T28 | Linux 主机信息与 capabilities 正确 | `test_hostinfo.py::test_linux_capabilities`、`test_capabilities_include_python_and_platform_label`、`test_platform_label_matches_runtime` | PASS | PASS |
 | T29 | Windows 风格路径按规范处理 | `test_command_parse.py::test_windows_backslash_path_preserved_with_posix_false`、`test_default_split_uses_posix_rules_on_posix` | PASS | PASS(POSIX 分支) |
-| T30 | 多项故障连续发生后状态与资源收敛 | `test_scheduler_complete.py::test_c11_complete_and_cancel_concurrent_converge`、`test_worker_recovery.py::test_disconnect_5min_mirror_outbox_resumes_without_duplicate`、`test_worker_integration.py::test_real_scheduler_end_to_end` | PASS | — |
+| T30 | 多项故障连续发生后状态与资源收敛 | `test_worker_integration.py::test_github_ref_scheduler_end_to_end`、`test_worker_recovery.py::test_disconnect_5min_mirror_outbox_resumes_without_duplicate`、`test_ref_completion.py` | PASS | — |
 
 > 说明：T09/T27 的 Windows 行是对「非 POSIX 平台显式跳过/替代路径」的验证；
 > POSIX 语义本身由 Linux 行负责，二者不互相替代。

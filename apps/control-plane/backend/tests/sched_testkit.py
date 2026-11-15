@@ -1,7 +1,7 @@
-"""控制面测试工具箱：假时钟、假 GitHub 传输、分页 opener、任务构造 helper。
+"""控制面测试工具箱：假时钟、记录型 GitHub 传输、分页 opener、GitHub JSON 构造。
 
-只依赖标准库；不 Mock 掉被测的原子性（SQLite 是真的、线程/进程是真的），
-这里替代的只有「外部的 GitHub HTTP 与时间」。
+只依赖标准库；这里替代的只有「外部的 GitHub HTTP 与时间」，分页/重试走被测
+`RestGitHubTransport` 的真实代码路径。PR-6 起不再包含 SQLite 调度器 helper。
 """
 
 from __future__ import annotations
@@ -12,8 +12,6 @@ import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, Sequence
-
-from scheduler import SchedulerService
 
 T0 = datetime(2026, 11, 14, 2, 0, 0, tzinfo=timezone.utc)
 
@@ -29,51 +27,6 @@ class FakeClock:
 
     def advance(self, seconds: float) -> None:
         self.now += timedelta(seconds=seconds)
-
-
-# ---------------------------------------------------------------------------
-# 任务 / 认领 helper
-# ---------------------------------------------------------------------------
-
-
-def claim(
-    svc: SchedulerService,
-    task_id: str = "issue-1",
-    *,
-    agent: str = "muse-2",
-    instance: str = "i-1",
-    attempt: str = "a-1",
-    lease_ttl: Optional[timedelta] = None,
-):
-    return svc.claim(
-        task_id,
-        agent_id=agent,
-        instance_id=instance,
-        attempt_id=attempt,
-        lease_ttl=lease_ttl,
-    )
-
-
-def prepare_running(
-    svc: SchedulerService,
-    task_id: str = "issue-1",
-    *,
-    issue_number: int = 1,
-    agent: str = "muse-2",
-    instance: str = "i-1",
-    attempt: str = "a-1",
-    scopes: Sequence[str] = (),
-):
-    """upsert → claim → transition(running)，返回租约。"""
-    svc.upsert_task(task_id, issue_number, repo="o/r", title="任务", scopes=scopes)
-    lease = claim(svc, task_id, agent=agent, instance=instance, attempt=attempt)
-    svc.transition(
-        task_id,
-        attempt_id=attempt,
-        fencing_token=lease.fencing_token,
-        state="running",
-    )
-    return lease
 
 
 # ---------------------------------------------------------------------------
