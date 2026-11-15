@@ -1,0 +1,48 @@
+# Issue #73 真实 GitHub 验收证据（隔离私库，非生产仓库）
+# repo=Jouwala/noc-soc-ref-verify at=2026-11-15T11:25:25Z
+# issue_probe=#50 issue_flow=#51
+
+wrote config D:\tmp\issue73-verify\cfg-a.json (instance=muse-1-linux)
+wrote config D:\tmp\issue73-verify\cfg-b.json (instance=muse-1-linux-verify-b)
+=== A) verify_concurrent_claim ===
+created issue #50 ref-CAS 并发认领验收（可关闭）
+[verify] 并发认领 issue-50（D:\tmp\issue73-verify\cfg-a.json vs D:\tmp\issue73-verify\cfg-b.json）
+[A] worker_id=muse-1-linux instance=muse-1-linux result=LeaseHeld token=None
+    HWM   refs/heads/agent-hwm/issue-50/00000001
+    LEASE refs/heads/agent-lease/issue-50/00000001/1794741848976/muse-1-linux/8e138afdd39abee5/1247114889444b86
+[B] worker_id=muse-1-linux instance=muse-1-linux-verify-b result=claimed token=1
+    HWM   refs/heads/agent-hwm/issue-50/00000001
+    LEASE refs/heads/agent-lease/issue-50/00000001/1794741848976/muse-1-linux/8e138afdd39abee5/1247114889444b86
+[verify] PASS：恰好一赢一 LeaseHeld；赢家 worker_id=muse-1-linux instance=muse-1-linux-verify-b token=1
+[verify] GitHub 上应可见：
+    refs/heads/agent-hwm/issue-50/00000001
+    refs/heads/agent-lease/issue-50/00000001/1794741848976/muse-1-linux/8e138afdd39abee5/1247114889444b86
+[verify] winner JSON：D:\tmp\issue73-verify\winner.json
+[verify] 验收后清理：python3 verify_concurrent_claim.py --cleanup-winner D:\tmp\issue73-verify\winner.json
+
+issue#50 refs: HWM=['refs/heads/agent-hwm/issue-50/00000001'] LEASE=['refs/heads/agent-lease/issue-50/00000001/1794741848976/muse-1-linux/8e138afdd39abee5/1247114889444b86']
+[cleanup] 已释放 issue-50 attempt=1247114889444b86 token=1
+
+=== B) two --once workers on the same fresh issue ===
+created issue #51 ref-CAS 无重复执行验收（可关闭）
+open todo issues for agent:muse-1-linux: [51]
+--- worker A rc=0 ---
+{"issue": 51, "outcome": "completed", "task_id": "issue-51"}
+[2026-11-15T11:24:40Z] repo=Jouwala/noc-soc-ref-verify api_base=https://api.github.com auth_mode=env:GITHUB_TOKEN
+[2026-11-15T11:24:40Z] identity {"agent_label": "agent:muse-1-linux", "api_base": "https://api.github.com", "auth_mode": "env:GITHUB_TOKEN", "capabilities": ["linux-sandbox"], "hostname": "MSNOC1", "instance": "muse-1-linux", "per_task_dir": false, "platform": "windows-worker", "ref_agent_id": "muse-1-linux", "ref_instance": "b360ff5f6f184c8e", "repo": "Jouwala/noc-soc-ref-verify", "repo_root": "D:\\tmp\\issue73", "state_dir": "D:\\tmp\\issue73-verify\\state-a", "workdir": "D:\\tmp\\issue73-verify\\work", "worker_id": "muse-1-linux"}
+[2026-11-15T11:24:40Z] registered worker_id=muse-1-linux instance=muse-1-linux repo=Jouwala/noc-soc-ref-verify
+[2026-11-15T11:24:51Z] claimed issue-51 attempt=96d6f6024e5f4c29 token=1
+[2026-11-15T11:25:04Z] 任务环境白名单：放行 20 个变量（#78）
+[2026-11-15T11:25:17Z] completed issue-51 created=True: 执行成功（0.1s，改动 0 个文件）
+
+--- worker B rc=0 ---
+{"outcome": "idle"}
+[2026-11-15T11:24:40Z] repo=Jouwala/noc-soc-ref-verify api_base=https://api.github.com auth_mode=env:GITHUB_TOKEN
+[2026-11-15T11:24:40Z] identity {"agent_label": "agent:muse-1-linux", "api_base": "https://api.github.com", "auth_mode": "env:GITHUB_TOKEN", "capabilities": ["linux-sandbox"], "hostname": "MSNOC1", "instance": "muse-1-linux-verify-b", "per_task_dir": false, "platform": "windows-worker", "ref_agent_id": "muse-1-linux", "ref_instance": "8e138afdd39abee5", "repo": "Jouwala/noc-soc-ref-verify", "repo_root": "D:\\tmp\\issue73", "state_dir": "D:\\tmp\\issue73-verify\\state-b", "workdir": "D:\\tmp\\issue73-verify\\work", "worker_id": "muse-1-linux"}
+[2026-11-15T11:24:40Z] registered worker_id=muse-1-linux instance=muse-1-linux-verify-b repo=Jouwala/noc-soc-ref-verify
+[2026-11-15T11:24:47Z] claim issue-51: lease held by another worker
+
+marker='x' completions=1 labels=['state:in-review', 'agent:muse-1-linux'] HWM=['refs/heads/agent-hwm/issue-51/00000001'] LEASE=[]
+cleanup remaining refs=[]
+
+RESULT: PASS
