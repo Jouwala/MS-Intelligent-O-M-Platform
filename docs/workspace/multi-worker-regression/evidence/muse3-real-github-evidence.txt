@@ -1,0 +1,77 @@
+[00:42:31] 目标私库：Jouwala/noc-soc-ref-verify（隔离测试库）；checkout A=D:\tmp\muse3-gha B=D:\tmp\muse3-ghb；期望 SHA=4586d8b6607187b35032c832bf7bcc2593340269
+[00:42:34] 基线 agent-* refs 数量：0
+[00:42:45] CHECK PASS A1 并发 claim 恰好一个成功: [{"action": "claim", "ok": true, "data": {"fencing_token": 1, "attempt_id": "aaaa11112222", "instance_id": "aaaa1111"}}, {"action": "claim", "ok": false, "error": "LeaseHeld", "detail": "任务 issue-40 已被 muse-2/aaaa1111 持有，租约至 2026-11-15T00:52:37Z"}]
+[00:42:45] CHECK PASS A2 赢家 token=1: {"agent": "muse-2", "instance": "aaaa1111", "attempt": "aaaa11112222", "token": 1, "checkout": "D:\\tmp\\muse3-gha"}
+[00:42:48] CHECK PASS A3 真实 GitHub 上恰好 1 条 HWM token=1: ["refs/heads/agent-hwm/issue-40/00000001"]
+[00:42:48] CHECK PASS A4 真实 GitHub 上恰好 1 条 lease token=1: ["refs/heads/agent-lease/issue-40/00000001/1794703357908/muse-2/aaaa1111/aaaa11112222"]
+[00:42:54] CHECK PASS B1 赢家 renew 推进 token: {"action": "renew", "ok": true, "data": {"fencing_token": 2}}
+[00:42:54] CHECK PASS B2 renew 后 token=2: {"fencing_token": 2}
+[00:42:57] CHECK PASS B3 HWM 单调到 2，且旧 lease ref 已删、只剩 token=2 lease: {"hwm": ["refs/heads/agent-hwm/issue-40/00000001", "refs/heads/agent-hwm/issue-40/00000002"], "leases": ["refs/heads/agent-lease/issue-40/00000002/1794703371286/muse-2/aaaa1111/aaaa11112222"]}
+[00:42:59] CHECK PASS B4 旧 token=1 的 complete 被 StaleFencing 拒绝: {"action": "complete", "ok": false, "error": "StaleFencing", "detail": "任务 issue-40 拒绝旧执行者（代次不匹配（旧执行者或租约已被推进））：提交 attempt=aaaa11112222 token=1，当前 attempt= token=2"}
+[00:43:00] CHECK PASS B5 旧 token=1 的 transition 被拒绝: {"action": "transition", "ok": false, "error": "StaleFencing", "detail": "任务 issue-40 拒绝旧执行者（代次不匹配（旧执行者或租约已被推进））：提交 attempt=aaaa11112222 token=1，当前 attempt= token=2"}
+[00:43:01] CHECK PASS B6 旧 token=1 的 release_scope 被拒绝: {"action": "release_scope", "ok": false, "error": "StaleFencing", "detail": "任务 issue-40 拒绝旧执行者（旧 token 不能释放新代次的锁）：提交 attempt=aaaa11112222 token=1，当前 attempt= token=2"}
+[00:43:07] CHECK PASS B7 新 token=2 进入 running: {"action": "transition", "ok": true, "data": {"state": "running", "fencing_token": 2}}
+[00:43:15] CHECK PASS B8 新 token=2 完成: {"action": "complete", "ok": true, "data": {"created": true, "terminal_status": "completed", "idempotency_key": "fence-complete"}}
+[00:43:15] CHECK PASS B9 完成 created=True: {"created": true, "terminal_status": "completed", "idempotency_key": "fence-complete"}
+[00:43:15] CHECK PASS B10 真实 GitHub 上恰好 1 条完成评论: {"comments": 4}
+[00:43:17] CHECK PASS B11 完成后无租约、状态 completed: {"action": "snapshot", "ok": true, "data": {"state": "completed", "fencing_token": 2, "attempt_id": "aaaa11112222", "lease_expire_at": null, "scopes": []}}
+[00:43:17] CHECK PASS B12 快照 completed 且 lease=None: {"state": "completed", "fencing_token": 2, "attempt_id": "aaaa11112222", "lease_expire_at": null, "scopes": []}
+[00:43:26] CHECK PASS C1 短租约(5s)认领成功: {"action": "claim", "ok": true, "data": {"fencing_token": 1, "attempt_id": "cccc33334444", "instance_id": "cccc3333"}}
+[00:43:38] CHECK PASS C2 另一个 checkout 的 Reaper 回收过期租约: {"action": "reap", "ok": true, "data": {"expired_leases": ["issue-41"], "retryable": ["issue-41"], "released_locks": []}}
+[00:43:38] CHECK PASS C3 报告含该 Issue 且 retryable: {"expired_leases": ["issue-41"], "retryable": ["issue-41"], "released_locks": []}
+[00:43:40] CHECK PASS C4 真实 GitHub 上该 Issue 的 lease ref 已删除: ["refs/heads/agent-hwm/issue-41/00000001", "refs/heads/agent-reap/issue-41/00000001"]
+[00:43:48] CHECK PASS C5 回收后新实例重新认领成功: {"action": "claim", "ok": true, "data": {"fencing_token": 2, "attempt_id": "dddd44445555", "instance_id": "dddd4444"}}
+[00:43:48] CHECK PASS C6 重认领 token 单调前进（=2）: {"fencing_token": 2, "attempt_id": "dddd44445555", "instance_id": "dddd4444"}
+[00:43:51] CHECK PASS C7 旧 token 迟到 complete 被 StaleFencing 拒绝: {"action": "complete", "ok": false, "error": "StaleFencing", "detail": "任务 issue-41 拒绝旧执行者（代次不匹配（旧执行者或租约已被推进））：提交 attempt=cccc33334444 token=1，当前 attempt= token=2"}
+[00:43:57] CHECK PASS C8 新实例 running: {"action": "transition", "ok": true, "data": {"state": "running", "fencing_token": 2}}
+[00:44:05] CHECK PASS C9 新实例完成: {"action": "complete", "ok": true, "data": {"created": true, "terminal_status": "completed", "idempotency_key": "reaped-reclaim"}}
+[00:44:15] CHECK PASS D1 任务1 认领: {"action": "claim", "ok": true, "data": {"fencing_token": 1, "attempt_id": "eeee55556666", "instance_id": "eeee5555"}}
+[00:44:23] CHECK PASS D2 任务2 认领: {"action": "claim", "ok": true, "data": {"fencing_token": 1, "attempt_id": "ffff66667777", "instance_id": "ffff6666"}}
+[00:44:29] CHECK PASS D3 任务1 获取范围 apps/shared/verify_file.py: {"action": "acquire_scope", "ok": true, "data": {"holders": {"issue-42": ["apps/shared/verify_file.py"]}}}
+[00:44:35] CHECK PASS D4 任务2 重叠范围被 ScopeConflict 拒绝: {"action": "acquire_scope", "ok": false, "error": "ScopeConflict", "detail": "任务 issue-43 的文件范围与 issue-42（muse-2）重叠：apps/shared/verify_file.py"}
+[00:44:41] CHECK PASS D5 任务2 不重叠范围可获取: {"action": "acquire_scope", "ok": true, "data": {"holders": {"issue-43": ["apps/other/verify_file.py"], "issue-42": ["apps/shared/verify_file.py"]}}}
+[00:44:44] CHECK PASS D6 任务1 释放范围锁: {"action": "release_scope", "ok": true, "data": {"removed": true}}
+[00:44:50] CHECK PASS D7 释放后任务2 可获取重叠范围: {"action": "acquire_scope", "ok": true, "data": {"holders": {"issue-43": ["apps/other/verify_file.py", "apps/shared/verify_file.py"]}}}
+[00:44:53] CHECK PASS D8 任务2 释放范围锁: {"action": "release_scope", "ok": true, "data": {"removed": true}}
+[00:45:03] CHECK PASS E1 认领: {"action": "claim", "ok": true, "data": {"fencing_token": 1, "attempt_id": "9999aaaa1111", "instance_id": "9999aaaa"}}
+[00:45:09] CHECK PASS E2 进入 running: {"action": "transition", "ok": true, "data": {"state": "running", "fencing_token": 1}}
+[00:45:17] CHECK PASS E3 首次完成 created=True: {"action": "complete", "ok": true, "data": {"created": true, "terminal_status": "completed", "idempotency_key": "idem-k1"}}
+[00:45:17] CHECK PASS E4 首次 created=True: {"created": true, "terminal_status": "completed", "idempotency_key": "idem-k1"}
+[00:45:18] CHECK PASS E5 同 key 重放 created=False: {"action": "complete", "ok": true, "data": {"created": false, "terminal_status": "completed", "idempotency_key": "idem-k1"}}
+[00:45:18] CHECK PASS E6 重放 created=False: {"created": false, "terminal_status": "completed", "idempotency_key": "idem-k1"}
+[00:45:19] CHECK PASS E7 同 attempt 换 key 也视为重放 created=False: {"action": "complete", "ok": true, "data": {"created": false, "terminal_status": "completed", "idempotency_key": "idem-k1"}}
+[00:45:19] CHECK PASS E8 换 key 重放 created=False: {"created": false, "terminal_status": "completed", "idempotency_key": "idem-k1"}
+[00:45:19] CHECK PASS E9 终态用新 attempt/新 key 再完成被 SchedulerError 拒绝: {"action": "complete", "ok": false, "error": "SchedulerError", "detail": "任务 issue-44 已由幂等键 idem-k1 完成，拒绝用新键 idem-k3 重复完成"}
+[00:45:20] CHECK PASS E10 真实 GitHub 上该 Issue 完成评论恰好 1 条: {"comments": 3}
+[00:45:22] CHECK PASS E11 状态 completed 且无租约: {"action": "snapshot", "ok": true, "data": {"state": "completed", "fencing_token": 1, "attempt_id": "9999aaaa1111", "lease_expire_at": null, "scopes": []}}
+[00:45:22] CHECK PASS E12 completed 且 lease=None: {"state": "completed", "fencing_token": 1, "attempt_id": "9999aaaa1111", "lease_expire_at": null, "scopes": []}
+[00:45:25] CHECK PASS F1 分派 CAS：首次登记 True / 重复 False: {"action": "dispatch", "ok": true, "data": {"first": true, "second": false}}
+[00:45:25] CHECK PASS F2 两次 register_dispatch = (True, False): {"first": true, "second": false}
+[00:45:28] CHECK PASS F3 真实 GitHub 上存在 agent-dispatch ref: ["refs/heads/agent-dispatch/47ebacff928d8a34e8bab87d0eea53db2eeace05"]
+[00:45:28] CHECK PASS G1 scheduler 目录无 SQLite 实现（import/connect/SQLiteStore）: []
+[00:45:28] CHECK PASS G2 factory 无 sqlite 后端选择/回退分支: {"backend_env": false, "sqlite_import": false}
+[00:45:28] CHECK PASS G3 无 AGENT_SCHEDULER_BACKEND 运行时后端选择（仅文档说明其已移除）: {"runtime_reads": [], "doc_only_mentions": ["apps\\control-plane\\backend\\scheduler\\ref_api.py"]}
+[00:45:28] === 清理：删除本次新建 refs + 关闭/删除测试 Issue ===
+[00:45:32] 删除 ref refs/heads/agent-dispatch/47ebacff928d8a34e8bab87d0eea53db2eeace05 -> HTTP 204
+[00:45:33] 删除 ref refs/heads/agent-hwm/issue-40/00000001 -> HTTP 204
+[00:45:34] 删除 ref refs/heads/agent-hwm/issue-40/00000002 -> HTTP 204
+[00:45:36] 删除 ref refs/heads/agent-hwm/issue-41/00000001 -> HTTP 204
+[00:45:37] 删除 ref refs/heads/agent-hwm/issue-41/00000002 -> HTTP 204
+[00:45:38] 删除 ref refs/heads/agent-hwm/issue-42/00000001 -> HTTP 204
+[00:45:40] 删除 ref refs/heads/agent-hwm/issue-43/00000001 -> HTTP 204
+[00:45:41] 删除 ref refs/heads/agent-hwm/issue-44/00000001 -> HTTP 204
+[00:45:42] 删除 ref refs/heads/agent-lease/issue-42/00000001/1794703447492/muse-2/eeee5555/eeee55556666 -> HTTP 204
+[00:45:44] 删除 ref refs/heads/agent-lease/issue-43/00000001/1794703455737/muse-3/ffff6666/ffff66667777 -> HTTP 204
+[00:45:45] 删除 ref refs/heads/agent-reap/issue-41/00000001 -> HTTP 204
+[00:45:48] CHECK PASS Z1 清理后本次创建的 agent-* refs 全部删除: {"created": 11, "deleted": 11, "remaining": []}
+[00:45:48] issue #40 删除 -> HTTP 404
+[00:45:49] issue #40 关闭 -> HTTP 200
+[00:45:50] issue #41 删除 -> HTTP 404
+[00:45:51] issue #41 关闭 -> HTTP 200
+[00:45:51] issue #42 删除 -> HTTP 404
+[00:45:52] issue #42 关闭 -> HTTP 200
+[00:45:53] issue #43 删除 -> HTTP 404
+[00:45:54] issue #43 关闭 -> HTTP 200
+[00:45:54] issue #44 删除 -> HTTP 404
+[00:45:55] issue #44 关闭 -> HTTP 200
+[00:45:55] === 汇总：52/52 CHECK PASS ===

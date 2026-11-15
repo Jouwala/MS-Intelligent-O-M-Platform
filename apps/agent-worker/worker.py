@@ -9,7 +9,7 @@
 → 一任务一 Worktree（钩子校验，POSIX 可执行位）
 → 文件范围锁（`scheduler.acquire_scope`）
 → 执行（executor：独立进程组，超时/取消杀整棵树；独立取消轮询线程）
-→ 结果回传（`scheduler.complete` 幂等键 attempt_id + `GitHubMirror.drain`）
+→ 结果回传（`scheduler.complete` 幂等键 attempt_id；完成评论/标签由 ref 权威层直接写 GitHub）
 → 统一清理（try/finally：范围锁、租约、_active、worktree、子进程确认退出）。
 
 清理策略（TASK-06 验收口径）：

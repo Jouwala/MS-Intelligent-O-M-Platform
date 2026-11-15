@@ -1,7 +1,7 @@
 """中央调度器对外契约（冻结层）。
 
 本文件是 `scheduler` 包的**唯一接口真相源**：类型、错误、状态机、服务协议。
-`store.py`（SQLite 持久化）、`service.py`（业务规则）、`mirror.py`（GitHub 回写）
+`ref_service.py`（GitHub 原生权威实现）等（历史 SQLite 实现已于 PR-6 删除）
 以及 `apps/agent-worker/` 里的 Worker 只依赖这里声明的名字，不互相 import。
 
 设计依据：`docs/workspace/multi-worker-scheduler-design.md`（ADR-2026-11-14）。
@@ -14,7 +14,7 @@
 - **旧执行者防护**：任何状态修改都必须带上 `attempt_id + fencing_token`，
   代次不符一律 `StaleFencing`，旧实例不能覆盖或释放新实例的状态/锁。
 - **幂等**：`complete()` 以 `idempotency_key` 去重，重复提交返回既有结果；
-  中间步骤失败走 outbox 重放，最终收敛到正确状态。
+  中间步骤失败走 GitHub 侧有界重试 + Actions 对账，最终收敛到正确状态（无本地 outbox）。
 """
 
 from __future__ import annotations
@@ -286,7 +286,7 @@ class WorkerSnapshot:
 
 
 # ---------------------------------------------------------------------------
-# 调度器服务协议（实现：service.SchedulerService）
+# 调度器服务协议（实现：ref_service.GitHubRefScheduler）
 # ---------------------------------------------------------------------------
 
 DEFAULT_LEASE_TTL = timedelta(minutes=10)

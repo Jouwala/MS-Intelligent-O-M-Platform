@@ -208,6 +208,10 @@ refs/heads/agent-scope/<encoded-path>/<task_id>-<token:08d>
   证据：两进程日志 + 隔离仓库最终 refs/评论快照；此验证作为 PR-5 的验收附件，真实多 VM
   并发在验收矩阵里按实际证据标注（可执行则 PASS，环境限制则 BLOCKED 并附日志）。
 - 隔离仓库只用于验证，不碰生产仓库的 Issue/任务队列。
+- **执行结果（2026-11-15，已入库）**：官方 driver 28/28 CHECK PASS（`evidence/real-github-multivm-verify.txt`）；
+  Muse 2 独立复跑 28/28、Muse 3 独立探针 52/52（`muse2-final-verification.md` /
+  `muse3-final-verification.md`）。真实 API 暴露并修复了 `matching-refs` 不分页的语义差异；
+  Muse 3 发现 B1/R2 测试缺口（HWM 已推进、旧 lease ref 未删窗口），已补确定性回归并通过变异自检。
 
 ## 十、实现强化与边界（实现阶段确认，2026-11-14）
 

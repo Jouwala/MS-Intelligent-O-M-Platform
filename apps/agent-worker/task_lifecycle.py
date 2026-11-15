@@ -261,14 +261,18 @@ class TaskLifecycle:
 
     # -- 镜像 -------------------------------------------------------------------
     def drain_mirror(self) -> int:
-        """重放 outbox 里的 GitHub 写操作；mirror 自己保证幂等、失败不抛。"""
+        """兼容旧调用的空操作：GitHub 权威层没有本地 outbox/mirror（PR-5/PR-6）。
+
+        Worker 仍可能调用这里（启动/完成后），传入的 mirror 在 GitHub 后端恒为 None，
+        因此直接返回 0；保留方法名避免大范围改动调用点。
+        """
         if self.mirror is None:
             return 0
         try:
-            # 契约：GitHubMirror(transport).drain(scheduler, limit=100) -> int
+            # 历史 SQLite 后端的 mirror 已随 PR-6 删除；当前 factory 不注入 mirror。
             return int(self.mirror.drain(self.scheduler, limit=self.config.drain_limit) or 0)
         except Exception as exc:  # noqa: BLE001 - outbox 保留，下个周期继续
-            self.log(f"[worker] GitHubMirror.drain 失败（outbox 保留待重放）：{exc}")
+            self.log(f"[worker] mirror.drain 失败（兼容路径，忽略）：{exc}")
             return 0
 
     # -- 统一清理 ---------------------------------------------------------------
