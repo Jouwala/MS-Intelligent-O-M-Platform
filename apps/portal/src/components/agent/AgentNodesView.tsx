@@ -11,7 +11,7 @@ import {
 } from './hooks/useAgentEvents';
 
 /* AgentNodesView —— 控制台「节点」视图（TASK-08 外壳）
- * 节点 = 注册表里的各 Agent（Muse 1/2/3、Grok 等）：状态（在线/失联/离线）
+ * 节点 = 注册表里的各 Agent（Muse 1/2/3）与 D:\02 本机冒烟执行器（smoke-watcher）：状态（在线/失联/离线）
  * 由服务端状态或心跳新鲜度推导（deriveNodeStatus），数据经 useAgentEvents
  * 的快照 + SSE 增量实时更新，不轮询。后端不可达时只显示离线提示与空态，
  * 不造假数据。 */

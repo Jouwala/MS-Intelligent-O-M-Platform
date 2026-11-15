@@ -1,6 +1,6 @@
 # Agent 协作协议（第一阶段，2026-11-13）
 
-> 适用：Muse 1（总指挥）、Muse 2 / Muse 3（Coding Worker）、Grok Bot（QA Worker）。
+> 适用：Muse 1（总指挥）、Muse 2 / Muse 3（Coding Worker）、Grok Bot（原 QA Worker，2026-11-14 已退役；QA 现由 D:\02 本机 smoke-watcher 承担）。
 > 唯一任务中心是 GitHub Issues，PR 是代码交付载体。
 > 所有 Agent 自主轮询 GitHub，不再依赖人工复制粘贴任务描述与测试报告。
 > 本文件与 `agent-registry.md`（谁是谁）、`agent-polling-setup.md`（怎么轮询）一起读。
@@ -37,6 +37,7 @@
 - **认领评论**（TASK_ACCEPTED 的一种固定写法）：`<!-- agent-claim: muse-2, 2026-11-13T19:30:00Z -->`，认领后 4 小时无进展（无 push、无评论）即租约过期，Muse 1 摘 `state:claimed` 标签重派。
 - **测试结果必须与 Commit 一致**：QA_PASSED / QA_FAILED 里的 HEAD SHA 必须等于 PR 当前 head SHA；过期测试结果（HEAD 已变）不得触发合并，`auto-merge.yml` 只认 head SHA 上的检查结果。
 - **QA 不写代码**（第一阶段，用户决定）：QA 只发 QA_STARTED / QA_FAILED / QA_PASSED，不发 TASK_COMPLETED / FIX_COMPLETED，不提交修复代码。2026-11-14 起 QA 由 D:\02 本机 smoke-watcher 承担，Grok Bot 已退役。
+- **QA 消息回写尚未落地**：第 6/7/8 类消息口径上由 smoke-watcher 发出，但目前没有任何实现会发出这三类消息——smoke-watcher 现只在 PR 贴结果评论并打 `smoke-passed` 标签。消息回写的实现见 TASK-06-A（#48），落地前不要按这三类消息已存在来写代码。
 
 ## 三、标签状态机
 
@@ -44,7 +45,7 @@
 state:todo ──(TASK_ACCEPTED)──▶ state:claimed ──(TASK_COMPLETED + PR)──▶ state:in-review
      ▲                                                                          │
      │ 4 小时无进展，租约过期重派                                              ▼
-     │                                                              state:qa-ready ──(Grok 触发)
+     │                                                              state:qa-ready ──(smoke-watcher 触发)
      │                                                                          │
      │                                                          ┌───────────────┴───────────────┐
      │                                                          ▼                               ▼
@@ -65,7 +66,7 @@ state:todo ──(TASK_ACCEPTED)──▶ state:claimed ──(TASK_COMPLETED + 
 
 ## 四、失败与返工流程
 
-1. QA 失败：Grok 发 QA_FAILED 结构化报告（PR、HEAD SHA、错误信息、日志链接），打 `state:qa-failed` 标签。
+1. QA 失败：D:\02 本机 smoke-watcher 发 QA_FAILED 结构化报告（PR、HEAD SHA、错误信息、日志链接），打 `state:qa-failed` 标签（消息回写实现见 TASK-06-A #48；落地前失败以 PR 评论 + 标签呈现）。
 2. Muse 1 建修复 Issue（用 `agent-task.md` 模板），附失败报告链接，写明修复轮次（第 1/2/3 次），发 FIX_REQUESTED，指派回原开发 Agent。
 3. 原开发 Agent 修复后发 FIX_COMPLETED，重新走评审与测试。
 4. 同一任务修复达 3 次仍失败：打 `needs-replan` 标签，Muse 1 重新规划（拆分任务、换方案或升级给用户），不再自动重派。
@@ -107,10 +108,11 @@ state:todo ──(TASK_ACCEPTED)──▶ state:claimed ──(TASK_COMPLETED + 
 - PR 合并后自动回写任务状态：第 12 类 PR_MERGED 评论由
   `pr-merged-writeback.yml` 发出（机器可读头 `from: github-actions`），
   同时打 `state:merged` 并关闭 Issue；Muse 1 只做最终汇总。
-- quality 全绿自动请 Grok 冒烟（2026-11-14 新增）：`agent-orchestrator.yml`
-  在 `quality` 工作流跑完且结论为 success 时自动 POST webhook，不再
-  需要人工打 `state:qa-ready` 标签；打标签与手动 dispatch 仍可用。
-  同一 head SHA 只触发一次（去重见 `docs/workspace/github-automation.md`）。
+- quality 全绿后的冒烟由 D:\02 本机 smoke-watcher 执行（2026-11-14 起）：
+  watcher 轮询检出 CI 已绿的 PR head，在本机跑 `ops\smoke\smoke.ps1`，
+  贴回结果评论，通过才打 `smoke-passed`。原 `agent-orchestrator.yml`
+  自动 POST webhook 请 Grok 冒烟的路径已随 Grok 退役摘除（工作流在
+  Actions 层面 disabled、只剩手动 dispatch，待删除），不再生效。
 - PR 合并后自动分派下一个任务（2026-11-14 新增）：`auto-dispatch.yml`
   在 PR 合入 main 后找下一个就绪任务（`state:todo` + `agent:muse-2/3` +
   依赖全关 + 无认领/分派评论），发第 1 类 TASK_ASSIGNED 评论

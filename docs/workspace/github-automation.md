@@ -28,10 +28,11 @@ Worker 在分支上提交代码，草稿 PR 转正式
 │ 见第八节；2026-11-14 TASK-01 起）
 │ 失败 → ci-failure-notify.yml：到 PR 与 Issue 通知 builder
 ▼
-quality 全绿 → agent-orchestrator.yml 自动 POST webhook 请 Grok 冒烟
-（2026-11-14 新增：CI 变绿即自动触发，不再需要人工打 state:qa-ready；
-打标签与手动 dispatch 仍可用作补救；同一 head SHA 只触发一次去重）
-│ Grok 通过 → 打 smoke-passed（+ state:qa-passed）
+quality 全绿 → D:\02 本机 smoke-watcher 轮询检出 PR head → 跑 ops\smoke\smoke.ps1
+│ → 贴回评论 → 通过才打 smoke-passed
+（smoke-watcher 是 D:\02 本机脚本，不是 Actions 工作流，见第二节；
+原 agent-orchestrator.yml 自动 POST webhook 请 Grok 冒烟的路径已随
+Grok 2026-11-14 退役摘除，该工作流待删除，见第二节与第十节）
 ▼
 auto-merge.yml：quality 全绿 + smoke-passed + 无 do-not-merge → 自动合并
 │ 其中 update-branches 作业：main 前进时自动更新
@@ -61,7 +62,8 @@ Muse 1 按 dispatch-rules.md 第四节做最终汇总（人工/Agent 环节，�
 | `ci-failure-notify.yml` | `quality` 工作流跑完且结论 failure / timed_out | 按 head SHA 定位 open PR，评论通知 builder（失败 job、运行链接、SHA），关联 Issue 同步一份 | 同一 run 只通知一次（`ci-failure-notice` 标记去重）；只通知不改代码/标签 |
 | `pr-merged-writeback.yml` | PR 关闭且 `merged == true`、base 为 main；或 auto-merge 合并成功后 `workflow_dispatch`（填 PR 号） | 解析关联 Issue → 打 `state:merged`、摘其余 `state:` 标签 → 发 PR_MERGED 评论 → 关闭 Issue | 解析不到关联 Issue 就跳过；已回写过的重复触发跳过；dispatch 路径从 API 取 PR 并校验已合入 main |
 | `auto-merge.yml` 的 `auto-merge` 作业 | 合并成功后（本作业内） | 向 `auto-dispatch.yml` 与 `pr-merged-writeback.yml` 各 POST 一次 `workflow dispatch`（`ref: main`，`inputs: pr_number`） | dispatch 失败只记日志，不让合并作业变红（合并已发生）；下游工作流自身幂等，重复触发不重复评论/分派 |
-| `agent-orchestrator.yml`（2026-11-14 扩展；TASK-01 改实现，现 Actions 层面 disabled） | `quality` 跑完且结论 success；或 PR 打 `state:qa-ready` 标签；或手动 dispatch（自动触发路径已从 `on:` 摘除，目前只剩手动 dispatch） | 调 `qa_dispatch.py`：按 head SHA 定位 open PR（全量分页）→ 跳过草稿 / 已有 `state:qa-ready` → `POST /git/refs` 登记 `refs/heads/dispatch/qa-trigger/pr-<N>-<headsha>-<digest>` → POST webhook 请 Grok 冒烟（webhook 失败回滚登记） | 只认 success 结论；草稿 PR 跳过；已有 `state:qa-ready` 的跳过；同一 head SHA 只触发一次（ref CAS，取代旧的“查运行记录”去重）；无对应 open PR 只记日志 |
+| `agent-orchestrator.yml`（2026-11-14 扩展；TASK-01 改实现，现 Actions 层面 disabled） | 仅手动 dispatch（自动触发路径已从 `on:` 摘除；工作流 `disabled_manually`） | **已停用，待删除**：Grok 已于 2026-11-14 退役（PR #46），此路径不再使用。原动作（历史）：调 `qa_dispatch.py` 按 head SHA 定位 open PR → `POST /git/refs` 登记 qa-trigger ref → POST webhook 请 Grok 冒烟。其文件头注释已写明「重新启用前先确认 Grok 是否真的回来；不回来就删掉本文件」——删除动作不在 TASK-06-C 范围，待 Muse 1 与用户决定。现行冒烟链路见下一行 smoke-watcher | 已停用，不再执行；原安全阀口径（只认 success、ref CAS 去重等）仅作历史记录 |
+| `smoke-watcher`（D:\02 本机脚本，**非 Actions 工作流**） | 轮询检出 `quality` 已绿的 open PR head | 在 D:\02 本机跑 `ops\smoke\smoke.ps1`（§8.1–8.4）→ 在 PR 贴回结果评论 → 通过才打 `smoke-passed` | 只对 quality 结论 success 的 head 执行；D:\02 被占用、MSNOC1 掉线等中断的结果作废重跑，不记通过也不记失败（协议第四节第 5 条） |
 | `auto-dispatch.yml`（2026-11-14 新增；TASK-01 改实现） | PR 关闭且 `merged == true`、base 为 main；或 auto-merge 合并成功后 `workflow_dispatch`（填 PR 号） | 调 `auto_dispatch.py`：校验 PR → 触发级对账（已登记则只补状态）→ 全量分页找就绪任务（`state:todo` + `agent:muse-2/3` + 依赖全关 + 无认领/分派评论）→ `POST /git/refs` 做 CAS 登记 → 发带 `dispatch_id` 的 TASK_ASSIGNED 评论 → 幂等补 `state:todo` / 摘 `state:blocked` | 优先派给本次合并空闲的 builder；依赖未满足的绝不分派；已认领 / 已分派的任务不动；无就绪任务只记日志；每次只派一个任务；dispatch 路径从 API 取 PR 并校验已合入 main；并发 / 重复投递只登记一次（第七节） |
 | `dispatch-check.yml`（2026-11-14 修 404；TASK-01 改实现） | Issue 新建 / 编辑 / 关闭 / 标签变化；每小时定时巡检 | 调 `dispatch_check.py`：全量分页读评论 / Issue 列表 / 依赖方搜索结果 → 缺字段提醒、依赖阻塞打 `state:blocked`、依赖解除幂等摘标签；**只检查不分派** | 只做提醒与标签，不合并、不关闭 Issue；评论 marker 分页扫描 + 超时对账（重复执行不产生第二条评论）；标签操作幂等（加标签去重、摘不存在的标签当成功）；查询 / 分页失败显式报错让运行变红 |
 
@@ -95,16 +97,17 @@ auto-dispatch / dispatch-check）的内嵌 Python 已抽成
 瞬间原生关闭；`pr-merged-writeback` 补的是原生关闭没有的标签回写与
 PR_MERGED 评论。解析不到 `Closes` 时回写工作流按消息头/分支名解析并
 负责关闭。
-5. **CI 失败通知不是 QA 失败**：`state:qa-failed` 是 Grok 冒烟失败的标签，
+5. **CI 失败通知不是 QA 失败**：`state:qa-failed` 是 D:\02 本机 smoke-watcher 冒烟失败的标签（Grok 已于 2026-11-14 退役），
 CI 失败只发通知评论、不打任何标签（标签只用 labels.yml 已定义的，
 不为 CI 失败新造标签）。
-6. **CI 变绿自动触发 Grok，不等于“每次 quality 跑完都触发”**：只有结论
-为 success 才触发；quality 对同一 head SHA 会跑两次（push +
-pull_request）。去重旧实现是查本工作流按 head SHA 的运行记录，**2026-11-14
-TASK-01 起改为 git ref CAS**（见第七节）：同一 head SHA 只触发一次，并发
-运行也只有一个赢家；失败重跑（结论 failure）不触发，ci-failure-notify
-负责通知。PR 已有 `state:qa-ready` 时也不重复触发（打标签路径已覆盖）。
-Grok 已于 2026-11-14 退役，该工作流当前在 Actions 层面 disabled（见第十节）。
+6. **CI 变绿后的冒烟执行者已更换（2026-11-14）**：原「CI 变绿自动
+触发 Grok」的 `agent-orchestrator.yml` 路径已摘除——Grok 退役
+（PR #46），该工作流在 Actions 层面 disabled、只剩手动 dispatch，
+**待删除**（见第十节）。现行链路：D:\02 本机 smoke-watcher 轮询
+检出 quality 已绿的 PR head → 本机跑 `ops\smoke\smoke.ps1` →
+贴回评论 → 通过才打 `smoke-passed`。旧路径的口径（只认 success
+结论、git ref CAS 去重、同一 head SHA 只触发一次）随其停用，
+仅作历史记录保留在第七节。
 7. **合入后自动分派只派一个任务**：`auto-dispatch.yml` 每次合并只找
 编号最小的就绪任务，优先给本次空闲的 builder；没有就绪任务时只记
 日志，不报错、不派错。已被分派过（有 TASK_ASSIGNED 评论）的任务不
