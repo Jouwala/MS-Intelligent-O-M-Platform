@@ -125,7 +125,7 @@ CI 作业（`.github/workflows/quality.yml`，2026-11-14 起由 5 个增至 7 �
 | 真实 GitHub Actions 上两个 workflow 真并发执行 | NOT TESTED / BLOCKED | 本机无 act/runner、无凭据；已用可注入假 GitHub API 做真实多线程 CAS 与故障注入测试。真实环境验证需在隔离仓库触发两条 workflow |
 | 真实 GitHub API 的 Link/422/限流在线行为 | **PASS（PR #64）** | 真实仓库验证覆盖 matching-refs 真实语义、重复 create 422、分页；并发现并修复「matching-refs 不分页」的真实语义差异（假 server 模拟不到） |
 | 真实 GitHub 多 checkout（模拟多 VM，真实 API） | **PASS（PR #64）** | 隔离私库 `Jouwala/noc-soc-ref-verify` + 两个独立 checkout + 真实 API：并发认领唯一赢家、旧 token fencing、Reaper CAS 回收后重认领、重叠/不重叠 scope、完成幂等与标签收敛，28/28 CHECK PASS；证据 `evidence/real-github-multivm-verify.txt` |
-| 真实多主机（跨机器）生产部署 | **BLOCKED（部署门槛）** | 代码权威层已跨机可用并有真实 API 证据；但**生产多 VM 部署仍需 owner 批准解除 #53 门槛**（Muse 2/3 独立验收 + owner 批准后才能解除） |
+| 真实多主机（跨机器）生产部署 | **已解除（owner 2026-11-15 批准）** | 代码权威层已跨机可用并有真实 API 证据；Muse 2/3 独立验收通过，owner 2026-11-15 批准解除 #53 门槛。生产部署前仍须完成真实两台物理 VM 联调（见最终验收报告 §五）。 |
 | 生产训练机部署 | BLOCKED | 任务书 §3.2/§15：部署需项目所有者另行授权，第三方不得部署 |
 | 真实任务队列/生产 Worker 凭据破坏性测试 | BLOCKED | 同上，全程只用隔离测试环境 |
 
