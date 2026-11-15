@@ -173,6 +173,13 @@ def test_auto_merge_gate_source_contract(auto_merge: str) -> None:
     assert "结果已过期，跳过" in auto_merge
 
 
+def test_watcher_records_smoked_and_failed_sha_in_state(watcher: str) -> None:
+    # 本机状态文件按 PR 记录冒烟时的完整 SHA：通过与失败各一份，
+    # 同一 head 不重复冒烟、失败等新 head 再跑都靠它（与标记互为冗余）。
+    assert "$state['smoked'][$key] = $sha" in watcher
+    assert "$state['failed'][$key] = $sha" in watcher
+
+
 def test_marker_contract_shared_by_watcher_and_gate(
     watcher: str, auto_merge: str
 ) -> None:
