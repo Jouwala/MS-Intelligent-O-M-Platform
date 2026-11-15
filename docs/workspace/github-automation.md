@@ -66,6 +66,7 @@ Muse 1 按 dispatch-rules.md 第四节做最终汇总（人工/Agent 环节，�
 | `smoke-watcher`（D:\02 本机脚本，**非 Actions 工作流**） | 轮询检出 `quality` 已绿的 open PR head | 在 D:\02 本机跑 `ops\smoke\smoke.ps1`（§8.1–8.4）→ 在 PR 贴回结果评论 → 通过才打 `smoke-passed` | 只对 quality 结论 success 的 head 执行；D:\02 被占用、MSNOC1 掉线等中断的结果作废重跑，不记通过也不记失败（协议第四节第 5 条） |
 | `auto-dispatch.yml`（2026-11-14 新增；TASK-01 改实现） | PR 关闭且 `merged == true`、base 为 main；或 auto-merge 合并成功后 `workflow_dispatch`（填 PR 号） | 调 `auto_dispatch.py`：校验 PR → 触发级对账（已登记则只补状态）→ 全量分页找就绪任务（`state:todo` + `agent:muse-2/3` + 依赖全关 + 无认领/分派评论）→ `POST /git/refs` 做 CAS 登记 → 发带 `dispatch_id` 的 TASK_ASSIGNED 评论 → 幂等补 `state:todo` / 摘 `state:blocked` | 优先派给本次合并空闲的 builder；依赖未满足的绝不分派；已认领 / 已分派的任务不动；无就绪任务只记日志；每次只派一个任务；dispatch 路径从 API 取 PR 并校验已合入 main；并发 / 重复投递只登记一次（第七节） |
 | `dispatch-check.yml`（2026-11-14 修 404；TASK-01 改实现） | Issue 新建 / 编辑 / 关闭 / 标签变化；每小时定时巡检 | 调 `dispatch_check.py`：全量分页读评论 / Issue 列表 / 依赖方搜索结果 → 缺字段提醒、依赖阻塞打 `state:blocked`、依赖解除幂等摘标签；**只检查不分派** | 只做提醒与标签，不合并、不关闭 Issue；评论 marker 分页扫描 + 超时对账（重复执行不产生第二条评论）；标签操作幂等（加标签去重、摘不存在的标签当成功）；查询 / 分页失败显式报错让运行变红 |
+| `refs-census.yml`（2026-11-15 新增，#76） | 每周一 03:17 UTC 定时 + 手动 dispatch | 调 `refs_census.py`：分页全量统计各调度 ref 家族数量（HWM 再按 issue 统计代次）→ 写 Step Summary → 任一阈值突破则退出码 2 让运行变红告警 | **只读**（`contents: read`），不删任何 ref；清理走 lease-reaper（自动）与第十一节人工策略；阈值是预警线非硬配额，可经仓库变量调整 |
 
 既有 workflow 不在 TASK-07 改动范围：`quality.yml`（检查本体）；
 `auto-merge.yml` 只加了 `update-branches` 作业与 push / dispatch 触发，
@@ -337,6 +338,8 @@ python -m pytest apps/agent-worker/tests -q -p no:cacheprovider
 
 本轮未提供自动清理脚本（避免误删导致重复分派）；后续如需自动化，应做成
 带 TTL / 白名单（跳过最近 N 天与未合并 PR）的独立作业。
+（2026-11-15 #76 起，全部 ref 家族的生命周期与监控见第十一节；本节只管
+`dispatch/**` 这一家的人工清理口径，与第十一节冲突时以第十一节为准。）
 
 ## 十、已知边界与 NOT TESTED（2026-11-14 TASK-01）
 
@@ -358,3 +361,50 @@ python -m pytest apps/agent-worker/tests -q -p no:cacheprovider
 - workflow YAML 结构校验（本机无 act，只验证可解析）：
   `python -c "import yaml, pathlib; [yaml.safe_load(p.read_text(encoding='utf-8')) for p in pathlib.Path('.github/workflows').glob('*.yml')]"`
   → 8 个 workflow 全部通过。
+
+## 十一、refs 生命周期与配额监控（2026-11-15，#76）
+
+权威层（ADR-7）与 TASK-07 分派把状态落在 refs 上，家族如下。共同原则：
+**删除 ref 会破坏 CAS 幂等**（已删的登记会被当成「未发生」而重复执行），
+所以任何清理都以「确认对应事件不会再被重投递」为前提；不确定就留着，
+ref 本身很便宜，误删的代价（重复分派/重复认领）远高于多留几百条。
+
+| 家族 | 产生方式 | 谁来删 | 保留口径 |
+| --- | --- | --- | --- |
+| `agent-hwm/issue-<N>/<代次>` | 每次认领/续租由 ref-CAS 递增 | **永不自动删**（高水位，删了代次会回退、fencing 失效） | 永久保留；仅当 issue 已关闭且该任务线彻底终结、经人工确认并在 issue 留记录后，才可人工删除该 issue 的全部 HWM |
+| `agent-lease/issue-<N>/...` | 认领时创建 | `lease-reaper.yml` 每 5 分钟删过期租约 | TTL 到期即删（自动，无需人工） |
+| `agent-scope/...` | 任务声明范围锁时创建 | `lease-reaper.yml` 删「无存活租约」的孤儿 scope | 随租约生命周期（自动） |
+| `agent-dispatch/...` | 调度器分派登记（CAS） | 无自动清理 | 对应 issue 关闭后保留 30 天，再按下方人工命令清理；未关闭 issue 的一条不删 |
+| `agent-reap/issue-<N>/<token>` | Reaper 抢回收权时创建 | 无自动清理 | 回收审计记录，保留 90 天后可人工清理 |
+| `dispatch/pr-merged/...`、`dispatch/qa-trigger/...` | TASK-07 分派/QA 登记 | 无自动清理 | 按第九节口径：对应 PR 已合并、issue 已关闭且保留满 30 天才可删；qa-trigger 在 PR 未合并前绝不删 |
+| `agent/task-*`（任务分支） | issue-to-pr 建分支 | PR 合并后由仓库设置/人工删分支 | 不是调度 ref，不参与配额告警；合并后及时删分支即可 |
+
+**监控**：`refs-census.yml` 每周一 03:17 UTC 跑 `refs_census.py` 只读普查
+（也可手动 dispatch 立即跑一次），结果写 Step Summary；预警线（默认值，
+仓库变量 `AGENT_REFS_WARN_TOTAL` / `AGENT_REFS_WARN_FAMILY` /
+`AGENT_REFS_WARN_HWM_PER_ISSUE` 可调）：调度 ref 合计 1000、单家族 500、
+单 issue 的 HWM 代次 100。突破任一线脚本退出码 2、运行变红即告警——
+它们是**预警线，不是 GitHub 硬配额**（GitHub 未公布单仓 ref 上限），
+目的是在列表变慢/分支噪音显著之前提醒按本节清理。手动立即普查：
+
+```bash
+REPO=Jouwala/noc-soc-intelligent-platform GH_TOKEN=<只读 token> \
+  python apps/control-plane/backend/dispatch/refs_census.py
+```
+
+2026-11-15 首次普查（本仓现状）：heads 49 条，调度 ref 合计仅 1 条
+（`dispatch/**` 1 条），HWM/lease/scope/dispatch 登记均为 0——权威层尚未
+在本仓跑过认领，本节治理的是**启用后的预期增长**，不是存量清理。
+
+**人工清理命令**（以 agent-dispatch 为例，其余家族换前缀同理）：
+
+```bash
+# 1) 先分页列出核对（--paginate 必带，默认只回第一页会漏）
+gh api "repos/{owner}/{repo}/git/matching-refs/heads/agent-dispatch" --paginate
+# 2) 逐条确认对应 issue 已关闭且超过保留期后，再逐条删除
+gh api -X DELETE "repos/{owner}/{repo}/git/refs/heads/agent-dispatch/<记录名>"
+```
+
+`matching-refs` 的分页缺口已在 #76 修复：`github_client.list_matching_refs`
+改走全量分页（此前只取第一页，GitHub 默认 per_page=30，ref 一多对账与
+普查都会静默漏数）；`gh api` 侧则必须显式带 `--paginate`。

@@ -1,0 +1,50 @@
+# 调度 refs 普查与配额告警（#76）
+#
+# GitHub 原生权威层的 refs（HWM/lease/scope/dispatch/reap）会随认领与
+# 续租持续累积，其中 HWM 只增不减。本 workflow 每周只读普查一次：
+# 调 apps/control-plane/backend/dispatch/refs_census.py 分页统计各家族
+# 数量，超预警线时脚本退出码 2 → 本 workflow 变红即告警。
+#
+# 设计要点：
+# - 只读：permissions 只给 contents: read，脚本本身不删任何 ref；
+#   清理走 lease-reaper（自动）与 github-automation.md 第十一节（人工）。
+# - 每周一 03:17 UTC + 可手动 workflow_dispatch（阈值可经仓库变量
+#   AGENT_REFS_WARN_TOTAL / AGENT_REFS_WARN_FAMILY /
+#   AGENT_REFS_WARN_HWM_PER_ISSUE 调整，见脚本 docstring）。
+# - 并发组保证不重叠；普查结果同时写进 Step Summary 便于回看。
+
+name: refs-census
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: refs-census
+  cancel-in-progress: false
+
+jobs:
+  census:
+    name: 统计调度 refs 数量并按阈值告警
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 执行 refs 普查（只读）
+        env:
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          # 日志/错误是中文：固定 UTF-8，避免 runner locale 差异导致输出乱码
+          PYTHONIOENCODING: utf-8
+        run: python apps/control-plane/backend/dispatch/refs_census.py
