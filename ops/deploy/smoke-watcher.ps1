@@ -17,7 +17,7 @@
   触发条件（与 agent-orchestrator 的去重逻辑一致）：
     · PR open、非草稿、base 是 main；
     · 同一 head SHA 的 quality 工作流有一次 completed + success；
-    · 该 PR 还没有 smoke-passed 标签，也没有 do-not-merge；
+    · 该 PR 还没有绑定当前 head 的 smoke-passed 标签（绑定旧 head 的会被摘除重跑），也没有 do-not-merge；
     · 同一 head SHA 没被本机冒烟过（状态文件 TMP\smoke-watcher-state.json）。
 
   为什么要 checkout（2026-11-14 实测补上）
@@ -37,6 +37,21 @@
   标签与 head SHA 的绑定：贴标签前重新读一次 PR，head 变了就放弃本次
   结果、不贴标签，等下一轮对新 head 重跑。绝不给旧 head 的结果贴到新
   head 上（phase-0 评估里的 P1 风险）。
+
+  QA 结果回写 Issue（TASK-06-A #48，协议第 6/7/8 类消息）：
+  冒烟开始前给关联 Issue 打 state:qa-ready 并发 QA_STARTED；通过发
+  QA_PASSED + state:qa-passed，失败发 QA_FAILED（结构化：PR、HEAD SHA、
+  失败项、错误信息、报告入口）+ state:qa-failed。评论带去重标记
+  （qa-started: / qa-result: pr-<N>-sha-<短SHA>），同一 (PR, SHA) 不重复
+  发；发前先查 Issue 评论里有没有同标记，不依赖本机状态文件。
+
+  smoke-passed 的 SHA 绑定（TASK-06-A #48，堵过期结果触发合并）：
+  贴到 PR 的冒烟报告评论首行带机器可读标记
+  <!-- smoke-result: pr-<N> sha-<40位SHA> result=passed|failed -->，
+  auto-merge.yml 合并前独立核对最后一条 passed 标记的 SHA 是否等于 PR
+  当前 head，对不上就跳过（不依赖本机进程在场）。若 PR 已有 smoke-passed
+  但绑定的是旧 head（或查不到绑定），watcher 摘除过期标签并对新 head
+  重跑冒烟，不再像以前那样见标签就永久跳过。
 
   Token：优先环境变量 SMOKE_GITHUB_TOKEN，其次 GITHUB_TOKEN / GH_TOKEN；
   都没有时回落到本机已登录的 `gh auth token`（token 只在进程内存里，
@@ -305,6 +320,133 @@ function Resolve-IssueNumber {
     return 0
 }
 
+function Get-UtcNowIso {
+    return (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+}
+
+function Get-IssueLabelNames {
+    param([int]$Number)
+    return @((Invoke-GitHubApi "/repos/$Repo/issues/$Number/labels") | ForEach-Object { $_.name })
+}
+
+function Set-IssueLabels {
+    param([int]$Number, [string[]]$Labels)
+    Invoke-GitHubApi "/repos/$Repo/issues/$Number/labels" 'PUT' @{ labels = $Labels } | Out-Null
+}
+
+function Remove-IssueLabel {
+    param([int]$Number, [string]$Label)
+    Invoke-GitHubApi "/repos/$Repo/issues/$Number/labels/$Label" 'DELETE' | Out-Null
+}
+
+function Set-IssueQaState {
+    # Issue 的 QA 状态标签单值化：摘掉 in-review 与三个 qa 状态，只留目标状态。
+    param([int]$Issue, [string]$NewState)
+    $qaStates = @('state:in-review', 'state:qa-ready', 'state:qa-passed', 'state:qa-failed')
+    $current = Get-IssueLabelNames -Number $Issue
+    $next = @($current | Where-Object { $qaStates -notcontains $_ })
+    if ($next -notcontains $NewState) { $next += $NewState }
+    if (($next -join ',') -ne ($current -join ',')) { Set-IssueLabels -Number $Issue -Labels $next }
+}
+
+function Test-IssueMarker {
+    # 去重：Issue 评论里已有同标记就不再发（不依赖本机状态文件）。
+    param([int]$Issue, [string]$Marker)
+    $comments = Invoke-GitHubApi "/repos/$Repo/issues/$Issue/comments?per_page=100"
+    foreach ($c in $comments) {
+        if ($c.body -and $c.body.Contains($Marker)) { return $true }
+    }
+    return $false
+}
+
+function Send-IssueComment {
+    param([int]$Issue, [string]$Body)
+    Invoke-GitHubApi "/repos/$Repo/issues/$Issue/comments" 'POST' @{ body = $Body } | Out-Null
+}
+
+function Get-SmokeResultBoundSha {
+    # 读 PR 评论里最后一条 result=passed 的 smoke-result 标记，返回其绑定的 SHA；没有返回 ''。
+    param([int]$PrNumber)
+    $comments = Invoke-GitHubApi "/repos/$Repo/issues/$PrNumber/comments?per_page=100"
+    $bound = ''
+    foreach ($c in $comments) {
+        if ($c.body -and $c.body -match 'smoke-result:\s*pr-\d+\s+sha-([0-9a-f]{40})\s+result=passed') {
+            $bound = $Matches[1]
+        }
+    }
+    return $bound
+}
+
+function Send-QaStarted {
+    param([int]$Issue, [int]$PrNumber, [string]$Sha, [string]$Short)
+    Set-IssueQaState -Issue $Issue -NewState 'state:qa-ready'
+    $marker = "qa-started: pr-$PrNumber-sha-$Short"
+    if (Test-IssueMarker -Issue $Issue -Marker $marker) {
+        Write-WatchLog "PR #$PrNumber QA_STARTED 已存在（$marker），不重复发。"
+        return
+    }
+    $body = @(
+        "<!-- agent-msg: QA_STARTED, task: #$Issue, from: smoke-watcher, at: $(Get-UtcNowIso) -->",
+        "<!-- $marker -->",
+        '',
+        '冒烟已开始（D:\02 本机 smoke-watcher）。',
+        '',
+        "- PR：#$PrNumber",
+        "- HEAD SHA：``$Sha``",
+        '- 预计时长：约 3–5 分钟'
+    ) -join "`n"
+    Send-IssueComment -Issue $Issue -Body $body
+    Write-WatchLog "PR #$PrNumber QA_STARTED 已回写 Issue #$Issue（head $Short）。"
+}
+
+function Send-QaResult {
+    param([int]$Issue, [int]$PrNumber, [string]$Sha, [string]$Short, [bool]$Passed, [string]$Report)
+    $marker = "qa-result: pr-$PrNumber-sha-$Short"
+    if ($Passed) {
+        Set-IssueQaState -Issue $Issue -NewState 'state:qa-passed'
+        $type = 'QA_PASSED'
+    } else {
+        Set-IssueQaState -Issue $Issue -NewState 'state:qa-failed'
+        $type = 'QA_FAILED'
+    }
+    if (Test-IssueMarker -Issue $Issue -Marker $marker) {
+        Write-WatchLog "PR #$PrNumber $type 已存在（$marker），不重复发。"
+        return
+    }
+    $lines = @(
+        "<!-- agent-msg: $type, task: #$Issue, from: smoke-watcher, at: $(Get-UtcNowIso) -->",
+        "<!-- $marker -->",
+        ''
+    )
+    if ($Passed) {
+        $lines += '冒烟通过（D:\02 本机 smoke-watcher）。'
+        $lines += ''
+        $lines += "- PR：#$PrNumber"
+        $lines += "- HEAD SHA：``$Sha``"
+        $lines += "- 通过项：冒烟全流程通过，完整报告见 PR #$PrNumber 的冒烟评论（报告首行 smoke-result 标记绑定本 SHA）。"
+        $lines += '- 标签：PR 已打 smoke-passed；本 Issue 已打 state:qa-passed。'
+    } else {
+        $lines += '冒烟失败（D:\02 本机 smoke-watcher）。'
+        $lines += ''
+        $lines += "- PR：#$PrNumber"
+        $lines += "- HEAD SHA：``$Sha``"
+        $lines += '- 失败项：'
+        $failLines = @()
+        foreach ($ln in ($Report -split "`n")) {
+            $t = $ln.Trim()
+            if ($t.StartsWith('<!--')) { continue }
+            if ($t -match '失败|✗|FAIL|未通过|结论') { $failLines += "  - $t" }
+            if ($failLines.Count -ge 12) { break }
+        }
+        if ($failLines.Count -eq 0) { $failLines += '  - 见完整报告。' }
+        $lines += $failLines
+        $lines += "- 错误信息：见完整报告 https://github.com/$Repo/pull/$PrNumber 的冒烟评论；本机日志：TMP\smoke-pr-$PrNumber-$Short.log"
+        $lines += '- 标签：本 Issue 已打 state:qa-failed；PR 未打 smoke-passed，等新 head 重跑。'
+    }
+    Send-IssueComment -Issue $Issue -Body ($lines -join "`n")
+    Write-WatchLog "PR #$PrNumber $type 已回写 Issue #$Issue（head $Short）。"
+}
+
 function Invoke-OneCycle {
     $state = Get-State
 
@@ -323,10 +465,31 @@ function Invoke-OneCycle {
 
         if ($pr.draft) { continue }
         if ($pr.base.ref -ne 'main') { continue }
-        if ($labels -contains 'smoke-passed') { continue }
         if ($labels -contains 'do-not-merge') { Write-SkipOnce "dnm-$n-$sha" "PR #$n 有 do-not-merge，跳过。"; continue }
 
         $key = "$n"
+        if ($labels -contains 'smoke-passed') {
+            # 已有 smoke-passed：只认绑定到当前 head 的结果（TASK-06-A #48）。
+            # 本机记录对得上、或 PR 评论里的 smoke-result 标记对得上，才算本 head 已过；
+            # 都对不上 = 标签已过期（旧 head 的结果），摘除后对新 head 重跑冒烟。
+            if ($state['smoked'][$key] -eq $sha) { continue }
+            $boundSha = ''
+            try { $boundSha = Get-SmokeResultBoundSha -PrNumber $n } catch {
+                Write-WatchLog "PR #$n 读 smoke-result 绑定失败：$($_.Exception.Message)，本轮跳过。"
+                continue
+            }
+            if ($boundSha -eq $sha) {
+                $state['smoked'][$key] = $sha
+                Save-State $state
+                continue
+            }
+            Write-WatchLog "PR #$n 的 smoke-passed 绑定的是旧 head（绑定=$boundSha），当前 head $short 已过期：摘除标签，对新 head 重跑冒烟。"
+            try { Remove-IssueLabel -Number $n -Label 'smoke-passed' } catch {
+                Write-WatchLog "PR #$n 摘除过期 smoke-passed 失败：$($_.Exception.Message)，本轮跳过。"
+                continue
+            }
+            $labels = @($labels | Where-Object { $_ -ne 'smoke-passed' })
+        }
         if ($OnlyPr -le 0) {
             if ($state['smoked'][$key] -eq $sha) { continue }
             if ($state['failed'][$key] -eq $sha) {
@@ -352,6 +515,10 @@ function Invoke-OneCycle {
         }
 
         $issue = Resolve-IssueNumber $pr
+        if ($issue -gt 0) {
+            try { Send-QaStarted -Issue $issue -PrNumber $n -Sha $sha -Short $short }
+            catch { Write-WatchLog "PR #$n QA_STARTED 回写 Issue #$issue 失败：$($_.Exception.Message)（不挡冒烟主流程）" }
+        }
 
         # ---- 切到 PR head（Grok 当年做的事），跑冒烟，finally 一定切回 ----
         $plan = Enter-PrCheckout -PrNumber $n -Sha $sha
@@ -388,6 +555,9 @@ function Invoke-OneCycle {
         if ($report.Length -gt 60000) {
             $report = $report.Substring(0, 60000) + "`n`n（报告过长已截断，完整版在 D:\02 的 TMP\smoke-pr-$n-$short.md）"
         }
+        $resultWord = 'failed'
+        if ($passed) { $resultWord = 'passed' }
+        $report = ("<!-- smoke-result: pr-{0} sha-{1} result={2} -->" -f $n, $sha, $resultWord) + "`n`n" + $report
         Invoke-GitHubApi "/repos/$Repo/issues/$n/comments" 'POST' @{ body = $report } | Out-Null
         Write-WatchLog "PR #$n 冒烟评论已贴（通过=$passed）。"
         if ($passed) {
@@ -399,6 +569,10 @@ function Invoke-OneCycle {
         } else {
             $state['failed'][$key] = $sha
             Write-WatchLog "PR #$n 冒烟未通过，未打标签；等新 head 再跑。"
+        }
+        if ($issue -gt 0) {
+            try { Send-QaResult -Issue $issue -PrNumber $n -Sha $sha -Short $short -Passed $passed -Report $report }
+            catch { Write-WatchLog "PR #$n QA 结果回写 Issue #$issue 失败：$($_.Exception.Message)" }
         }
         Save-State $state
     }

@@ -10,6 +10,12 @@
 # 安全阀：
 #   - 只合 base 为 main、未关闭、非草稿的 PR；
 #   - 有 do-not-merge 标签的一律不合；
+#   - smoke-passed 必须绑定当前 head SHA（TASK-06-A #48）：watcher 冒烟通过时
+#     在 PR 报告评论首行留机器可读标记
+#     <!-- smoke-result: pr-<N> sha-<40位SHA> result=passed -->，
+#     本工作流取最后一条 passed 标记的 SHA 与 PR 当前 head 比对；没有标记
+#     或对不上，一律视为过期结果跳过。判定只读 GitHub 上的评论，不依赖
+#     D:\02 本机进程在场（协议第二节补充规则：过期测试结果不得触发合并）；
 #   - 要求 head 提交上 quality 的全部运行都已完成且结论为 success；
 #   - 要求 head 提交上所有检查都已完成且结论为 success / skipped / neutral；
 #   - 合并失败（冲突、分支不是最新、保护规则拦截）只记日志，不让本次运行变红。
@@ -145,6 +151,17 @@ jobs:
             if [ "$BASE" != "main" ]; then echo "目标分支不是 main，跳过"; continue; fi
             if ! has_label 'smoke-passed'; then echo "没有 smoke-passed 标签，跳过"; continue; fi
             if has_label 'do-not-merge'; then echo "有 do-not-merge 标签，跳过"; continue; fi
+
+            # smoke-passed 的 SHA 绑定校验（TASK-06-A #48）：标签本身不带 SHA，
+            # 绑定记录在 watcher 贴的冒烟报告评论首行标记里。取最后一条
+            # result=passed 标记的 SHA 与当前 head 比对；缺失或不一致 = 结果
+            # 已过期（旧 head 冒烟通过后又推了新提交），不得合并。本判定只读
+            # GitHub 评论，不依赖 D:\02 本机进程在场。
+            SMOKE_SHA="$(curl -sS "${AUTH[@]}" "$API/issues/$PR/comments?per_page=100" | jq -r '[.[] | (.body // "") | capture("smoke-result: pr-[0-9]+ sha-(?<sha>[0-9a-f]{40}) result=passed"; "g") | .sha] | last // ""')"
+            if [ -z "$SMOKE_SHA" ]; then echo "smoke-passed 没有 SHA 绑定标记（旧流程标签或标记缺失），跳过"; continue; fi
+            if [ "$SMOKE_SHA" != "$HEAD_SHA" ]; then echo "smoke-passed 绑定的是旧 head $SMOKE_SHA，当前 head $HEAD_SHA，结果已过期，跳过"; continue; fi
+            echo "smoke-passed 已绑定当前 head（$SMOKE_SHA），继续评估"
+
             if [ "$MERGEABLE" = "false" ]; then echo "有冲突，跳过"; continue; fi
 
             # quality 的全部运行（push + pull_request）都必须完成且成功。
