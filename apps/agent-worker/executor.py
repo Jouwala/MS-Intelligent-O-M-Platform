@@ -14,6 +14,9 @@
     `taskkill /F /T /PID root` 强杀 → 逐个 tasklist 确认快照子孙消失
     （实现见 `windows_tree.py`；旧实现只杀直接子进程并误报 tree_exited=True，
     孙进程泄漏，Muse 3 验收实测为阻断缺陷）；
+- **环境白名单**：任务子进程不继承 Worker 的完整环境（里面可能有 Secret /
+  生产凭据），只传 `env_filter.build_task_env()` 过滤出的最小白名单，
+  部署追加项须经构造参数 `env_extra_allowed` 显式声明（#78）；
 - **取消**：执行期轮询 `cancel_event`，命中即终止进程组，结果带 killed 原因；
 - **续租回调**：`on_tick` 每个轮询周期调用一次，Worker 用它续任务租约
   （与心跳文件的「进程存活」是两条独立职责）。
@@ -37,6 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: E402
 
 _wintree = _bootstrap.load_sibling("windows_tree")
+_env_filter = _bootstrap.load_sibling("env_filter")
 
 Command = Union[Sequence[str], Callable[[Path], int]]
 
@@ -102,7 +106,11 @@ class Executor:
         poll_interval_s: float = DEFAULT_POLL_INTERVAL_S,
         windows_snapshot_interval_s: float = 2.0,
         log: Optional[Callable[[str], None]] = None,
+        env_extra_allowed: tuple = (),
     ) -> None:
+        #: 任务子进程环境白名单的部署追加项（变量名）；默认空——Secret 与
+        #: 生产凭据一律不进任务环境，追加必须显式、会随执行日志留痕（#78）。
+        self.env_extra_allowed = tuple(env_extra_allowed)
         self.timeout_s = timeout_s
         self.term_grace_s = term_grace_s
         self.kill_wait_s = kill_wait_s
@@ -137,7 +145,9 @@ class Executor:
 
     # -- 进程树 ---------------------------------------------------------------
     @staticmethod
-    def _spawn(argv: list[str], worktree: Path) -> tuple[subprocess.Popen, int]:
+    def _spawn(
+        argv: list[str], worktree: Path, env: Optional[dict] = None
+    ) -> tuple[subprocess.Popen, int]:
         kwargs: dict = {
             "cwd": str(worktree),
             "stdout": subprocess.PIPE,
@@ -145,6 +155,9 @@ class Executor:
             "text": True,
             "errors": "replace",
             "bufsize": 1,
+            # env=None 时 Popen 默认继承父进程环境——任务命令禁止走这条路，
+            # run() 永远传白名单过滤后的 env；None 只留给内部防御性调用。
+            "env": env,
         }
         if os.name == "posix":
             kwargs["start_new_session"] = True  # 新 Session → 新进程组，killpg 可覆盖整棵树
@@ -267,7 +280,19 @@ class Executor:
             else:
                 exit_code = int(command(worktree))
         else:
-            proc, pgid = self._spawn(list(command), worktree)
+            task_env = _env_filter.build_task_env(
+                extra_allowed=self.env_extra_allowed
+            )
+            if self.log is not None:
+                extra_note = (
+                    f"，额外放行 {sorted(self.env_extra_allowed)}"
+                    if self.env_extra_allowed
+                    else ""
+                )
+                self.log(
+                    f"任务环境白名单：放行 {len(task_env)} 个变量{extra_note}（#78）"
+                )
+            proc, pgid = self._spawn(list(command), worktree, env=task_env)
             pid = proc.pid
             tracked: set[int] = set()  # Windows：执行期快照到的子孙 PID
             chunks: list[str] = []
