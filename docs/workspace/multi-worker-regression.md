@@ -55,27 +55,31 @@ CI 作业（`.github/workflows/quality.yml`，2026-11-14 起由 5 个增至 7 �
 
 > 「本地」= Windows 本机实测；「Linux」= 由 ubuntu-latest CI 作业执行（POSIX 专用项）。
 >
-> **PR-6（2026-11-14）**：SQLite 权威实现及其专用测试（`test_scheduler_*` / `test_mirror.py`）
-> 已删除，对应能力由 `test_ref_*`、迁移后的 `test_worker_integration.py` 覆盖；下表逐行
-> 重编号由 Lead 统一校订，先以本节测试分层与 `multi-worker-github-native-authority.md` 为准。
+> **PR-6（2026-11-15）**：SQLite 权威实现及其专用测试（`test_scheduler_*` / `test_mirror.py`）
+> 已删除，下表已逐行改为 GitHub ref 权威层的对应用例（`test_ref_*` / 迁移后的
+> `test_worker_integration.py`）；权威唯一，不存在第二套裁决。
+>
+> **2026-11-15 真实 GitHub 验证（PR #64）**：`Jouwala/noc-soc-ref-verify` 两个独立
+> checkout 打真实 API，28 项 CHECK 全 PASS（证据 `evidence/real-github-multivm-verify.log`），
+> 覆盖并发认领/ fencing/过期回收/范围锁/完成幂等与真实 API 分页语义。
 
 | 编号 | 验收项目 | 自动化测试（文件::用例） | 本地 | Linux |
 | --- | --- | --- | --- | --- |
 | T01 | Issue 150 条分页 | `backend/tests/test_pagination.py::test_p01_p02_issues_full_pagination` | PASS | — |
 | T02 | Comments 150 条分页 | `test_pagination.py::test_p04_comments_full_pagination_150` | PASS | — |
 | T03 | 完成事件在第 2 页被正确识别 | `test_pagination.py::test_p05_completion_record_on_page_two_is_found` | PASS | — |
-| T04 | 同 Agent 两实例同时认领只一个成功 | `test_scheduler_claim.py::test_t02_threads_same_agent_different_instance_exactly_one_wins`、`test_t03_processes_file_db_exactly_one_wins` | PASS | — |
-| T05 | 不同 Agent 同时认领遵守任务唯一性 | `test_scheduler_claim.py::test_t05_different_agent_lease_held` | PASS | — |
-| T06 | 旧实例恢复后提交结果被 fencing 拒绝 | `test_scheduler_complete.py::test_c05_old_attempt_and_token_rejected`、`test_scheduler_claim.py::test_t07_expired_lease_can_be_reclaimed_and_old_worker_fenced` | PASS | — |
+| T04 | 同 Agent 两实例同时认领只一个成功 | `test_ref_concurrency.py::test_threads_claim_same_task_exactly_one_wins`、`test_two_processes_claim_same_task_exactly_one_wins`、`test_interleaving_winner_lease_gap_never_yields_two_winners` | PASS | — |
+| T05 | 不同 Agent 同时认领遵守任务唯一性 | `test_ref_claim.py::test_claim_other_instance_is_lease_held` | PASS | — |
+| T06 | 旧实例恢复后提交结果被 fencing 拒绝 | `test_ref_fencing.py::test_renew_then_old_token_cannot_do_anything`、`test_expired_lease_old_token_fenced_after_takeover`、`test_ref_completion.py::test_complete_old_token_after_renew_is_stale` | PASS | — |
 | T07 | 执行 200 秒心跳持续刷新 | `test_heartbeat.py::test_200s_task_stale_without_refresh_but_fresh_with_it`、`test_heartbeat_continues_while_task_is_running` | PASS | — |
 | T08 | 执行 30 分钟不被误杀 | `test_heartbeat.py::test_background_heartbeat_keeps_30min_task_not_stale`、`test_fresh_at_heartbeat_not_stale_over_30min_when_refreshed` | PASS | — |
 | T09 | 旧 Worker 忽略 SIGTERM 后最终确认退出 | `test_executor_process_tree.py::test_ignored_sigterm_escalates_to_sigkill`（POSIX）；Windows 真实停止路径由 `test_executor_process_tree.py::test_windows_timeout_kills_grandchild_and_tree_exited_true` 与 Muse 2 探针 W6 覆盖；`test_watchdog.py::test_restart_never_starts_new_before_old_confirmed_exit` | PASS（Windows 真实进程树；Muse 2 W6 独立验证） | PASS |
 | T10 | 孙进程超时后进程树全部清理 | `test_executor_process_tree.py::test_grandchild_process_is_reaped`（POSIX）、`test_windows_timeout_kills_grandchild_and_tree_exited_true`（Windows 真跑） | PASS（Windows 修复后；0a91985 上为 FAIL，Muse 2/3 独立发现） | PASS |
-| T11 | 租约过期后范围锁可回收 | `test_scheduler_scope.py::test_s06_expired_lease_locks_auto_invalid_without_reap`、`test_s07_reap_releases_locks_and_is_idempotent` | PASS | — |
-| T12 | 两 Worker 抢重叠范围只一个成功 | `test_scheduler_scope.py::test_s02_overlapping_scope_conflict`、`test_s09_two_instances_same_scope_only_one_wins` | PASS | — |
-| T13 | 两 Worker 不重叠范围可并发 | `test_scheduler_scope.py::test_s01_non_overlapping_scopes_both_allowed`、`test_s10_release_scope_allows_other_task` | PASS | — |
-| T14 | 完成评论成功、标签失败后重试修复 | `test_mirror.py::test_m04_label_failure_is_retried_and_repaired` | PASS | — |
-| T15 | 完成请求重复执行幂等 | `test_scheduler_complete.py::test_c02_replay_same_key_no_new_side_effects`、`test_worker_cleanup.py::test_repeated_complete_same_attempt_is_idempotent` | PASS | — |
+| T11 | 租约过期后范围锁可回收 | `test_ref_reap.py::test_reap_expired_deletes_lease_keeps_hwm_and_records_fields`、`test_ref_scope.py::test_stale_holder_lease_does_not_block`、`test_cleanup_orphans_removes_only_dead_holder_and_keeps_hwm` | PASS | — |
+| T12 | 两 Worker 抢重叠范围只一个成功 | `test_ref_scope.py::test_overlapping_scope_conflict_rolls_back_all_refs`、`test_concurrent_overlapping_only_one_winner` | PASS | — |
+| T13 | 两 Worker 不重叠范围可并发 | `test_ref_scope.py::test_non_overlapping_scopes_both_acquired`、`test_concurrent_non_overlapping_both_win` | PASS | — |
+| T14 | 完成评论成功、标签失败后重试修复 | `test_ref_completion.py::test_label_write_failure_is_retried_bounded`、`test_persistent_label_failure_does_not_fail_completion` | PASS | — |
+| T15 | 完成请求重复执行幂等 | `test_ref_completion.py::test_complete_idempotent_posts_one_comment`、`test_complete_same_attempt_different_key_replays`、`test_worker_cleanup.py::test_repeated_complete_same_attempt_is_idempotent` | PASS | — |
 | T16 | 执行命令失败状态正确、资源清理 | `test_worker_cleanup.py::test_execution_failure_keeps_diagnostics_but_releases_locks` | PASS | — |
 | T17 | Hook 校验失败状态正确、资源清理 | `test_worker_cleanup.py::test_blocked_hooks_releases_everything` | PASS | — |
 | T18 | 缺少执行命令状态正确、资源清理 | `test_worker_cleanup.py::test_blocked_no_command_releases_lease_and_scope` | PASS | — |
@@ -100,12 +104,12 @@ CI 作业（`.github/workflows/quality.yml`，2026-11-14 起由 5 个增至 7 �
 | # | 缺陷 | 主要回归测试 |
 | --- | --- | --- |
 | 1 | API 分页不完整 | `test_pagination.py::test_p01–p20`、`dispatch/tests/test_github_client.py` |
-| 2 | 同 Agent 不同实例重复认领 | `test_scheduler_claim.py::test_t02/t03/t04`、`test_real_scheduler_*` |
+| 2 | 同 Agent 不同实例重复认领 | `test_ref_concurrency.py`（线程/双进程）、`test_ref_claim.py` |
 | 3 | 心跳不覆盖长任务 | `test_heartbeat.py`（200s / 30min / 执行期持续） |
 | 4 | Watchdog 不等旧进程退出 | `test_watchdog.py::test_restart_never_starts_new_before_old_confirmed_exit`、`test_ignored_sigterm_escalates_to_sigkill` |
-| 5 | 过期范围锁不失效 | `test_scheduler_scope.py::test_s06/t_s07` |
+| 5 | 过期范围锁不失效 | `test_ref_reap.py`、`test_ref_scope.py`（过期租约不挡路/孤儿清理） |
 | 6 | 失败/阻塞/超时清理不完整 | `test_worker_cleanup.py`（清理矩阵 8 条） |
-| 7 | complete 缺少幂等恢复 | `test_scheduler_complete.py::test_c01–c12`、`test_mirror.py::test_m01–m11` |
+| 7 | complete 缺少幂等恢复 | `test_ref_completion.py`（幂等评论+标签重试）、`test_ref_fencing.py` |
 | 8 | auto-dispatch 并发重复分派 | `dispatch/tests/test_dispatch_registry.py`、`test_auto_dispatch.py` |
 | 9 | Linux 子进程/孙进程泄漏 | `test_executor_process_tree.py`（POSIX，Linux CI 执行） |
 | 10 | Worker 缺少取消处理 | `test_worker_cleanup.py::test_cancel_*`、`test_executor_process_tree.py::test_cancel_event_terminates_process_group` |
@@ -119,8 +123,9 @@ CI 作业（`.github/workflows/quality.yml`，2026-11-14 起由 5 个增至 7 �
 | 项 | 状态 | 原因与补救 |
 | --- | --- | --- |
 | 真实 GitHub Actions 上两个 workflow 真并发执行 | NOT TESTED / BLOCKED | 本机无 act/runner、无凭据；已用可注入假 GitHub API 做真实多线程 CAS 与故障注入测试。真实环境验证需在隔离仓库触发两条 workflow |
-| 真实 GitHub API 的 Link/422/限流在线行为 | NOT TESTED | 无 token、无网络写权限；实现按官方文档 + 假 API 覆盖 |
-| 真实多主机（跨机器）调度 | **BLOCKED（部署门槛）** | 生产拓扑已确认为多台 VM 各自跑 Worker；当前权威层是单机 SQLite，跨 VM 不互斥。**在 GitHub 原生 ref-CAS 权威层合入前禁止多 VM 部署**（见 design 文档第十三节）；单机多实例可用 |
+| 真实 GitHub API 的 Link/422/限流在线行为 | **PASS（PR #64）** | 真实仓库验证覆盖 matching-refs 真实语义、重复 create 422、分页；并发现并修复「matching-refs 不分页」的真实语义差异（假 server 模拟不到） |
+| 真实 GitHub 多 checkout（模拟多 VM，真实 API） | **PASS（PR #64）** | 隔离私库 `Jouwala/noc-soc-ref-verify` + 两个独立 checkout + 真实 API：并发认领唯一赢家、旧 token fencing、Reaper CAS 回收后重认领、重叠/不重叠 scope、完成幂等与标签收敛，28/28 CHECK PASS；证据 `evidence/real-github-multivm-verify.log` |
+| 真实多主机（跨机器）生产部署 | **BLOCKED（部署门槛）** | 代码权威层已跨机可用并有真实 API 证据；但**生产多 VM 部署仍需 owner 批准解除 #53 门槛**（Muse 2/3 独立验收 + owner 批准后才能解除） |
 | 生产训练机部署 | BLOCKED | 任务书 §3.2/§15：部署需项目所有者另行授权，第三方不得部署 |
 | 真实任务队列/生产 Worker 凭据破坏性测试 | BLOCKED | 同上，全程只用隔离测试环境 |
 
