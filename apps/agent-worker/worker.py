@@ -370,6 +370,12 @@ class AgentWorker:
                 if not self.lifecycle.renew(active, S):
                     watcher.trigger()  # 租约已丢：立刻停掉执行，别再替新实例干活
 
+        def on_spawn(pid: int, pgid: int) -> None:
+            # 把任务子进程 pid/pgid 写进心跳（#77）：本进程若异常退出，
+            # 看门狗靠这条持久记录回收上一代的孤儿进程树。
+            if self._heartbeat is not None:
+                self._heartbeat.update(task_pid=pid, task_pgid=pgid)
+
         watcher.start()
         try:
             result = self.executor.run(
@@ -380,14 +386,20 @@ class AgentWorker:
                 log_dir=active.worktree / "TMP",
                 cancel_event=watcher.event,
                 on_tick=on_tick,
+                on_spawn=on_spawn,
             )
         except Exception:
-            # 执行器自身异常：无法确认子进程树是否退出 → 保守起来不让删 worktree
+            # 执行器自身异常：无法确认子进程树是否退出 → 保守起来不让删 worktree；
+            # 心跳里的 task_pid 也不清除，留给看门狗按 #77 口径回收。
             active.executor_confirmed_exit = False
             raise
         finally:
             watcher.stop()
         active.executor_confirmed_exit = result.tree_exited
+        if result.tree_exited and self._heartbeat is not None:
+            # 进程树已确认退出：清掉心跳里的 pid 记录，免得下一代误回收。
+            # tree_exited=False 时保留记录——那棵树可能还活着，正是 #77 要收的。
+            self._heartbeat.update(task_pid=0, task_pgid=0)
         return result
 
     def _persist_result(self, active: ActiveTask, result) -> None:

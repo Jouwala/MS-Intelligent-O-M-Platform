@@ -65,6 +65,20 @@ def read_heartbeat_timestamp(path: Path) -> Optional[float]:
         return stat.st_mtime
 
 
+def read_heartbeat_payload(path: Path) -> Optional[dict]:
+    """读取心跳 JSON 载荷原文；文件不存在/解析失败返回 None。
+
+    与 read_heartbeat_timestamp 不同，这里不做 mtime 兜底：调用方（看门狗
+    的孤儿回收）要的是载荷里的 pid / task_pid 等字段，半截 JSON 猜不出
+    字段，宁可按「无记录」处理，不拿过期猜测去杀进程。
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def read_heartbeat_age(path: Path, now_ts: float) -> Optional[float]:
     """读取心跳年龄（秒）；文件不存在返回 None。
 
@@ -105,16 +119,34 @@ class HeartbeatWriter:
         self._thread: Optional[threading.Thread] = None
         self._task_id = ""
         self._state = "idle"
+        self._task_pid: Optional[int] = None
+        self._task_pgid: Optional[int] = None
         self.writes = 0
 
     # -- 状态 ---------------------------------------------------------------
-    def update(self, *, task_id: Optional[str] = None, state: Optional[str] = None) -> None:
-        """更新心跳附加状态（执行期 task/state 会变，看门狗与排障按它定位）。"""
+    def update(
+        self,
+        *,
+        task_id: Optional[str] = None,
+        state: Optional[str] = None,
+        task_pid: Optional[int] = None,
+        task_pgid: Optional[int] = None,
+    ) -> None:
+        """更新心跳附加状态（执行期 task/state 会变，看门狗与排障按它定位）。
+
+        task_pid / task_pgid 是当前任务子进程的 pid 与进程组 id（#77 孤儿
+        回收的唯一持久线索）：任务启动时写入，任务树确认退出后传 0 清除。
+        None 表示本次不改动（与 task_id/state 的口径一致）。
+        """
         with self._lock:
             if task_id is not None:
                 self._task_id = task_id
             if state is not None:
                 self._state = state
+            if task_pid is not None:
+                self._task_pid = task_pid if task_pid > 0 else None
+            if task_pgid is not None:
+                self._task_pgid = task_pgid if task_pgid > 0 else None
 
     def payload(self) -> dict:
         with self._lock:
@@ -125,6 +157,8 @@ class HeartbeatWriter:
                 "at": self.clock().astimezone(timezone.utc).isoformat(),
                 "task": self._task_id,
                 "state": self._state,
+                "task_pid": self._task_pid,
+                "task_pgid": self._task_pgid,
             }
 
     # -- 原子写 -------------------------------------------------------------
@@ -192,6 +226,8 @@ class HeartbeatWriter:
             "at": self.clock().astimezone(timezone.utc).isoformat(),
             "task": self._task_id,
             "state": self._state,
+            "task_pid": self._task_pid,
+            "task_pgid": self._task_pgid,
         }
         self._atomic_write(payload)
         self.writes += 1
