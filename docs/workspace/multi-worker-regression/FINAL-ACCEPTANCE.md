@@ -53,17 +53,22 @@
   已补回归并通过**独立变异复验 → B1/R2 CLOSED**；建议 owner 批准解除门槛。
 - 两方均明确：**解除权在 owner**，且解除前应完成生产前置项。
 
-## 五、多 VM 部署门槛（仍生效）
+## 五、多 VM 部署门槛（已解除，owner 2026-11-15 批准）
 
-`multi-worker-scheduler-design.md` §十三 / `agent-protocol.md` §8.4 / 本文：
-**在 owner 批准前，禁止把 Worker 部署到两台及以上 VM。**
+`multi-worker-scheduler-design.md` §十三 / 本文：
+**门槛已于 2026-11-15 由 owner 批准解除；多 VM 部署不再禁止。**
 
-解除前置（两方共同建议）：
-1. 本报告与 B1 复审/证据入库（本 PR 完成）；
-2. 生产部署前完成一次**真实两台物理 VM 联调**（当前只做了两个独立 checkout + 真实 API）；
-3. 启用 Reaper cron 并配置失败告警；
-4. refs 生命周期/配额监控（HWM 每次续租新增、matching-refs 不分页的真实语义）。
-批准解除后，`§十三` 与矩阵 §六的 BLOCKED 项由 owner 或授权人更新。
+解除依据：
+1. 本报告与 B1 复审/证据入库（PR #67 完成）；
+2. GitHub 原生 ref-CAS 权威层已实施并合入（PR #60~#65），SQLite 权威已删除；
+3. Muse 2 最终验收 T01–T30 30/30 PASS；Muse 3 B1/R2 已闭环；
+4. **owner 2026-11-15 明确批准解除**。
+
+生产部署前置（解除后仍须完成，非门槛条件）：
+1. 生产部署前完成一次**真实两台物理 VM 联调**（当前只做了两个独立 checkout + 真实 API）；
+2. 启用 Reaper cron 并配置失败告警；
+3. refs 生命周期/配额监控（HWM 每次续租新增、matching-refs 不分页的真实语义）。
+`§十三` 与矩阵 §六的 BLOCKED 项已随本解除同步更新。
 
 ## 六、已知风险与后续项（非阻断）
 
