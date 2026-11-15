@@ -10,7 +10,7 @@
 #   smoke-passed   绿色 #0e8a16：D:\02 本机冒烟通过（smoke-watcher 自动打），自动合并的门禁之一
 #   merge-squash   蓝色 #1d76db：合并时用 squash，否则用 merge 提交
 #   do-not-merge   红色 #b60205：一票否决，有它在 auto-merge 绝不合并
-#   state:qa-ready            已停用（2026-11-14 Grok 退役）：冒烟改由 D:\02 本机 smoke-watcher 自动触发
+#   （state:qa-ready 已在下方 labels 列表定义，2026-11-15 TASK-06-A 起现行使用：smoke-watcher 冒烟开始时打）
 #
 # 配色约定：
 #   agent:  绿色/紫色系（谁负责）

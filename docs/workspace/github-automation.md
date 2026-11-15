@@ -29,7 +29,13 @@ Worker 在分支上提交代码，草稿 PR 转正式
 │ 失败 → ci-failure-notify.yml：到 PR 与 Issue 通知 builder
 ▼
 quality 全绿 → D:\02 本机 smoke-watcher 轮询检出 PR head → 跑 ops\smoke\smoke.ps1
-│ → 贴回评论 → 通过才打 smoke-passed
+│ → 贴回评论（首行带 smoke-result 绑定标记）→ 通过才打 smoke-passed
+│ 同时回写关联 Issue：开始发 QA_STARTED + state:qa-ready，
+│ 通过发 QA_PASSED + state:qa-passed，失败发 QA_FAILED + state:qa-failed
+│ （TASK-06-A #48；QA/修复闭环逐环映射见 qa-fix-loop.md）
+│ 失败支路：auto-fix.yml 检出 state:qa-failed + QA_FAILED 双信号 →
+│ 自动建修复 Issue 回派原开发 Agent + 发 FIX_REQUESTED，修复 PR 重新走
+│ 本链；同一根任务第 4 次失败打 needs-replan 停手（TASK-06-B #49）
 （smoke-watcher 是 D:\02 本机脚本，不是 Actions 工作流，见第二节；
 原 agent-orchestrator.yml 自动 POST webhook 请 Grok 冒烟的路径已随
 Grok 2026-11-14 退役摘除，该工作流待删除，见第二节与第十节）
@@ -63,7 +69,8 @@ Muse 1 按 dispatch-rules.md 第四节做最终汇总（人工/Agent 环节，�
 | `pr-merged-writeback.yml` | PR 关闭且 `merged == true`、base 为 main；或 auto-merge 合并成功后 `workflow_dispatch`（填 PR 号） | 解析关联 Issue → 打 `state:merged`、摘其余 `state:` 标签 → 发 PR_MERGED 评论 → 关闭 Issue | 解析不到关联 Issue 就跳过；已回写过的重复触发跳过；dispatch 路径从 API 取 PR 并校验已合入 main |
 | `auto-merge.yml` 的 `auto-merge` 作业 | 合并成功后（本作业内） | 向 `auto-dispatch.yml` 与 `pr-merged-writeback.yml` 各 POST 一次 `workflow dispatch`（`ref: main`，`inputs: pr_number`） | dispatch 失败只记日志，不让合并作业变红（合并已发生）；下游工作流自身幂等，重复触发不重复评论/分派 |
 | `agent-orchestrator.yml`（2026-11-14 扩展；TASK-01 改实现，现 Actions 层面 disabled） | 仅手动 dispatch（自动触发路径已从 `on:` 摘除；工作流 `disabled_manually`） | **已停用，待删除**：Grok 已于 2026-11-14 退役（PR #46），此路径不再使用。原动作（历史）：调 `qa_dispatch.py` 按 head SHA 定位 open PR → `POST /git/refs` 登记 qa-trigger ref → POST webhook 请 Grok 冒烟。其文件头注释已写明「重新启用前先确认 Grok 是否真的回来；不回来就删掉本文件」——删除动作不在 TASK-06-C 范围，待 Muse 1 与用户决定。现行冒烟链路见下一行 smoke-watcher | 已停用，不再执行；原安全阀口径（只认 success、ref CAS 去重等）仅作历史记录 |
-| `smoke-watcher`（D:\02 本机脚本，**非 Actions 工作流**） | 轮询检出 `quality` 已绿的 open PR head | 在 D:\02 本机跑 `ops\smoke\smoke.ps1`（§8.1–8.4）→ 在 PR 贴回结果评论 → 通过才打 `smoke-passed` | 只对 quality 结论 success 的 head 执行；D:\02 被占用、MSNOC1 掉线等中断的结果作废重跑，不记通过也不记失败（协议第四节第 5 条） |
+| `smoke-watcher`（D:\02 本机脚本，**非 Actions 工作流**） | 轮询检出 `quality` 已绿的 open PR head | 在 D:\02 本机跑 `ops\smoke\smoke.ps1`（§8.1–8.4）→ 在 PR 贴回结果评论（首行 `smoke-result` 标记绑定 head SHA）→ 通过才打 `smoke-passed`；同时回写关联 Issue 的 QA 三类消息与 qa 状态标签（开始 QA_STARTED + `state:qa-ready`、通过 QA_PASSED + `state:qa-passed`、失败 QA_FAILED + `state:qa-failed`，TASK-06-A #48），绑定旧 head 的 `smoke-passed` 先摘除再重跑 | 只对 quality 结论 success 的 head 执行；D:\02 被占用、MSNOC1 掉线等中断的结果作废重跑，不记通过也不记失败（协议第四节）；QA 回写带 (PR, SHA) 去重标记，逐环映射见 `qa-fix-loop.md` |
+| `auto-fix.yml`（TASK-06-B #49） | Issue 被打 `state:qa-failed`（`issues: labeled`）；或人工 `workflow_dispatch` 重放 | 复核双信号（标签 + 最新 QA_FAILED 评论）后自动建修复 Issue（模板八节、回派原开发 Agent、失败项转验收项），在原 Issue 发 FIX_REQUESTED；轮次按根任务计数（修复 Issue 正文的 `auto-fix:` 标记），第 4 次失败只打 `needs-replan` + 说明评论 | 只建 Issue、发评论、打 `needs-replan`，不改代码、不合并、不关原 Issue；同一根任务 + 同一失败 HEAD 只建一个修复 Issue；取不到原开发 Agent 就不派任何人、注明请 Muse 1 指派；逐环映射见 `qa-fix-loop.md` |
 | `auto-dispatch.yml`（2026-11-14 新增；TASK-01 改实现） | PR 关闭且 `merged == true`、base 为 main；或 auto-merge 合并成功后 `workflow_dispatch`（填 PR 号） | 调 `auto_dispatch.py`：校验 PR → 触发级对账（已登记则只补状态）→ 全量分页找就绪任务（`state:todo` + `agent:muse-2/3` + 依赖全关 + 无认领/分派评论）→ `POST /git/refs` 做 CAS 登记 → 发带 `dispatch_id` 的 TASK_ASSIGNED 评论 → 幂等补 `state:todo` / 摘 `state:blocked` | 优先派给本次合并空闲的 builder；依赖未满足的绝不分派；已认领 / 已分派的任务不动；无就绪任务只记日志；每次只派一个任务；dispatch 路径从 API 取 PR 并校验已合入 main；并发 / 重复投递只登记一次（第七节） |
 | `dispatch-check.yml`（2026-11-14 修 404；TASK-01 改实现） | Issue 新建 / 编辑 / 关闭 / 标签变化；每小时定时巡检 | 调 `dispatch_check.py`：全量分页读评论 / Issue 列表 / 依赖方搜索结果 → 缺字段提醒、依赖阻塞打 `state:blocked`、依赖解除幂等摘标签；**只检查不分派** | 只做提醒与标签，不合并、不关闭 Issue；评论 marker 分页扫描 + 超时对账（重复执行不产生第二条评论）；标签操作幂等（加标签去重、摘不存在的标签当成功）；查询 / 分页失败显式报错让运行变红 |
 | `refs-census.yml`（2026-11-15 新增，#76） | 每周一 03:17 UTC 定时 + 手动 dispatch | 调 `refs_census.py`：分页全量统计各调度 ref 家族数量（HWM 再按 issue 统计代次）→ 写 Step Summary → 任一阈值突破则退出码 2 让运行变红告警 | **只读**（`contents: read`），不删任何 ref；清理走 lease-reaper（自动）与第十一节人工策略；阈值是预警线非硬配额，可经仓库变量调整 |
