@@ -342,7 +342,7 @@ python -m pytest apps/agent-worker/tests -q -p no:cacheprovider
 
 | 项 | 状态 | 说明 |
 | --- | --- | --- |
-| 真实 GitHub Actions 上的并发执行（两 workflow 同时跑） | **NOT TESTED / BLOCKED** | 本机无 GitHub Actions runner、无 `act`；并发 / 幂等改用内存假 GitHub API 做真实多线程 CAS 测试（`dispatch/tests/`） |
+| 真实 GitHub Actions 上的并发执行（两 workflow 同时跑） | **已验证（2026-11-15，#80）** | 隔离仓 `ref-cas-concurrency-probe` 两条 workflow 同发令时刻并发 5 轮，每轮恰好一个赢家；报告见 `docs/workspace/ref-cas-concurrency-verification.md`。本机多线程假 API 测试（`dispatch/tests/`）仍保留为离线回归 |
 | 真实 GitHub API 的分页 Link / 422 / ref 路径在线行为 | **NOT TESTED** | 本机无仓库 token；实现按官方 REST 文档。单 ref 的 `GET /git/ref` 与 `DELETE /git/refs` 用 `heads/<branch>` 形式，`POST /git/refs` 的 payload 用完整 `refs/heads/...` |
 | ubuntu-latest 上的 POSIX 进程 / 信号行为 | **NOT TESTED** | 本机 Windows；由新增的 `agent-linux-process-tests` 作业在 CI 真实执行 |
 | `agent-orchestrator.yml` 重新启用 | **BLOCKED（等决策）** | 该工作流在仓库 Actions 配置里仍是 `disabled_manually`（`gh workflow disable`），本轮只改实现未改开关；且 `on:` 目前只剩 `workflow_dispatch`（Grok 已退役）。重新启用前先确认 Grok 是否恢复 |
