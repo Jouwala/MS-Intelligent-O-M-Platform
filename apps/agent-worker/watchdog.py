@@ -24,6 +24,19 @@
    会把心跳证据时间戳与本次实例的 `_started_at` 比较：**证据早于本次启动
    ⇒ 视为尚无本次心跳**，只按 `start_grace_s` 宽限判断。
 
+第五个问题（#77，2026-11-15）：
+
+5. **Worker 根进程自行退出后任务子进程成孤儿**：executor 给每个任务子
+   进程开独立会话/进程组，根进程崩溃或被杀时子进程被 init 收养、继续
+   运行；旧 `_stop()` 只在根进程还活着时才发组信号，根已死时 `_restart`
+   确认根退出就直接拉新实例，上一代的任务进程树无人回收、永久泄漏，
+   且任务子进程 pid 此前没有任何持久记录，想收也找不到。现在心跳载荷
+   带 `task_pid` / `task_pgid`（Worker 经 executor 的 on_spawn 回调写入、
+   任务树确认退出后清除），看门狗在**启动时与每次重启拉新实例前**调
+   `_reap_previous_generation()`：上一代 Worker pid 已死、其任务子进程
+   仍存活时，校验进程组与工作目录（防 pid 复用误杀）后整组回收；
+   上一代还活着则不碰（那是另一个在跑的实例，不是孤儿）。
+
 可注入 process_factory / clock / sleep：离线自测不需要真的等时间流逝。
 
 心跳文件命名约定与 worker.py 一致：`<repo>/.agent-worktrees/.heartbeat-<agent>.json`。
@@ -46,6 +59,54 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: E402
 
 _heartbeat = _bootstrap.load_sibling("heartbeat")
+
+try:
+    _wintree = _bootstrap.load_sibling("windows_tree")
+except Exception:  # noqa: BLE001 - 非 Windows/缺失时 pid 存活判定走本地回退
+    _wintree = None
+
+
+def _pid_alive(pid: int) -> bool:
+    """pid 是否存活（POSIX kill(pid, 0)；Windows 走 windows_tree）。
+
+    拿不到确定证据时按「不存活」返回——孤儿回收的调用方还会做进程组与
+    工作目录两道校验，单点误判不会直接导致误杀。
+    """
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    if os.name == "posix":
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True  # 存在但无权发信号
+        except OSError:
+            return False
+    if _wintree is not None:
+        return bool(_wintree.pid_alive(pid))
+    return False
+
+
+def _proc_pgid(pid: int) -> Optional[int]:
+    """进程的进程组 id（仅 POSIX）；取不到返回 None。"""
+    if os.name != "posix":
+        return None
+    try:
+        return os.getpgid(pid)
+    except (ProcessLookupError, PermissionError, OSError):
+        return None
+
+
+def _proc_cwd(pid: int) -> Optional[Path]:
+    """进程当前工作目录（仅 POSIX /proc）；取不到返回 None。"""
+    if os.name != "posix":
+        return None
+    try:
+        return Path(os.readlink(f"/proc/{pid}/cwd"))
+    except OSError:
+        return None
 
 
 @dataclass
@@ -185,6 +246,105 @@ class Watchdog:
         self.log("[watchdog] 严重：Worker 未确认退出，保留句柄且不再拉起新实例")
         return False
 
+    # -- 孤儿回收（#77） ------------------------------------------------------------
+    def _reap_previous_generation(self) -> None:
+        """回收上一代 Worker 遗留的任务进程树（根进程异常退出留下的孤儿）。
+
+        证据链：心跳载荷里的 pid（上一代 Worker）+ task_pid/task_pgid
+        （它最后一个任务的子进程）。判定顺序（任一不成立就不动手）：
+        1. 有 task_pid 记录且该进程仍存活；
+        2. 上一代 Worker pid 已确认死亡（还活着 = 另一个在跑的实例，
+           它的子进程不是孤儿）；
+        3. 防 pid 复用误杀：子进程的实际进程组须与记录一致（POSIX），
+           且其工作目录位于 worktree 根目录之下（任务子进程的 cwd 恒为
+           其 worktree）；两项都取不到证据时保守跳过。此项为 POSIX
+           口径——Windows 无进程组/cwd 证据，只靠「上一代已死 + 记录
+           pid」判定，与既有 _signal 的 taskkill 路径同一风险口径。
+        回收动作与 _stop 同口径：整组 SIGTERM → 宽限 → SIGKILL。
+        """
+        payload = _heartbeat.read_heartbeat_payload(self.heartbeat_file)
+        if not payload:
+            return
+        task_pid = payload.get("task_pid")
+        if not isinstance(task_pid, int) or task_pid <= 0:
+            return
+        prev_pid = payload.get("pid")
+        if isinstance(prev_pid, int) and prev_pid > 0 and _pid_alive(prev_pid):
+            self.log(
+                f"[watchdog] 上一代 Worker（pid={prev_pid}）仍存活，"
+                "其任务子进程不按孤儿处理"
+            )
+            return
+        if not _pid_alive(task_pid):
+            return
+        task_pgid = payload.get("task_pgid")
+        pgid = task_pgid if isinstance(task_pgid, int) and task_pgid > 0 else task_pid
+        if os.name == "posix":
+            actual_pgid = _proc_pgid(task_pid)
+            if actual_pgid is not None and actual_pgid != pgid:
+                self.log(
+                    f"[watchdog] 孤儿候选 pid={task_pid} 进程组不符"
+                    f"（实际 {actual_pgid} ≠ 记录 {pgid}），疑似 pid 复用，跳过"
+                )
+                return
+            cwd = _proc_cwd(task_pid)
+            root = self.heartbeat_file.parent
+            if actual_pgid is None and cwd is None:
+                self.log(
+                    f"[watchdog] 孤儿候选 pid={task_pid} 无校验证据"
+                    "（进程组与工作目录都取不到），保守跳过"
+                )
+                return
+            if cwd is not None and cwd != root and root not in cwd.parents:
+                self.log(
+                    f"[watchdog] 孤儿候选 pid={task_pid} 工作目录 {cwd} "
+                    f"不在 worktree 根 {root} 之下，疑似 pid 复用，跳过"
+                )
+                return
+        self.log(
+            f"[watchdog] 回收上一代孤儿任务进程树：pid={task_pid} pgid={pgid}"
+            f"（上一代 Worker pid={prev_pid} 已退出）"
+        )
+        self._kill_orphan_tree(task_pid, pgid)
+
+    def _kill_orphan_tree(self, pid: int, pgid: int) -> bool:
+        """整组 TERM → 宽限 → KILL，确认组内进程消失；返回是否确认清干净。"""
+        if os.name == "posix":
+            for force in (False, True):
+                try:
+                    os.killpg(pgid, signal.SIGKILL if force else signal.SIGTERM)
+                except (ProcessLookupError, PermissionError, OSError):
+                    return not _pid_alive(pid)
+                deadline = self.clock() + (
+                    self.config.kill_wait_s if force else self.config.term_grace_s
+                )
+                while self.clock() < deadline:
+                    try:
+                        os.killpg(pgid, 0)
+                    except (ProcessLookupError, PermissionError, OSError):
+                        return True
+                    if self._sleep is not None:
+                        self._sleep(0.2)
+                    else:
+                        time.sleep(0.2)
+            try:
+                os.killpg(pgid, 0)
+                return False
+            except (ProcessLookupError, PermissionError, OSError):
+                return True
+        # Windows：taskkill /T 按 pid 杀整棵树（与 _signal 同口径）
+        for force in (False, True):
+            args = ["taskkill", "/T", "/PID", str(pid)]
+            if force:
+                args.insert(1, "/F")
+            try:
+                subprocess.run(args, capture_output=True, timeout=30)
+            except (OSError, subprocess.SubprocessError):
+                pass
+            if not _pid_alive(pid):
+                return True
+        return not _pid_alive(pid)
+
     def _start(self) -> None:
         self._proc = self.process_factory(self.worker_cmd)
         self._started_at = self.clock()
@@ -200,6 +360,9 @@ class Watchdog:
         if not self._stop():
             # 绝不双实例：宁可放弃重启并退出，也不让两个 Worker 同时跑
             return False
+        # 旧根若是自行退出，它的任务进程树不在 _stop 的信号范围内（根已
+        # 死、无组可发）：拉新实例前按心跳记录回收上一代孤儿（#77）。
+        self._reap_previous_generation()
         self._start()
         return True
 
@@ -241,6 +404,9 @@ class Watchdog:
     def run(self, max_cycles: Optional[int] = None) -> int:
         """返回：0=正常停止（max_cycles 到达或被信号要求停），2=重启失败放弃。"""
         self._install_signal_handlers()
+        # 看门狗自身若是被重启拉起的，上一代 Worker 可能已经死了并留下
+        # 孤儿任务进程：拉起本代 Worker 前先按心跳记录回收一次（#77）。
+        self._reap_previous_generation()
         self._start()
         cycles = 0
         try:

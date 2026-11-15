@@ -20,6 +20,9 @@
 - **取消**：执行期轮询 `cancel_event`，命中即终止进程组，结果带 killed 原因；
 - **续租回调**：`on_tick` 每个轮询周期调用一次，Worker 用它续任务租约
   （与心跳文件的「进程存活」是两条独立职责）。
+- **启动回调**：`on_spawn(pid, pgid)` 在任务子进程拉起后调用一次，
+  Worker 用它把子进程 pid/pgid 写进心跳，作为根进程异常退出后孤儿
+  回收的持久线索（#77）。
 
 `changed_files()/commit_in_scope()` 的既有行为保持不变。
 """
@@ -264,6 +267,7 @@ class Executor:
         *,
         cancel_event: Optional[threading.Event] = None,
         on_tick: Optional[Callable[[], None]] = None,
+        on_spawn: Optional[Callable[[int, int], None]] = None,
     ) -> ExecutionResult:
         timeout = timeout_s if timeout_s is not None else self.timeout_s
         started = time.monotonic()
@@ -294,6 +298,11 @@ class Executor:
                 )
             proc, pgid = self._spawn(list(command), worktree, env=task_env)
             pid = proc.pid
+            if on_spawn is not None:
+                try:
+                    on_spawn(proc.pid, pgid)
+                except Exception:  # noqa: BLE001 - 记录失败不打断执行（同 on_tick）
+                    pass
             tracked: set[int] = set()  # Windows：执行期快照到的子孙 PID
             chunks: list[str] = []
             reader = threading.Thread(
