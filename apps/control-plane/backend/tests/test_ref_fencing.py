@@ -217,3 +217,41 @@ def test_hwm_monotonic_across_release_and_reclaim(
         "refs/heads/agent-hwm/issue-1/00000002",
         "refs/heads/agent-hwm/issue-1/00000003",
     ]
+
+def test_release_from_blocked_lands_queued_and_removes_lease_ref(
+    fake_github, ref_store, ref_transport, ref_clock
+):
+    """真实缺陷回归（sched-core PR-6 发现）：BLOCKED 释放只能落到 QUEUED，
+    QUEUED 也必须删除 lease ref，否则 get_task 派生回 claimed，新实例 LeaseHeld，
+    阻塞任务永远无法被重试。"""
+    fake_github.add_issue(1)
+    authority = fencer(ref_store, ref_transport, ref_clock)
+    lease = claim(authority)
+    authority.transition("issue-1", attempt_id=ATTEMPT,
+                         fencing_token=lease.fencing_token, state=RUNNING)
+    authority.transition("issue-1", attempt_id=ATTEMPT,
+                         fencing_token=lease.fencing_token, state="blocked")
+    assert len(lease_refs(fake_github)) == 1  # BLOCKED 期间仍持有租约
+    task = authority.release("issue-1", attempt_id=ATTEMPT,
+                             fencing_token=lease.fencing_token)
+    assert task.state == "queued"
+    assert lease_refs(fake_github) == []  # 修复点：QUEUED 也删 lease ref
+    again = claim(authority, agent="muse-3", instance="9f9f9f9f", attempt="bbbbbbbbbbbb")
+    assert again.fencing_token == lease.fencing_token + 1
+
+
+def test_transition_from_blocked_to_queued_removes_lease_ref(
+    fake_github, ref_store, ref_transport, ref_clock
+):
+    """transition(BLOCKED→QUEUED) 同样必须收尾租约（与 release 同一缺陷面）。"""
+    fake_github.add_issue(1)
+    authority = fencer(ref_store, ref_transport, ref_clock)
+    lease = claim(authority)
+    authority.transition("issue-1", attempt_id=ATTEMPT,
+                         fencing_token=lease.fencing_token, state=RUNNING)
+    authority.transition("issue-1", attempt_id=ATTEMPT,
+                         fencing_token=lease.fencing_token, state="blocked")
+    task = authority.transition("issue-1", attempt_id=ATTEMPT,
+                                fencing_token=lease.fencing_token, state="queued")
+    assert task.state == "queued"
+    assert lease_refs(fake_github) == []

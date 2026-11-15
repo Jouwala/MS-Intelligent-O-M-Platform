@@ -137,8 +137,15 @@ class RefFencer(RefClaimer):
         return False
 
     def _end_lease(self, issue: int, token: int, attempt_id: str, state: str) -> None:
-        """租约生命周期结束时的收尾（只对终态 / retryable / expired 生效）。"""
-        if state in (RETRYABLE, EXPIRED):
+        """租约生命周期结束时的收尾。
+
+        **QUEUED 也必须删租约 ref**（真实缺陷修复，sched-core 在 PR-6 发现）：
+        `release()` 从 BLOCKED 回落时状态机只能走 BLOCKED→QUEUED；若 QUEUED 不删
+        lease ref，`get_task` 会按 epoch 派生回 claimed（lease_expire_at 非空），
+        新实例因此 LeaseHeld → 阻塞任务永远无法被重试。凡「状态已回落、本实例不再
+        持有执行权」的迁移（queued/retryable/expired/终态）都必须删租约 + 释放范围锁。
+        """
+        if state in (QUEUED, RETRYABLE, EXPIRED):
             self._delete_quietly(self._ref_of(issue, token, attempt_id))
             self._release_locks(issue, token)
             return

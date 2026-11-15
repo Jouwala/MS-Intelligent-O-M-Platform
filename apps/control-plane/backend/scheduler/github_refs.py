@@ -333,9 +333,11 @@ class RestRefStore:
                         object_type=obj.get("type") or "commit",
                     )
                 )
-            if _has_next_link(headers) or len(items) >= self.page_size:
+            if _has_next_link(headers):
                 page += 1
                 continue
+            # 真实 GitHub 的 matching-refs **不分页**（一次返回全部匹配项、不返回
+            # Link）；不能按「本页满 page_size 就继续翻页」推断，否则会无限翻页。
             break
         if page > self.max_pages:
             raise GitHubRefError(
