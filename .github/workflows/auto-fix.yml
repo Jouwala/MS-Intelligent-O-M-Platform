@@ -1,0 +1,227 @@
+# QA 失败自动修复闭环（TASK-06-B）：Issue 被打上 state:qa-failed 后，
+# 自动把「失败了」变成「有人要去修」——建修复 Issue 回派原开发 Agent、
+# 在原 Issue 发 FIX_REQUESTED、数修复轮次，达上限打 needs-replan 停手。
+#
+# 协议依据：agent-protocol.md 第四节「失败与返工流程」第 1–4 条与第二节
+# 第 9 类消息 FIX_REQUESTED。此前该流程只有协议与标签、没有任何实现，
+# QA 失败后闭环是断的；本工作流是它的机械化执行者（与 pr-merged-
+# writeback 之于 PR_MERGED 同理），评论头 from 记为 auto-fix。
+#
+# 失败信号（TASK-06-A 建立的口径，两者同时成立才动手）：
+#   1. Issue 带 state:qa-failed 标签（smoke-watcher 回写）；
+#   2. Issue 评论里有最新一条 QA_FAILED 机器可读头评论，内含 PR 编号、
+#      HEAD SHA、失败项与报告链接——修复 Issue 的内容从这里取，不猜。
+#
+# 轮次计数存哪：修复 Issue 正文首行的机器可读标记
+#   <!-- auto-fix: for-issue-<直属任务> root-issue-<根任务> round-<R> sha-<失败HEAD> -->
+# 计数 = 全仓 Issue 里 root-issue 等于本任务根任务的标记数。理由：计数
+# 必须能从 GitHub 单点读出，不依赖任何一台机器的本地状态文件（本仓库
+# 多 VM 协作，本地文件不可靠）；标记同时承载幂等键（root + sha）。
+# 链式返工（修复的 PR 又失败、QA_FAILED 落在修复 Issue 上）按根任务
+# 计数：修复 Issue 正文带标记，其 root-issue 指向最初的任务，整条链
+# 共用一个 3 次上限，不会无限套娃。计数查全仓 Issue（per_page=100，
+# 当前仓库规模足够；将来超限需改分页）。
+#
+# 安全阀（任务说明第 4 条）：
+#   - 只建 Issue、发评论、打 needs-replan 标签；不改代码、不合并、
+#     不关闭原 Issue；
+#   - 原开发 Agent 只认原 Issue 上的 agent:muse-2 / agent:muse-3 标签
+#     （muse-1 是协调者不写业务代码，不回派）；取不到就不派给任何人，
+#     在 FIX_REQUESTED 里写明请 Muse 1 介入指派，绝不猜人；
+#   - 幂等：同一根任务 + 同一失败 HEAD SHA 只建一个修复 Issue，
+#     重复触发（标签被摘下重打等）直接跳过；
+#   - needs-replan 是终止标记：原 Issue 已带它时整体跳过；第 4 次
+#     失败只打标签 + 发说明评论，不再建修复 Issue。
+#
+# 触发（两条路，同一套逻辑）：
+#   - issues labeled：state:qa-failed 被打上时（watcher 用用户 PAT
+#     调 API 打标签，事件正常触发工作流，不受 GITHUB_TOKEN 抑制）；
+#   - workflow_dispatch：人工指定 Issue 编号重放 / 安全复现验证用，
+#     脚本内仍复核 state:qa-failed 标签与 QA_FAILED 评论，缺一跳过。
+
+name: auto-fix
+
+on:
+  issues:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: '要处理的任务 Issue 编号（须已带 state:qa-failed 与 QA_FAILED 评论）'
+        required: true
+        type: number
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  auto-fix:
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'state:qa-failed'
+    runs-on: ubuntu-latest
+    steps:
+      - name: QA 失败自动建修复 Issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          ISSUE_EVENT: ${{ github.event.issue.number }}
+          ISSUE_INPUT: ${{ inputs.issue_number }}
+        run: |
+          set -euo pipefail
+          API="https://api.github.com/repos/$REPO"
+          AUTH=(-H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json')
+          NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          ISSUE="${ISSUE_EVENT:-$ISSUE_INPUT}"
+          test -n "$ISSUE" || { echo "未取到 Issue 编号，跳过"; exit 0; }
+
+          # 取原 Issue：标签（状态 + 原开发 Agent）与正文（根任务判定）。
+          ISSUE_JSON="$(curl -sS "${AUTH[@]}" "$API/issues/$ISSUE")"
+          LABELS="$(echo "$ISSUE_JSON" | jq -r '.labels[].name')"
+          if ! echo "$LABELS" | grep -qx 'state:qa-failed'; then
+            echo "Issue #$ISSUE 未带 state:qa-failed，跳过"; exit 0
+          fi
+          if echo "$LABELS" | grep -qx 'needs-replan'; then
+            echo "Issue #$ISSUE 已带 needs-replan（终止标记），跳过"; exit 0
+          fi
+          ORIG_TITLE="$(echo "$ISSUE_JSON" | jq -r '.title')"
+          ISSUE_BODY="$(echo "$ISSUE_JSON" | jq -r '.body // ""')"
+          # 根任务：本 Issue 若是修复 Issue（正文带 auto-fix 标记），根是
+          # 标记里的 root-issue；否则根就是它自己。
+          ROOT="$(echo "$ISSUE_BODY" | grep -oE 'root-issue-[0-9]+' | grep -oE '[0-9]+' | head -n 1 || true)"
+          ROOT="${ROOT:-$ISSUE}"
+
+          # 取最新一条 QA_FAILED 评论：PR 编号、HEAD SHA、失败项、报告链接。
+          COMMENTS="$(curl -sS "${AUTH[@]}" "$API/issues/$ISSUE/comments?per_page=100")"
+          QA_JSON="$(echo "$COMMENTS" | jq --arg n "$ISSUE" '[.[] | select((.body // "") | test("agent-msg: QA_FAILED, task: #" + $n + ","))] | last // empty')"
+          if [ -z "$QA_JSON" ]; then
+            echo "Issue #$ISSUE 无 QA_FAILED 评论，跳过"; exit 0
+          fi
+          QA_URL="$(echo "$QA_JSON" | jq -r '.html_url')"
+          QA_BODY="$(echo "$QA_JSON" | jq -r '.body')"
+          PR_NUMBER="$(echo "$QA_BODY" | grep -oE 'qa-result: pr-[0-9]+' | grep -oE '[0-9]+' | head -n 1 || true)"
+          HEAD_SHA="$(echo "$QA_BODY" | grep -oE '[0-9a-f]{40}' | head -n 1 || true)"
+          # 失败项：QA_FAILED 正文里两空格缩进的列表行（watcher 的固定格式）。
+          FAIL_ITEMS="$(echo "$QA_BODY" | grep -E '^  - ' | sed 's/^  - //' || true)"
+          if [ -z "$FAIL_ITEMS" ]; then FAIL_ITEMS="见失败报告（watcher 未抽出失败项行）"; fi
+
+          # 轮次计数与幂等：全仓 Issue 正文里的 auto-fix 标记（见文件头）。
+          ALL_BODIES="$(curl -sS "${AUTH[@]}" "$API/issues?state=all&per_page=100" | jq -r '.[].body // ""')"
+          MARKERS="$(echo "$ALL_BODIES" | grep -oE 'auto-fix: for-issue-[0-9]+ root-issue-[0-9]+ round-[0-9]+ sha-[0-9a-f]{40}' || true)"
+          ROOT_MARKERS="$(echo "$MARKERS" | awk -v r="root-issue-$ROOT" '{for (i = 1; i <= NF; i++) if ($i == r) print}' || true)"
+          if [ -n "$HEAD_SHA" ] && echo "$ROOT_MARKERS" | grep -q "sha-$HEAD_SHA"; then
+            echo "根任务 #$ROOT 的失败 HEAD $HEAD_SHA 已建过修复 Issue，幂等跳过"; exit 0
+          fi
+          EXISTING="$(printf '%s' "$ROOT_MARKERS" | grep -c . || true)"
+          EXISTING="${EXISTING:-0}"
+          echo "根任务 #$ROOT 已有修复轮次：$EXISTING"
+
+          # 第 4 次失败：打 needs-replan + 说明评论，不再建修复 Issue。
+          if [ "$EXISTING" -ge 3 ]; then
+            curl -sS -X POST "${AUTH[@]}" "$API/issues/$ISSUE/labels" \
+              --data-binary '{"labels": ["needs-replan"]}' > /dev/null
+            {
+              echo "<!-- auto-fix: needs-replan, task: #$ISSUE, root: #$ROOT, sha: $HEAD_SHA -->"
+              echo "自动修复已达 3 次上限（根任务 #$ROOT），本次为第 4 次 QA 失败，不再自动创建修复 Issue。"
+              echo
+              echo "- 失败报告：$QA_URL"
+              echo "- PR：#$PR_NUMBER，HEAD SHA：\`$HEAD_SHA\`"
+              echo "- 已打标签：needs-replan（终止标记，不是状态）"
+              echo "- 下一步：等 Muse 1 重新规划（agent-protocol.md 第四节）。"
+              echo
+              echo "（本评论由 auto-fix 工作流自动发出，TASK-06-B。）"
+            } > /tmp/replan.md
+            jq -n --rawfile body /tmp/replan.md '{body: $body}' \
+              | curl -sS -X POST "${AUTH[@]}" "$API/issues/$ISSUE/comments" --data-binary @- > /dev/null
+            echo "Issue #$ISSUE 第 4 次失败：已打 needs-replan 并评论，不再建修复 Issue。"
+            exit 0
+          fi
+          ROUND=$((EXISTING + 1))
+
+          # 原开发 Agent：只认 agent:muse-2 / agent:muse-3，取不到不派。
+          AGENT=""
+          for a in muse-2 muse-3; do
+            if echo "$LABELS" | grep -qx "agent:$a"; then AGENT="$a"; fi
+          done
+
+          # 建修复 Issue：正文按 agent-task.md 模板填齐，首行放计数标记。
+          {
+            echo "<!-- auto-fix: for-issue-$ISSUE root-issue-$ROOT round-$ROUND sha-$HEAD_SHA -->"
+            echo
+            echo "## 任务说明"
+            echo
+            echo "修复 #$ISSUE 的 QA 失败项（第 $ROUND 轮自动修复，由 auto-fix 工作流按 TASK-06-B 创建）。"
+            echo
+            echo "- 原 Issue：#$ISSUE（$ORIG_TITLE）"
+            echo "- 失败 PR：#$PR_NUMBER"
+            echo "- HEAD SHA：\`$HEAD_SHA\`"
+            echo "- 失败报告：$QA_URL"
+            echo
+            echo "## 负责人"
+            echo
+            if [ -n "$AGENT" ]; then
+              echo "负责人：agent:$AGENT（回派原开发 Agent）"
+            else
+              echo "负责人：待 Muse 1 指派（原 Issue 无 agent:muse-2 / agent:muse-3 标签，未自动派给任何人）"
+            fi
+            echo
+            echo "## 优先级"
+            echo
+            echo "优先级：P1"
+            echo
+            echo "## 文件修改范围"
+            echo
+            echo "与原 Issue #$ISSUE 相同（见原 Issue 的文件修改范围）；超出范围先在评论里说明并等 Muse 1 确认。"
+            echo
+            echo "## 依赖任务"
+            echo
+            echo "依赖：depends on #$ISSUE"
+            echo
+            echo "## 验收标准"
+            echo
+            while IFS= read -r item; do
+              [ -n "$item" ] && echo "- [ ] 修复：$item"
+            done <<< "$FAIL_ITEMS"
+            echo "- [ ] 修复后重新走评审与冒烟，取得 state:qa-passed"
+            echo "- [ ] 在原 Issue #$ISSUE 发 FIX_COMPLETED 评论（新提交、回归自检结果）"
+            echo
+            echo "## 所属分支"
+            echo
+            echo "分支：\`agent/task-49-fix-$ISSUE\`"
+            echo
+            echo "## 当前状态"
+            echo
+            echo "状态：state:todo"
+          } > /tmp/fix-body.md
+
+          if [ -n "$AGENT" ]; then
+            LABELS_JSON="[\"state:todo\", \"agent:$AGENT\"]"
+          else
+            LABELS_JSON='["state:todo"]'
+          fi
+          TITLE="[修复] #$ISSUE QA 失败（第 $ROUND 轮）：$ORIG_TITLE"
+          RESP="$(jq -n --arg title "$TITLE" --rawfile body /tmp/fix-body.md --argjson labels "$LABELS_JSON" \
+            '{title: $title, body: $body, labels: $labels}' \
+            | curl -sS -X POST "${AUTH[@]}" "$API/issues" --data-binary @-)"
+          FIX_NUMBER="$(echo "$RESP" | jq -r '.number // empty')"
+          test -n "$FIX_NUMBER" || { echo "建修复 Issue 失败：$RESP"; exit 1; }
+          echo "已建修复 Issue #$FIX_NUMBER（第 $ROUND 轮，回派 ${AGENT:-无}）"
+
+          # 在原 Issue 发 FIX_REQUESTED（协议第二节第 9 类消息）。
+          {
+            echo "<!-- agent-msg: FIX_REQUESTED, task: #$ISSUE, from: auto-fix, at: $NOW -->"
+            echo "修复任务已建（auto-fix 工作流自动执行，TASK-06-B）。"
+            echo
+            echo "- 新 Issue：#$FIX_NUMBER"
+            echo "- 失败报告：$QA_URL（PR #$PR_NUMBER，HEAD SHA \`$HEAD_SHA\`）"
+            echo "- 修复轮次：第 $ROUND 次（上限 3）"
+            if [ -n "$AGENT" ]; then
+              echo "- 负责人：agent:$AGENT（回派原开发 Agent）"
+            else
+              echo "- 负责人：未能判定（原 Issue 无 agent:muse-2 / agent:muse-3 标签），未派给任何人，请 Muse 1 介入指派。"
+            fi
+          } > /tmp/fix-requested.md
+          jq -n --rawfile body /tmp/fix-requested.md '{body: $body}' \
+            | curl -sS -X POST "${AUTH[@]}" "$API/issues/$ISSUE/comments" --data-binary @- > /dev/null
+          echo "已在 Issue #$ISSUE 发 FIX_REQUESTED（第 $ROUND 次）。"
