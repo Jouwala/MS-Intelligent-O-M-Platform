@@ -1,0 +1,33 @@
+# Linux 沙箱 Agent Worker（GitHub ref-CAS 权威层）——systemd 单元模板。
+#
+# 本文件是**模板**：@@...@@ 占位符由 install.sh 按当前机器/仓库路径替换后写到
+# /etc/systemd/system/agent-worker-linux.service。不要手工改本文件里的占位符。
+#
+# 安装：sudo ./install.sh --config /etc/agent-worker-linux/config.json
+# 回滚：sudo systemctl disable --now agent-worker-linux 并恢复原型服务（见 README）
+[Unit]
+Description=NOC/SOC Linux Sandbox Agent Worker (GitHub ref-CAS)
+Documentation=file://@@PACKAGE_DIR@@/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@@WORKER_USER@@
+Group=@@WORKER_GROUP@@
+WorkingDirectory=@@REPO_ROOT@@
+Environment=PYTHONUNBUFFERED=1
+# 任务命令的环境由 apps/agent-worker/env_filter.py 白名单过滤（#78），
+# 这里不给 Worker 自己扩充环境变量的入口。
+ExecStart=@@PYTHON@@ @@PACKAGE_DIR@@/worker_linux.py --config @@CONFIG_PATH@@
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+# 只允许写状态目录/任务工作目录；不放开其它路径。
+ReadWritePaths=@@STATE_DIR@@ @@WORKDIR@@
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
