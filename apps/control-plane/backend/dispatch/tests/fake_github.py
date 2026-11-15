@@ -265,7 +265,9 @@ class FakeGitHub(GitHubClient):
                 return self._ref_delete(method, urllib.parse.unquote(match.group(1)))
             match = re.fullmatch(r"git/matching-refs/(.+)", rest)
             if match:
-                return self._matching_refs(method, urllib.parse.unquote(match.group(1)))
+                return self._matching_refs(
+                    method, urllib.parse.unquote(match.group(1)), query
+                )
         if path == "/search/issues":
             return self._search(query)
         return 404, {}, {"message": f"假 API 未实现路由：{method} {url}"}
@@ -435,7 +437,9 @@ class FakeGitHub(GitHubClient):
         del self.refs[ref]
         return 204, {}, None
 
-    def _matching_refs(self, method: str, prefix: str) -> tuple[int, dict[str, str], Any]:
+    def _matching_refs(
+        self, method: str, prefix: str, query: dict[str, str]
+    ) -> tuple[int, dict[str, str], Any]:
         if method != "GET":
             return 405, {}, {"message": "method not allowed"}
         full = f"refs/{prefix}"
@@ -444,7 +448,11 @@ class FakeGitHub(GitHubClient):
             for ref, sha in sorted(self.refs.items())
             if ref.startswith(full)
         ]
-        return 200, {}, matched
+        # 与真实 GitHub 一致地分页（默认 per_page 由 _page 处理），
+        # 客户端不跟随 Link 就会漏项——#76 的分页回归靠这个复现。
+        return self._page(
+            f"/repos/{self.repo}/git/matching-refs/{prefix}", query, matched
+        )
 
     # ------------------------------------------------------------------ search
     def _search(self, query: dict[str, str]) -> tuple[int, dict[str, str], Any]:

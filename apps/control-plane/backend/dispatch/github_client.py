@@ -370,11 +370,14 @@ class GitHubClient:
             raise
 
     def list_matching_refs(self, ref_prefix: str) -> list[dict[str, Any]]:
-        """列出以某前缀开头的 ref（`heads/dispatch/...`）。用于分派对账。"""
-        body = self._request(
-            "GET", f"/repos/{self.repo}/git/matching-refs/{ref_prefix}"
-        )
-        return body if isinstance(body, list) else []
+        """列出以某前缀开头的全部 ref（`heads/dispatch/...`）。用于分派对账。
+
+        matching-refs 是列表接口，必须分页全量读取：旧实现只取第一页
+        （GitHub 默认 per_page=30），调度 ref 一多就静默截断、对账漏项
+        （#76）。改走 paginate()：跟随 Link、按 ref 去重、超页数上限
+        显式抛 GitHubPaginationError，不拿不完整数据继续。
+        """
+        return self.paginate(f"/repos/{self.repo}/git/matching-refs/{ref_prefix}")
 
     def get_branch_sha(self, branch: str = "main") -> str:
         ref = self.get_git_ref(f"refs/heads/{branch}")
