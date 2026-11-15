@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from scheduler.github_refs import GitHubRefError
+from scheduler.github_refs import GitHubRefError, RestRefStore
 from scheduler.ref_api import RefInfo
 
 ANCHOR = "a" * 40
@@ -142,6 +142,28 @@ def test_list_follows_link_pagination(fake_github, ref_store):
 
 def test_list_empty_prefix_returns_empty(fake_github, ref_store):
     assert ref_store.list("refs/heads/agent-hwm/issue-77/") == []
+
+
+def test_list_stops_without_link_even_if_items_exceed_page_size(fake_github):
+    """真实 GitHub 的 matching-refs **不分页**（不返回 Link）：不能按「满页就翻页」推断。
+
+    这是真实 GitHub 多 checkout 验证（real_github_ref_verify.py 场景 g）暴露的缺陷：
+    原先的 `len(items) >= page_size` 兜底会在服务端一次返回全部且忽略 page 参数时
+    无限翻页，最终以「分页超过上限」报错（真实 API 上 page_size=2 + 3 条 ref 即触发）。
+    """
+    for token in range(1, 4):
+        fake_github.seed_ref(hwm_ref(2, token))
+    fake_github.page_size_override = 100  # 服务端一次返回全部、无 Link（与真实 API 一致）
+    store = RestRefStore(
+        fake_github.repo_full,
+        token="test-token",
+        api_base=fake_github.base_url,
+        page_size=2,
+        sleep=lambda _seconds: None,
+    )
+    refs = store.list("refs/heads/agent-hwm/issue-2/")
+    assert len(refs) == 3
+    assert fake_github.page_calls_of("git/matching-refs", 2) == 0  # 没有第 2 页请求
 
 
 def test_list_respects_segment_boundary_between_issue_1_and_issue_10(fake_github, ref_store):
