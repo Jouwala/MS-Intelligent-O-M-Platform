@@ -97,13 +97,13 @@
       "en": "GIS MAP",
       "excelDomain": "GIS MAP",
       "portalAnchor": "l0Map",
-      "_comment_new_tabs": "2026-11-11 加（用户要求 fo/bo/flm 三个团队门户也要 IP/PL 页签）：上游 DATA.MAP_TABS 里的 ipranTopo（IP 页签）与 packet_loss（PL 页签）在此登记。⚠️ 子键必须与 MAP_TABS 的 page 值逐字一致 —— mapItems() 的团队版钩子拿 SCOPE.mapPages() 返回的子键直接和 m.page 比对，错一个字符页签就静默消失。⚠️ Excel《新看板设计.xlsx》里没有这两行，excel 留空占位、不参与 --check-excel 对账；只勾 fo/bo/flm，smc/cxo 不开放。",
+      "_comment_new_tabs": "2026-11-11 加（用户要求 fo/bo/flm 三个团队门户也要 IP/PL 页签）。2026-11-16：IP 页签的 page 从 ipranTopo 改为 olibTopo（物理图），子键必须跟着改，否则页签静默消失。packet_loss 仍是 PL。⚠️ 子键必须与 MAP_TABS 的 page 值逐字一致。⚠️ Excel 里没有这两行，excel 留空、不参与 --check-excel 对账；只勾 fo/bo/flm，smc/cxo 不开放。",
       "items": [
         { "key": "gis",        "zh": "告警地图", "en": "Alarm Map",   "excel": "Alarm MAP" },
         { "key": "person",     "zh": "人员地图", "en": "Person Map",  "excel": "Person MAP" },
         { "key": "mwRealTime", "zh": "微波实时", "en": "MW Map",      "excel": "MW MAP" },
         { "key": "ipt_power",  "zh": "IPT 电源", "en": "IPT Power",   "excel": "IPT Power" },
-        { "key": "ipranTopo",  "zh": "IP（IPRAN 拓扑）", "en": "IP (IPRAN Topology)", "excel": "" },
+        { "key": "olibTopo",  "zh": "IP（物理拓扑）", "en": "IP (Physical topology)", "excel": "" },
         { "key": "packet_loss", "zh": "PL（Packet Loss 地图）", "en": "PL (Packet Loss Map)", "excel": "" }
       ]
     },
@@ -243,7 +243,7 @@
       "person":     ["fo", "flm", "smc", "cxo"],
       "mwRealTime": ["fo", "bo", "flm", "smc", "cxo"],
       "ipt_power":  ["fo", "flm", "smc", "cxo"],
-      "ipranTopo":  ["fo", "bo", "flm"],
+      "olibTopo":  ["fo", "bo", "flm"],
       "packet_loss": ["fo", "bo", "flm"]
     },
     "qa": {

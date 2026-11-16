@@ -29,6 +29,7 @@ export const PAGE_LIST: { key: string; iframe?: boolean }[] = [
   { key: 'socTrendDashboard', iframe: true },
   { key: 'mwUmeTopology', iframe: true },
   { key: 'ipranTopo' },
+  { key: 'olibTopo' },
   { key: 'mwRealTime', iframe: true },
   { key: 'gis' },
   { key: 'realtime_alarm' },
@@ -101,6 +102,7 @@ export const NAV_KEY_MAP: Record<string, string> = {
   socTrendDashboard: 'nav.socTrendDashboard',
   mwUmeTopology: 'nav.mwUmeTopology',
   ipranTopo: 'nav.ipranTopo',
+  olibTopo: 'nav.olibTopo',
   mwRealTime: 'nav.mwRealTime',
   gis: 'nav.gis',
   realtime_alarm: 'nav.realtimeAlarm',
@@ -150,7 +152,7 @@ export const CATEGORIES: { id: string; pages: string[] }[] = [
   { id: 'tasks', pages: ['sync', 'email_reports', 'upload', 'tables', 'overview'] },
   {
     id: 'boards',
-    pages: ['alarm', 'ttwo', 'v1_ttwo', 'tt', 'wo', 'nur', 'ms_nur_only', 'ms_sla', 'ms_sla_only', 'ms_wo_sla', 'ms_contract_kpi', 'cxoDashboard', 'vmaxCxoDashboard', 'vmaxCxoDashboard_Daily', 'vmaxCxoDashboard_90Days', 'socTrendDashboard', 'mwUmeTopology', 'ipranTopo', 'mwRealTime', 'alarmManagement', 'fme_ranking', 'site_avail', 'avail_ms', 'avail_flm', 'avail_county', 'bm_speedtest', 'bm_meta', 'noc_analyst', 'repeat_site_down', 'cr_analysis', 'pm_analysis', 'bp_report', 'ran_cells_kpi', 'packet_loss', 'battery', 'ume_in_kpi', 'cn_kpi', 'cn_kpi_5mins', 'imonitor', 'gis', 'realtime_alarm', 'person', 'incident_overview', 'warehouse', 'sp_material', 'sp_details', 'sp_report', 'com_report', 'warehouse_summary'],
+    pages: ['alarm', 'ttwo', 'v1_ttwo', 'tt', 'wo', 'nur', 'ms_nur_only', 'ms_sla', 'ms_sla_only', 'ms_wo_sla', 'ms_contract_kpi', 'cxoDashboard', 'vmaxCxoDashboard', 'vmaxCxoDashboard_Daily', 'vmaxCxoDashboard_90Days', 'socTrendDashboard', 'mwUmeTopology', 'ipranTopo', 'olibTopo', 'mwRealTime', 'alarmManagement', 'fme_ranking', 'site_avail', 'avail_ms', 'avail_flm', 'avail_county', 'bm_speedtest', 'bm_meta', 'noc_analyst', 'repeat_site_down', 'cr_analysis', 'pm_analysis', 'bp_report', 'ran_cells_kpi', 'packet_loss', 'battery', 'ume_in_kpi', 'cn_kpi', 'cn_kpi_5mins', 'imonitor', 'gis', 'realtime_alarm', 'person', 'incident_overview', 'warehouse', 'sp_material', 'sp_details', 'sp_report', 'com_report', 'warehouse_summary'],
   },
   { id: 'analysis', pages: ['eflow_qa', 'eflow_flow', 'dashboard', 'archive', 'ip_trace', 'vmax_user_query', 'vmax_user_cca', 'ipt_power'] },
   { id: 'workflow', pages: ['ap_center', 'feedback'] },
@@ -381,6 +383,16 @@ export const PAGE_DOCS: Record<Locale, Record<string, PageDoc>> = {
         '「导出 Excel」输出网元与链路两张 sheet（含告警计数、坐标来源、端口名）',
       ],
     },
+    olibTopo: {
+      desc: 'OLIB FO 全国光纤网络拓扑（静态参考页）：把 Orange Liberia 网络拓扑 PDF 的第 1 页物理图、第 2 页逻辑图原样嵌入，并在物理图上叠加 553 个提取站点。支持缩放 / 平移 / 站点搜索 / 骨干核心与 5G·ISP 筛选，点站点可看区域、原图相对位置和类型，并可全图定位或放大看周边链路。',
+      usage: [
+        '四个视图：「原图 · 物理拓扑」（叠加站点点位）/「原图 · 逻辑拓扑」/「骨干示意」（按第 2 页逻辑图梳理的 9 个核心节点与链路）/「站点分布」（散点，按区域着色）',
+        '物理图点位：灰=普通、红=5G、蓝=ISP、紫=骨干核心；半径随缩放反向补偿，放大后仍是细小圆点。滚轮缩放、拖动平移，右下角缩略图可点击跳转，工具条可重置 / 全屏 / 隐藏点位',
+        '右侧站点查询是模糊搜索：忽略大小写和标点，可以按站名或区域里的词匹配，打错一个字母或少写一两个字母也能找到；另有区域下拉与「全部 / 5G / ISP / 骨干核心」快捷筛选。结果超过 300 条时只渲染前 300 条并明确提示，不会静默截断。点一条结果会放大到该站',
+        '点站点后详情卡显示区域、原图相对位置（近似值，不是 GPS）与类型；「全图定位」「放大看周边链路」「在分布图上查看」三个按钮与参考页一致',
+        '本页是**纯静态参考页**：数据来自 PDF 一次性提取，存于 networkTopology/topologyData.ts，原图在 public/topology/；不连后端、不写库，自动刷新建议 1800 秒且内容不会变化',
+      ],
+    },
     mwRealTime: {
       desc: '与微波拓扑同构的 15 分钟粒度实时版（拓扑骨架、风险榜、抽屉、趋势完全一致）。',
       usage: ['默认只展示最新一个 15 分钟槽位，滑杆可回看最近 2 小时窗口', '自动刷新默认关闭，可在顶栏按页开启（本页建议 900 秒）；开启后走「软刷新」（不重载 iframe、不闪屏）'],
@@ -389,6 +401,7 @@ export const PAGE_DOCS: Record<Locale, Record<string, PageDoc>> = {
       desc: '站点地图：告警/工单在地图上的分布、拓扑线、区域面与多维筛选（历史/工单口径）。',
       usage: [
         '区域下拉 + 图层 Tag 开关筛选；图例点击可隐藏该类图层；时间支持分段切换与自定义区间',
+        '地图左上角「Layers」浮层里有地名注记 / 道路 / 人员三个勾选框，**默认全关**：地名（瓦片自带 1.7 万个）会糊住站点；人员是现场登记位置（非实时定位），需要时再勾',
         '「高级筛选」面板第一格是「站点名称」输入框：按名称片段模糊匹配（不区分大小写），其余是区域/等级/站型/FME 等下拉；',
         '筛选后统计同步变化：站点总数与 ERA/COOL/NORMAL 分档、地图图例、县块颜色与县名标注、右上角「MAINTENANCE ALERTS」区域排名条都按筛选后的站点重新统计，不再显示全量数字；',
         '点站点打开右侧抽屉，四个页签明细可搜索、可导出 Excel',
@@ -407,7 +420,7 @@ export const PAGE_DOCS: Record<Locale, Record<string, PageDoc>> = {
         '操作与 GIS 地图页一致',
         '数据来自 eFlow 活动告警（eflow_active_alarm），每分钟同步一次',
         '「根因聚合分析」卡片：把当前高级筛选范围内的断站聚成簇 —— 拓扑根因（上游站断，其传输链下挂站跟着断）/ 同因聚集（无链路站按告警问题 + 10 分钟时间窗聚集），并给出根因类型、受影响站数与置信度；点条目可看成员明细与证据（链路路径、时间窗、eFlow 影响面），成员站名可点开下钻抽屉',
-        '标题括号里的「已归因/总」与 Site Stats 同为**站数**单位：已归因 = 进入共享根因簇的站数；其余是孤立故障（上游没告警、没有同窗同伴，根因就是它自己）—— 点脚注可打开未归因**告警明细**（与点击 Alarm Stats 条目打开的是同一张项目默认明细表：站点/TT/优先级/告警时间/时长/超时），对地图逐点核验',
+        '标题括号里的「已归因/总」与 Site Stats 同为**站数**单位：已归因 = 进入共享根因簇的站数；其余是孤立故障（上游没告警、没有同窗同伴，根因就是它自己）—— 点脚注可打开未归因**告警明细**（与点击 Site Stats 条目打开的是同一张项目默认明细表：站点/TT/优先级/告警时间/时长/超时），对地图逐点核验',
         '根因站可能落在高级筛选范围之外（标「范围外」）—— 断站原因往往在当前视野之外，属正常且有价值的输出',
         '「AI 解读」按钮：用自备 LLM Key 生成自然语言结论（Key 仅存本机浏览器）；AI 不可用时自动降级为本地规则结论并标注，不影响簇列表本身',
       ],
@@ -683,9 +696,9 @@ export const PAGE_DOCS: Record<Locale, Record<string, PageDoc>> = {
       ],
     },
     bm_meta: {
-      desc: 'Meta 基准报告：基于 meta_data（Meta_20260923.xlsx 导入，612 行，2025-01-18 ~ 2026-09-23）回答两件事——①「Orange 与 MTN 谁的速率更高、领先多少、优势在扩大还是缩小」；②「同时段网络侧的 BP / FDD 下行吞吐 / 上下行 PRB 利用率 / 流量 / RRC 用户数是什么水平」。这两件事**刻意分开**：只有「速率」是两家的直接对比，其余 6 项是网络侧 KPI，不属于任何一家。页面分两大层：两家 PK 层（综合评分 → 速率汇总卡 → 双线趋势 → 逐日胜负 → 月度对比与逐日明细）+ 网络侧 KPI 层（汇总卡 + 单线趋势）。',
+      desc: 'Meta 基准报告：基于 meta_data（meta_data.xlsx 导入，661 行，2025-01-18 ~ 2026-11-11）回答两件事——①「Orange 与 MTN 谁的速率更高、领先多少、优势在扩大还是缩小」；②「同时段网络侧的 BP / FDD 下行吞吐 / 上下行 PRB 利用率 / 流量 / RRC 用户数是什么水平」。这两件事**刻意分开**：只有「速率」是两家的直接对比，其余 6 项是网络侧 KPI，不属于任何一家。页面分两大层：两家 PK 层（综合评分 → 速率汇总卡 → 双线趋势 → 逐日胜负 → 月度对比与逐日明细）+ 网络侧 KPI 层（汇总卡 + 单线趋势）。',
       usage: [
-        '顶部快捷区间（近 90 / 180 / 365 天 / 全部）配合日期选择器；时间窗是**左闭右开**，界面显示的是闭区间。默认窗口是近 365 天而不是 90 天——本表跨度 612 天，短窗口会把长期趋势结论切掉',
+        '顶部快捷区间（近 30 / 90 / 180 / 365 天 / 全部）配合日期选择器；时间窗是**左闭右开**，界面显示的是闭区间。打开时默认看**近 30 天**（右端对齐数据实际最大日，与点「近 30 天」得到的区间完全一致，2026-11-16 由 365 天收窄）；要看季节性/长期趋势再切 90 / 180 / 365 天或全部',
         '「综合竞争力评分」是**两家的相对分**：领先方 100 分、另一方按比例得分。它只回答「这两家谁更强、强多少」，不评价绝对水平好不好',
         '**为什么网络侧 KPI 不参与评分**：把「Orange 比 MTN 快多少」和「全网 PRB 利用率多高」混进同一个评分，等于把两件不同的事算成同一件事的两个选手，结论是假的。所以网络侧 6 项只做趋势与汇总，没有胜负、没有评分',
         '「速率」是两家的下载速率对比值（库中 orange_liberia / mtn_liberia 两个固定列），每天一行；两家相同时记为「持平」，**不计入任何一方胜场**（页面顶部有提示条说明有几天）',
@@ -1064,6 +1077,16 @@ export const PAGE_DOCS: Record<Locale, Record<string, PageDoc>> = {
         '"Export Excel" writes two sheets (NEs and links) including alarm counts, coordinate source and port names',
       ],
     },
+    olibTopo: {
+      desc: 'OLIB FO nationwide fiber topology (static reference page): pages 1-2 of the Orange Liberia network topology PDF are embedded as-is, with 553 extracted sites overlaid on the physical map. It supports zoom / pan / site search / backbone-core and 5G·ISP filters; click a site to see its region, approximate page position and type, then locate it or zoom into the nearby links.',
+      usage: [
+        'Four views: "Original · Physical" (site dots overlaid) / "Original · Logical" / "Backbone schematic" (9 core nodes and links traced from the page-2 drawing) / "Site distribution" (scatter, colored by region)',
+        'Physical-map dots: grey = regular, red = 5G, blue = ISP, purple = backbone core. The radius is compensated against zoom so dots stay small when zoomed in. Wheel to zoom, drag to pan; the bottom-right mini map jumps on click, and the toolbar resets / goes fullscreen / hides dots',
+        'The site search on the right is fuzzy: it ignores case and punctuation, matches words in the site name or region, and still hits when one letter is wrong or a couple are missing. A region dropdown and the All / 5G / ISP / Backbone core chips sit beside it. When more than 300 rows match only the first 300 are rendered, with an explicit notice (never silently truncated). Picking a row zooms to that site',
+        'After selecting a site the detail card shows its region, approximate page position (not GPS) and type; "Locate on map", "Zoom to nearby links" and "Show on distribution" match the reference page',
+        'This page is a **static reference**: the data is a one-off PDF extraction kept in networkTopology/topologyData.ts and the originals live in public/topology/. It reads no backend and writes no database, so auto-refresh defaults to 1800s and its content does not change',
+      ],
+    },
     mwRealTime: {
       desc: '15-minute realtime variant of the microwave topology board (same skeleton, risk ranking, drawer and trends).',
       usage: ['Shows only the latest 15-minute slot by default; the slider reviews the last 2 hours', 'Auto refresh is off by default; enable it per page in the header (suggested 900s for this page). When on, it uses soft refresh (no iframe reload, no flicker)'],
@@ -1072,6 +1095,7 @@ export const PAGE_DOCS: Record<Locale, Record<string, PageDoc>> = {
       desc: 'Site map: alarm/ticket distribution, topology lines, region polygons and multi-dimension filters (history/ticket view).',
       usage: [
         'Region dropdown + layer tags to filter; click a legend item to hide that layer; time supports segments and custom range',
+        'The top-left "Layers" panel has three checkboxes — Place labels / Roads / Personnel — all **off by default**: place labels (17k names in the tiles) would bury the sites, and personnel are registered positions (not live GPS), so turn them on only when needed',
         'The first cell of the "Advanced Filter" panel is a "Site Name" input: fuzzy match on a name fragment (case-insensitive); the rest are dropdowns for region/grade/form/FME etc.',
         'Statistics follow the filter: site total and the ERA/COOL/NORMAL grades, the map legend, the county block colors and county labels, and the "MAINTENANCE ALERTS" county ranking panel are all recomputed from the filtered sites instead of showing the full-set numbers;',
         'Click a site to open the right drawer: four tabs, searchable, exportable to Excel',
@@ -1090,7 +1114,7 @@ export const PAGE_DOCS: Record<Locale, Record<string, PageDoc>> = {
         'Interactions are identical to the GIS Map page',
         'Data comes from eFlow active alarms (eflow_active_alarm) synced every minute',
         'The "Root Cause Aggregation" card clusters the down sites within your current advanced-filter scope — topology roots (an upstream site is down, so the sites hanging off its link path go down with it) and same-cause clusters (sites without a link path grouped by alarm problem + a 10-minute time window), each with cause type, affected-site count and a confidence score; click an entry to see member details and evidence (link paths, time window, eFlow impact list); member site names open the site drill-down drawer',
-        'The "attributed/total" counter in the title uses the same **site** unit as Site Stats: attributed = sites that share a root cause with peers; the rest are isolated failures (upstream healthy, no same-window peers — the site itself is its own cause) — click the footnote to open the unattributed **alarm details**, the same project-standard detail table as clicking an entry in Alarm Stats (site / TT / priority / alarm time / duration / overdue), and verify against the map',
+        'The "attributed/total" counter in the title uses the same **site** unit as Site Stats: attributed = sites that share a root cause with peers; the rest are isolated failures (upstream healthy, no same-window peers — the site itself is its own cause) — click the footnote to open the unattributed **alarm details**, the same project-standard detail table as clicking an entry in Site Stats (site / TT / priority / alarm time / duration / overdue), and verify against the map',
         'A root site may fall outside your filter scope (flagged "Out of scope") — outage causes often sit outside your current view; this is expected and is exactly the value of the analysis',
         'The "AI Insights" button generates a natural-language conclusion using your own LLM key (stored only in your browser); when AI is unavailable it degrades to a local rule-based summary and is clearly marked — the cluster list itself is unaffected',
       ],
@@ -1364,9 +1388,9 @@ export const PAGE_DOCS: Record<Locale, Record<string, PageDoc>> = {
       ],
     },
     bm_meta: {
-      desc: 'Meta Benchmark Report: based on meta_data (imported from Meta_20260923.xlsx, 612 rows, 2025-01-18 ~ 2026-09-23) it answers two questions — (1) "between Orange and MTN, who has the higher speed, by how much, and is the gap widening or narrowing"; (2) "what level are the network-side KPIs (BP / FDD DL IP throughput / DL and UL PRB utilization / traffic volume / RRC users) at over the same period". These two are **deliberately kept apart**: only "speed" is a head-to-head between the two operators, while the other six are network-side KPIs belonging to neither. The page has two layers: a head-to-head layer (composite score -> speed cards -> dual-line trend -> daily win/loss -> monthly and daily tables) and a network-KPI layer (summary cards + single-line trend).',
+      desc: 'Meta Benchmark Report: based on meta_data (imported from meta_data.xlsx, 661 rows, 2025-01-18 ~ 2026-11-11) it answers two questions — (1) "between Orange and MTN, who has the higher speed, by how much, and is the gap widening or narrowing"; (2) "what level are the network-side KPIs (BP / FDD DL IP throughput / DL and UL PRB utilization / traffic volume / RRC users) at over the same period". These two are **deliberately kept apart**: only "speed" is a head-to-head between the two operators, while the other six are network-side KPIs belonging to neither. The page has two layers: a head-to-head layer (composite score -> speed cards -> dual-line trend -> daily win/loss -> monthly and daily tables) and a network-KPI layer (summary cards + single-line trend).',
       usage: [
-        'Quick ranges at the top (90 / 180 / 365 days / all time) plus date pickers; the window is **half-open** internally while the UI shows a closed range. The default is 365 days rather than 90 because this table spans 612 days and a short window would cut off the long-term trend',
+        'Quick ranges at the top (30 / 90 / 180 / 365 days / all time) plus date pickers; the window is **half-open** internally while the UI shows a closed range. The page opens on the **last 30 days**, with the right edge anchored to the latest day that actually has data (identical to what clicking "last 30 days" gives; narrowed from 365 days on 2026-11-16); switch to 90 / 180 / 365 days or all time when you need the seasonal or long-term picture',
         'The competitiveness score is **relative between the two operators**: the leader scores 100 and the other scales proportionally. It answers "who is stronger and by how much", not whether the absolute level is good',
         '**Why the network KPIs are excluded from scoring**: mixing "how much faster Orange is than MTN" with "how high network-wide PRB utilization is" into one score would treat two different things as two contestants in the same contest, producing a false conclusion. So the six network KPIs only get trends and averages — no wins, no score',
         '"Speed" is the download-speed comparison between the two operators (the fixed columns orange_liberia / mtn_liberia in the database), one row per day; when the two are equal it counts as a "tie" and is **not credited as a win to either side** (a note at the top states how many such days there are)',
