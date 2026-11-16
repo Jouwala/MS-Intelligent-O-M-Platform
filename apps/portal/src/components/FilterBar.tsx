@@ -11,6 +11,7 @@ import {
   Layers,
   EyeOff,
   MessageSquareText,
+  Network,
   SlidersHorizontal,
   Move,
   Check,
@@ -208,6 +209,22 @@ export const FilterBar: React.FC<FilterBarProps> = ({
               className={`w-3.5 h-3.5 ${viewMode === 'tasks' ? 'text-teal-500' : 'text-slate-400'}`}
             />
             <span className="hidden sm:inline">{t('filter.viewTasks')}</span>
+          </button>
+
+          {/* 网络拓扑入口（OLIB 光纤拓扑：定位图/原图/骨干示意 + 站点查询） */}
+          <button
+            onClick={() => onViewModeChange('topology')}
+            className={`px-2.5 sm:px-3 py-1.5 rounded-xl border text-xs font-medium flex items-center gap-1 sm:gap-1.5 transition-all ${
+              viewMode === 'topology'
+                ? 'border-orange-400 bg-orange-50 dark:bg-orange-950/60 text-orange-700 dark:text-orange-300 ring-2 ring-orange-400/20'
+                : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
+            }`}
+            title={t('filter.viewTopology')}
+          >
+            <Network
+              className={`w-3.5 h-3.5 ${viewMode === 'topology' ? 'text-orange-500' : 'text-slate-400'}`}
+            />
+            <span className="hidden sm:inline">{t('filter.viewTopology')}</span>
           </button>
 
           {/* View Mode Toggle */}

@@ -81,6 +81,11 @@ Site_outage/screenshots/
 #    实测单星号那一版对中文+连字符的目录名匹配不上，否定规则悄悄失效 ——
 #    check-ignore 仍报 `.gitignore:38:*.png`，看起来"规则写了"其实没生效。
 !**/assets/logo-*.png
+# ⚠️ 2026-11-16 例外（同上 logo 先例）：门户「网络拓扑」视图的两张原图是**源码资产**
+#    （Orange Liberia 拓扑 PDF 的渲染图，组件以 import 引用），不是运行时产物；
+#    被 *.jpg 吃掉就会重演「本机正常、换机 clone 破图」。豁免只到
+#    apps/portal/src/assets 下的 topology-* 两张图，不放开其它图片。
+!**/src/assets/topology-*.jpg
 *.thumb
 *.cache
 

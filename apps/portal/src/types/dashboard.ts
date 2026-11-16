@@ -59,7 +59,7 @@ export interface DashboardItem {
   hidden?: boolean;
 }
 
-export type ViewMode = 'grid' | 'list' | 'matrix' | 'tasks';
+export type ViewMode = 'grid' | 'list' | 'matrix' | 'tasks' | 'topology';
 
 export type SortOption = 'pinned' | 'popular' | 'recent' | 'name' | 'platform';
 
