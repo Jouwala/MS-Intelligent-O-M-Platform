@@ -2449,6 +2449,29 @@ GIS Map 也要 IP / PL 页签，Knowledge Q&A 也要 Master Site 页签，参考
 **改名白名单。** `portal_catalog.py` 的 `TAB_PAGES` 加了 `olibTopo`，并保留 `ipranTopo`，
 避免已经存过的旧改名记录在下次保存时被丢。后端不重启只影响改名落盘，页签本身不依赖它。
 
+## 九之十九、2026-11-16 Knowledge Q&A「Master Site」页签收成「搜索 + 表格 + 导出」
+
+**起因。** 用户要求 `/v3/olbrportal/` 的 Knowledge Q&A（Master Site 页签）里不要再出现
+my_app 表浏览器自带的 `Browse Data` / `Field Profile` / `Ask AI` 三个页签 ——「直接显示表格
+就行」，并把导出按钮放到**搜索框同一行的最右边**。
+
+**做法（门户零改动，只改 my_app 前端）。** 门户 iframe 的 src 由 `qaSrc()` 统一补 `embed=1`，
+一直是 `/myapp/?page=tables&table=master_site_db&embed=1`（`v3/olbrportal/assets/olbr.js`
+的 `masterSiteItem()` / `qaSrc()`），所以判据沿用 my_app `TableBrowser.tsx` 的 `embedMode`：
+
+1. `Browse Data` / `Field Profile` / `Ask AI` 三页签**整块不渲染**（`tabsPanel` 常量只在独立页
+   使用）—— 字段画像与智能问答组件连挂载都没有，iframe 里少两路无用请求；
+2. 工具栏在当天上午已按要求去掉，导出按钮改为渲染在搜索行右端（与工具栏那颗是同一份节点，
+   格式与搜索/列筛选/排序口径不分叉）；
+3. 内嵌行左右 24px、上下 16px 内边距：`.canvas iframe` 是 `inset:0`，iframe 内没有外层内边距，
+   不补会把控件贴在面板的 1px 边框上。
+
+独立页 `?page=tables` 不受影响；五个团队门户的同一页签内嵌的是同一张页面，**同时生效**。
+
+**验收（门户实测，1440×900）。** iframe 内 `.ant-tabs-nav` 计数 0、导出按钮 1 颗、与搜索框垂直
+居中（中心差 0px）、右边缘距面板右边框 24px；导出 xlsx / CSV 均能下载
+（`master_site_db.xlsx` 156 KB、`.csv` 366 KB，同一批 894 行）。
+
 ## 十、相关文档
 
 | 内容 | 去哪里 |

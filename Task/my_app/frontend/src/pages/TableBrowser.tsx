@@ -121,21 +121,27 @@ export default function TableBrowser() {
   const [colFilters, setColFilters] = useState<Record<string, ColFilter>>({})
   const { t, locale } = useI18n()
 
-  /* 门户内嵌（?embed=1 / ?embed=true / ?layout=bare）判定：内嵌版只留搜索栏。
+  /* 门户内嵌（?embed=1 / ?embed=true / ?layout=bare）判定：内嵌版是「精简版表格页」。
    *
    *  背景（2026-11-16 用户要求，统一门户 /v3/olbrportal/ 的 Knowledge Q&A →
-   *  Master Site 页签）：「去掉工具栏那一块，只保留搜索栏」。
-   *  被去掉的是表名下拉、行/列徽章和导出/导入/排除名单/MW Links/自定义列这一排
-   *  管理动作 —— 在门户那个页签里它们用不到，只是把首屏占满。
+   *  Master Site 页签）分两次收口：
+   *    ① 「去掉工具栏那一块，只保留搜索栏」—— 表名下拉、行/列徽章和
+   *       导入/排除名单/MW Links/自定义列这一排管理动作不渲染；
+   *    ② 「不要 Browse Data / Field Profile / Ask AI，直接显示表格就行，
+   *       在搜索的同一行的最右边显示导出按钮」—— 三个页签整块不渲染
+   *       （见下面的 browsePanel / tabsPanel），导出按钮搬到搜索行右端。
+   *  于是内嵌版只剩三件东西：搜索行（含导出）、表格、分页。
    *
-   *  ⚠️ **独立页不受影响**：侧栏「表格浏览器」（?page=tables）仍渲染完整工具栏，
-   *     导入/导出/自定义列是那边的正经功能，不能一起砍。
+   *  ⚠️ **独立页不受影响**：侧栏「表格浏览器」（?page=tables）仍渲染完整工具栏与
+   *     三个页签 —— 导入/导出/自定义列/字段剖析/智能问答都是那边的正经功能。
    *  ⚠️ 判据与 App.tsx::readEmbedMode 一致，但**刻意不含 `?page=`**：
    *     本页独立访问时地址栏也永远带 `?page=tables`，把它算作内嵌会把工具栏砍掉。
    *     （EmailReports.tsx::isShellLessEmbed 那份含 `?page=`，它判的是「有没有外层
    *     标题」，与这里的判据目的不同，不要照搬。）
    *  ⚠️ 门户 iframe 的 src 由 olbr.js::qaSrc 统一补 `&embed=1`，这条判断才有依据；
-   *     改门户侧那行前先看 olbr.js 里 qaSrc 的注释。 */
+   *     改门户侧那行前先看 olbr.js 里 qaSrc 的注释。
+   *  ⚠️ 上游 /v3/olbrportal/ 与团队门户 /v3/<team>_portal/ 内嵌的是同一页，
+   *     两处会同时变 —— 两边的「Master Site」页签本来就是同一个界面，有意如此。 */
   const [embedMode] = useState(() => {
     try {
       const sp = new URLSearchParams(window.location.search)
@@ -661,6 +667,29 @@ export default function TableBrowser() {
     />
   )
 
+  /* 导出按钮（Excel / CSV 下拉）。**只有这一份**节点，两处摆放：
+   *   · 独立页（?page=tables）—— 在工具栏那一排，紧挨导入 / 自定义列；
+   *   · 门户内嵌版（?embed=1）—— 搜索框同一行的最右边（2026-11-16 用户要求
+   *     「在搜索的同一行的最右边显示导出按钮」）。
+   * 共用同一份的意义：导出格式、搜索词 / 列筛选 / 排序的带入口径只有一处实现，
+   * 不会出现「工具栏导出的和搜索行导出的不是同一批行」这种两套逻辑。
+   * ⚠️ 未选表时禁用（skeleton 阶段 selectedTable 还是空串，点了也导不出东西）。 */
+  const exportButton = (
+    <Dropdown
+      menu={{
+        items: [
+          { key: 'xlsx', label: 'Excel (.xlsx)' },
+          { key: 'csv', label: 'CSV (.csv)' },
+        ],
+        onClick: ({ key }) => exportTable(key as 'xlsx' | 'csv'),
+      }}
+    >
+      <Button icon={<DownloadOutlined />} disabled={!selectedTable}>
+        {t('table.export')}
+      </Button>
+    </Dropdown>
+  )
+
   /* 本地权威表说明（2026-10-23）：
       这三张表的真实数据只写本地 SQLite，而本页读当前主库（pg 模式下是 PG）。
       PG 里的同名表是 SQLAlchemy 建的空壳，恒 0 行 —— 不解释的话，
@@ -682,14 +711,156 @@ export default function TableBrowser() {
     />
   ) : null
 
+  /* 表格主体（列筛选标签 + 数据表 + 分页）。
+     独立页把它当作「Browse Data」页签的内容；门户内嵌版（?embed=1）直接渲染它 ——
+     2026-11-16 用户要求：「不要 Browse Data / Field Profile / Ask AI，直接显示表格就行」。 */
+  const browsePanel = (
+    <Card style={cardStyle}>
+      {/* 已启用的列筛选常驻可见：漏斗图标藏在表头里，光看数字会以为
+          全表就这么几行。每个标签可单独关掉，也可一键清空。 */}
+      {filterEntries.length > 0 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 'var(--wh-space-xs)', marginBottom: 'var(--wh-space-sm)' }}>
+          <span style={{ color: 'var(--wh-text-dim)', fontSize: '0.8125rem' }}>{t('table.colFilterActive')}:</span>
+          {filterEntries.map(([col, f]) => (
+            <Tag key={col} color="blue" closable onClose={() => applyColFilter(col, null)}>
+              {col} · {modeLabel(t, f.op)}
+              {(f.op === 'contains' || f.op === 'equals') ? ` ${f.value ?? ''}` : ''}
+              {f.op === 'in' ? ` ${(f.values ?? []).length}` : ''}
+            </Tag>
+          ))}
+          <Button type="link" size="small" onClick={clearAllColFilters}>{t('table.colFilterClearAll')}</Button>
+        </div>
+      )}
+      <div className="wh-table-responsive">
+        <Table
+          /* 换表重挂载，清掉 antd 内部非受控的排序图标状态 */
+          key={selectedTable}
+          dataSource={tableData}
+          columns={dataColumns}
+          loading={loading}
+          scroll={{ x: 'max-content' }}
+          size="small"
+          rowKey={stableRowKey}
+          /* S1：只在排序动作时重查；翻页/改页大小由 pagination.onChange 处理，
+             否则 antd 的 onChange 与 pagination.onChange 会各发一次请求。 */
+          onChange={(_pag, _filters, sorter: any, extra: any) => {
+            if (extra?.action !== 'sort') return
+            const s = Array.isArray(sorter) ? sorter[0] : sorter
+            const next = s?.order
+              ? { field: String(s.field), order: String(s.order) }
+              : {}
+            const changed = next.field !== sortRef.current.field || next.order !== sortRef.current.order
+            sortRef.current = next
+            if (changed) loadTableData(1)
+          }}
+          /* 空表必须说清楚「是空的」而不是留一片白（2026-10-23 用户报
+             「credentials 是空的」，实际是表体空白 + 分页条「共 0 条」，
+             分不清加载失败与确实无数据）。locale.emptyText 会按当前语言取文案。
+             ⚠️ 但「还在取数」不是「确实无数据」：首屏两级请求期间显示加载中，
+             别在 iframe 被后端排队时抢先宣布表是空的（2026-11-08 门户实测）。 */
+          locale={{
+            emptyText: loading
+              ? t('common.loading')
+              : searchText
+                ? t('table.emptyTableFiltered', { kw: searchText })
+                : filterEntries.length
+                  ? t('table.emptyTableColFiltered')
+                  : t('table.emptyTable'),
+          }}
+          pagination={{
+            ...pagination,
+            showSizeChanger: true,
+            pageSizeOptions: [20, 50, 100],
+            showTotal: (total) => (
+              <ExplainPopover text={t('table.explain.pageTotal', { n: total })}>
+                <span>{t('table.totalRecords', { n: total })}</span>
+              </ExplainPopover>
+            ),
+            onChange: (p, ps) => {
+              // S2：改每页条数后回到第 1 页，避免停在不存在的页码
+              if (ps !== pageSizeRef.current) {
+                pageSizeRef.current = ps
+                loadTableData(1)
+              } else {
+                loadTableData(p)
+              }
+            },
+            // antd 的 prevIcon/nextIcon 是无名 button（title 只挂在 li 上），
+            // 读屏聚焦到按钮时读不出用途。只给上一页/下一页补名称，其余原样。
+            itemRender: (_page, type, originalElement) => {
+              if ((type === 'prev' || type === 'next') && isValidElement(originalElement)) {
+                return cloneElement(originalElement as ReactElement<{ 'aria-label'?: string }>, {
+                  'aria-label': t(type === 'prev' ? 'table.prevPageAria' : 'table.nextPageAria'),
+                })
+              }
+              return originalElement
+            },
+          }}
+        />
+      </div>
+    </Card>
+  )
+
+  /* 独立页的三页签外壳（Browse Data / Field Profile / Ask AI）。
+     门户内嵌版整块不渲染它：这三个页签是独立页的完整能力，门户那个页签里只用「查表 + 导出」。
+     见组件顶部 embedMode 的注释。 */
+  const tabsPanel = (
+    <Tabs
+      items={[
+        {
+          key: 'data',
+          label: t('table.browseTab'),
+          children: browsePanel,
+        },
+        {
+          key: 'profile',
+          label: t('table.profileTab'),
+          children: profileLoading ? (
+            <Spin style={{ display: 'block', margin: '50px auto' }} />
+          ) : profileData ? (
+            <ProfilePanel profile={profileData} onLoad={loadProfile} />
+          ) : (
+            <Card>
+              <div style={{ textAlign: 'center', padding: 50 }}>
+                <p>{t('table.profilePrompt')}</p>
+                <a onClick={loadProfile} style={{ fontSize: 16 }}>{t('table.startAnalysis')}</a>
+              </div>
+            </Card>
+          ),
+        },
+        {
+          key: 'data-agent',
+          label: t('dataAgent.tab'),
+          children: <DataAgentBar />,
+        },
+      ]}
+    />
+  )
+
   return (
     <div>
       {embedMode ? (
-        /* 门户内嵌版（?embed=1）：只剩搜索栏，见组件顶部 embedMode 的注释。
-           不套 Card —— 卡片本身就是那个「红框」，只装一个输入框会留一大块空面板。
-           宽度按搜索框的常见尺寸收住（22rem），不要让它铺满 1200px 的 iframe。 */
-        <div style={{ maxWidth: '22rem', marginBottom: 'var(--wh-space-md)' }}>
-          {searchBar}
+        /* 门户内嵌版（?embed=1）：一行「搜索框 + 最右边的导出按钮」，下面直接是表格。
+           2026-11-16 用户要求：「不要 Browse Data / Field Profile / Ask AI，直接显示表格
+           就行，在搜索的同一行的最右边显示导出按钮」——
+             · 三个页签整块不渲染（不是隐藏：DataAgentBar / 字段剖析的挂载与请求也随之
+               不存在，iframe 里少两路无用请求）；
+             · 导出按钮从工具栏搬到搜索行右端，与搜索框同一行、右对齐；
+             · 不再套 Card：卡片本身就是那个「红框」，只装一行控件会留一大块空面板。
+           搜索框占满剩余宽度（flex:1 + minWidth:0，防止长占位符把按钮挤出可视区），
+           导出按钮固定宽度贴右 —— iframe 宽到 1200px 也不会把两者拉成两头悬空。
+           padding 取「上下 16 / 左右 24」（--wh-space-md / --wh-space-lg）：
+           左右与下面 Card 的 body 内边距同值，这一行的左右边缘才和表格可视区对齐；
+           上下各留一档，否则 search / 导出按钮会直接贴在门户 .canvas 的 1px 边框上
+           （.canvas iframe 是 inset:0，iframe 里没有外层内边距可用）。 */
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 'var(--wh-space-sm)',
+          padding: 'var(--wh-space-md) var(--wh-space-lg)',
+        }}>
+          <div style={{ flex: '1 1 auto', minWidth: 0 }}>{searchBar}</div>
+          {exportButton}
         </div>
       ) : (
         <Card style={controlCardStyle}>
@@ -719,19 +890,7 @@ export default function TableBrowser() {
             )}
             <Col xs={24} lg={tableInfo ? 6 : 12}>
               <Space wrap style={{ width: '100%' }}>
-                <Dropdown
-                  menu={{
-                    items: [
-                      { key: 'xlsx', label: 'Excel (.xlsx)' },
-                      { key: 'csv', label: 'CSV (.csv)' },
-                    ],
-                    onClick: ({ key }) => exportTable(key as 'xlsx' | 'csv'),
-                  }}
-                >
-                  <Button icon={<DownloadOutlined />} disabled={!selectedTable}>
-                    {t('table.export')}
-                  </Button>
-                </Dropdown>
+                {exportButton}
                 <Button icon={<UploadOutlined />} onClick={openImport}>
                   {t('table.import')}
                 </Button>
@@ -975,121 +1134,8 @@ export default function TableBrowser() {
         )}
       </Modal>
 
-      <Tabs
-        items={[
-          {
-            key: 'data',
-            label: t('table.browseTab'),
-            children: (
-              <Card style={cardStyle}>
-                {/* 已启用的列筛选常驻可见：漏斗图标藏在表头里，光看数字会以为
-                    全表就这么几行。每个标签可单独关掉，也可一键清空。 */}
-                {filterEntries.length > 0 && (
-                  <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 'var(--wh-space-xs)', marginBottom: 'var(--wh-space-sm)' }}>
-                    <span style={{ color: 'var(--wh-text-dim)', fontSize: '0.8125rem' }}>{t('table.colFilterActive')}:</span>
-                    {filterEntries.map(([col, f]) => (
-                      <Tag key={col} color="blue" closable onClose={() => applyColFilter(col, null)}>
-                        {col} · {modeLabel(t, f.op)}
-                        {(f.op === 'contains' || f.op === 'equals') ? ` ${f.value ?? ''}` : ''}
-                        {f.op === 'in' ? ` ${(f.values ?? []).length}` : ''}
-                      </Tag>
-                    ))}
-                    <Button type="link" size="small" onClick={clearAllColFilters}>{t('table.colFilterClearAll')}</Button>
-                  </div>
-                )}
-                <div className="wh-table-responsive">
-                  <Table
-                    /* 换表重挂载，清掉 antd 内部非受控的排序图标状态 */
-                    key={selectedTable}
-                    dataSource={tableData}
-                    columns={dataColumns}
-                    loading={loading}
-                    scroll={{ x: 'max-content' }}
-                    size="small"
-                    rowKey={stableRowKey}
-                    /* S1：只在排序动作时重查；翻页/改页大小由 pagination.onChange 处理，
-                       否则 antd 的 onChange 与 pagination.onChange 会各发一次请求。 */
-                    onChange={(_pag, _filters, sorter: any, extra: any) => {
-                      if (extra?.action !== 'sort') return
-                      const s = Array.isArray(sorter) ? sorter[0] : sorter
-                      const next = s?.order
-                        ? { field: String(s.field), order: String(s.order) }
-                        : {}
-                      const changed = next.field !== sortRef.current.field || next.order !== sortRef.current.order
-                      sortRef.current = next
-                      if (changed) loadTableData(1)
-                    }}
-                    /* 空表必须说清楚「是空的」而不是留一片白（2026-10-23 用户报
-                       「credentials 是空的」，实际是表体空白 + 分页条「共 0 条」，
-                       分不清加载失败与确实无数据）。locale.emptyText 会按当前语言取文案。
-                       ⚠️ 但「还在取数」不是「确实无数据」：首屏两级请求期间显示加载中，
-                       别在 iframe 被后端排队时抢先宣布表是空的（2026-11-08 门户实测）。 */
-                    locale={{
-                      emptyText: loading
-                        ? t('common.loading')
-                        : searchText
-                          ? t('table.emptyTableFiltered', { kw: searchText })
-                          : filterEntries.length
-                            ? t('table.emptyTableColFiltered')
-                            : t('table.emptyTable'),
-                    }}
-                    pagination={{
-                      ...pagination,
-                      showSizeChanger: true,
-                      pageSizeOptions: [20, 50, 100],
-                      showTotal: (total) => (
-                        <ExplainPopover text={t('table.explain.pageTotal', { n: total })}>
-                          <span>{t('table.totalRecords', { n: total })}</span>
-                        </ExplainPopover>
-                      ),
-                      onChange: (p, ps) => {
-                        // S2：改每页条数后回到第 1 页，避免停在不存在的页码
-                        if (ps !== pageSizeRef.current) {
-                          pageSizeRef.current = ps
-                          loadTableData(1)
-                        } else {
-                          loadTableData(p)
-                        }
-                      },
-                      // antd 的 prevIcon/nextIcon 是无名 button（title 只挂在 li 上），
-                      // 读屏聚焦到按钮时读不出用途。只给上一页/下一页补名称，其余原样。
-                      itemRender: (_page, type, originalElement) => {
-                        if ((type === 'prev' || type === 'next') && isValidElement(originalElement)) {
-                          return cloneElement(originalElement as ReactElement<{ 'aria-label'?: string }>, {
-                            'aria-label': t(type === 'prev' ? 'table.prevPageAria' : 'table.nextPageAria'),
-                          })
-                        }
-                        return originalElement
-                      },
-                    }}
-                  />
-                </div>
-              </Card>
-            ),
-          },
-          {
-            key: 'profile',
-            label: t('table.profileTab'),
-            children: profileLoading ? (
-              <Spin style={{ display: 'block', margin: '50px auto' }} />
-            ) : profileData ? (
-              <ProfilePanel profile={profileData} onLoad={loadProfile} />
-            ) : (
-              <Card>
-                <div style={{ textAlign: 'center', padding: 50 }}>
-                  <p>{t('table.profilePrompt')}</p>
-                  <a onClick={loadProfile} style={{ fontSize: 16 }}>{t('table.startAnalysis')}</a>
-                </div>
-              </Card>
-            ),
-          },
-          {
-            key: 'data-agent',
-            label: t('dataAgent.tab'),
-            children: <DataAgentBar />,
-          },
-        ]}
-      />
+      {embedMode ? browsePanel : tabsPanel}
+
     </div>
   )
 }

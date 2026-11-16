@@ -2686,6 +2686,17 @@ TT 复盘抽屉（`TtPostmortemPanel.tsx:693-710`）的红字
 - **列显隐 + 视图模板**：保存/套用/删除（:415,312,324 → `/api/tables/view-templates`）。同一张表经常只看固定几列时，存个模板比每次勾选快。
 - **导入**（:412 → `POST /api/tables/import`，:149，`multipart/form-data`）。
 - **画像页签**：字段级统计（:572 → `GET /api/tables/{t}/profile`，:273），与"数据"页签并列（:548）。
+- **门户内嵌版（`?embed=1`，2026-11-16）**：统一门户 `/v3/olbrportal/` 与五个团队门户的
+  Knowledge Q&A →「Master Site」页签内嵌的就是本页（`/myapp/?page=tables&table=master_site_db&embed=1`）。
+  该形态只留三件东西：**搜索行（右端导出按钮）+ 表格 + 分页** —— 表名下拉、行/列徽章、
+  导入/排除名单/MW Links/自定义列那一排管理动作**不渲染**，`Browse Data` / `Field Profile` /
+  `Ask AI` 三个页签**整块不渲染**（不是隐藏：字段画像与智能问答的组件根本不挂载、也不发请求）。
+  独立页 `?page=tables` 仍是完整版。判据在 `frontend\src\pages\TableBrowser.tsx:145`（`embedMode`，
+  顶部注释写了两次收口的缘由），两段骨架是 `:717` 的 `browsePanel` 与 `:807` 的 `tabsPanel`，
+  渲染分叉在 `:1137`；导出按钮 `:677` 是**同一份节点**两处摆放，格式（xlsx / CSV）与
+  搜索词 / 列筛选 / 排序的带入口径不会分叉。
+  内嵌行左右 24px、上下 16px 内边距：门户的 `.canvas iframe` 是 `inset:0`，iframe 内没有外层
+  内边距，不补会把这些控件贴在面板的 1px 边框上。
 
 ## 20. 数据上传（`?page=upload`）
 
