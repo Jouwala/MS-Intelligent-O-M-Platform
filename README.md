@@ -159,25 +159,40 @@ node scripts/setup-git-hooks.mjs
 
 ---
 
-## 五、隔离模式
+## 五、运行模式（2026-11-11 起：已转正为生产）
 
-本副本当前是**完全隔离实例**，端口与生产（`D:\01_RPA`）完全错开，可与生产并行启动：
+本目录不再是与生产并行的隔离副本：**它自己就是生产**，`D:\01_RPA` 里的进程已停。
+根 `.env` 使用生产端口，根目录**没有** `ISOLATED_COPY.flag` —— 这个 flag 就是转正开关。
 
-| | 生产 | 本副本 |
+| | 本目录（现状 / 生产） | 新打包的隔离副本（默认） |
 | --- | --- | --- |
 | HTTP / HTTPS | 80 / 443 | 8080 / 8443 |
 | my_app 后端 / 前端 | 7038 / 7090 | 7039 / 7091 |
 | 门户 / bot / 分析 | 9267 / 9269 / 9268 | 9277 / 9279 / 9278 |
 | 实时代理 FMS / VMAX | 8787 / 8790 | 8887 / 8890 |
-| PostgreSQL | 5432 | 55432 |
+| PostgreSQL | 本机已安装的 16（5432） | 便携版 55432 |
 
-根目录的 `ISOLATED_COPY.flag` 让 `my_portal_ctl.ps1` 拦截所有 start/stop 命令（防误停生产）；
-`start_all.ps1` / `sync-engine.mjs` / `bundle_data.ps1` 也都要求该标志存在。**转正为生产时**：改回生产端口 + 删除该 flag。
+**两个启动器不能混用**：
 
-`start_all.ps1` 的隔离保障：副本 `.env` 优先于继承的进程环境（防生产污染）、拒绝任何落在生产端口上的配置、
-派生变量无条件按副本根覆盖、清除 `PYTHONPATH/PYTHONHOME/NODE_PATH`、强制 `MY_APP_DISABLE_SCHEDULER=1` 与
-`START_WA_BOT=0`（不接管真实 WhatsApp 会话/投递）、启动前预检核心入口、PG 写入前校验 `data_directory` 属于副本。
-实时代理控制器按「进程命令行含本副本脚本绝对路径」验归属，**绝不复用或击杀生产 8787/8790 代理**。
+| 目录状态 | `start.bat` / `stop.bat` 实际执行 | 原因 |
+| --- | --- | --- |
+| 有 `ISOLATED_COPY.flag`（隔离副本） | `scripts\start_all.ps1` / `stop_all.ps1` | 强制 `MY_APP_DISABLE_SCHEDULER=1`、自带便携 PG、拒绝生产端口 |
+| 无 flag（本目录，已转正） | `my_portal_ctl.ps1 8-start-all` / `9-stop-all` | 生产编排：my_app → 门户 → bot → nginx；桌面 `8-start_all` 快捷方式走的就是它 |
+
+2026-11-16 修复的正是这里：转正只改了 `.env` 并删了 flag，`start.bat` 仍直连 `start_all.ps1`，
+于是被「副本端口 80 与生产端口冲突」拦住，整台机器起不来。现在由 flag 决定分流，
+`start_all.ps1` 保持隔离语义（在已转正目录里直接调它仍会拒绝生产端口，这是刻意的）。
+`my_portal_ctl.ps1` 的起停命令也受同一个 flag 拦截（防误停生产），flag 删除后才会放行。
+
+- 想**退回隔离试跑**：把 `.env` 端口改回 8080/8443/7039/7091/9277/55432，重建 `ISOLATED_COPY.flag`，
+  并先停掉生产栈（`stop.bat`）。
+- `start_all.ps1` 的隔离保障仍适用于隔离副本：副本 `.env` 优先于继承的进程环境（防生产污染）、
+  拒绝任何落在生产端口上的配置、派生变量无条件按副本根覆盖、清除 `PYTHONPATH/PYTHONHOME/NODE_PATH`、
+  强制 `MY_APP_DISABLE_SCHEDULER=1` 与 `START_WA_BOT=0`、启动前预检核心入口、PG 写入前校验
+  `data_directory` 属于副本。实时代理控制器按「进程命令行含本副本脚本绝对路径」验归属，
+  **绝不复用或击杀生产 8787/8790 代理**。
+- 生产模式下这些都不适用：调度器按 `.env` 的 `MY_APP_DISABLE_SCHEDULER=0` 正常运行（副本是唯一采集端），
+  PG 是本机 5432，`start_hidden.ps1` 负责 backend/worker watchdog 与按需拉起。
 
 > 源码侧的 `D:\01_RPA` 硬编码路径已于 2026-11-11 收口：业务数据目录、邮件/代理解释器（`sys.executable`）、
 > 前端产物目录（`FE_DIST_OUT`/相对路径）、Chrome、cn_ems 模板、eflow 问答工具均改为按副本位置定位或 env 覆盖。
