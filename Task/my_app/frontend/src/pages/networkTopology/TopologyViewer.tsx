@@ -98,6 +98,12 @@ const VIEW_OPTIONS: { value: TopoView; key: string }[] = [
 const CSS = `
 .topo-toolbar{display:flex;flex-wrap:wrap;gap:var(--wh-space-sm);align-items:center;
   padding:var(--wh-space-sm) var(--wh-space-md);border-bottom:1px solid var(--wh-card-border)}
+/* 撑满模式（2026-11-16）：页面把画布卡片做成 flex 列并占满可用高度，
+   画布本体吃掉「工具条 + 页底说明」之外的剩余高度，页底不再留一大块空白。
+   只作用于 .topo-fill 内，maponly / 全屏 / 其他页面的 62vh 默认值不受影响。 */
+.topo-fill{display:flex;flex-direction:column;flex:1 1 auto;height:100%;min-height:0;overflow:hidden}
+.topo-fill>.topo-toolbar,.topo-fill>.topo-hint{flex:0 0 auto}
+.topo-fill>.topo-viewer{flex:1 1 auto;height:auto;min-height:20rem}
 .topo-views{display:flex;flex-wrap:wrap;gap:6px;min-width:0}
 .topo-viewer{position:relative;height:62vh;min-height:420px;overflow:hidden;cursor:grab;touch-action:none;
   user-select:none}

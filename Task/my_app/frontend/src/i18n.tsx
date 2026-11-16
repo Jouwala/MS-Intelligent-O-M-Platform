@@ -3150,18 +3150,8 @@ const translations: Record<Locale, Record<string, string>> = {
 
     // OLIB FO 网络拓扑（?page=olibTopo，2026-11-16）：PDF 原图 + 553 个提取站点，纯静态参考页
     'nav.olibTopo': 'OLIB 光纤拓扑',
-    'olibTopo.kpi.sites': '提取站点',
-    'olibTopo.kpi.sitesSub': '物理图 + 逻辑名单',
-    'olibTopo.kpi.core': '骨干核心节点',
-    'olibTopo.kpi.coreSub': 'IPRAN / DWDM',
-    'olibTopo.kpi.backbone': '骨干光纤',
-    'olibTopo.kpi.backboneSub': '骨干环网端口速率',
-    'olibTopo.kpi.dc': 'AML 数据中心',
-    'olibTopo.kpi.dcSub': 'Yekepa / Tokadeh',
-    'olibTopo.explain.sites': '**提取站点** = 从 202503 逻辑图名单提取、能落到第 1 页物理图上的站点名，共 {n} 条；同名去重后仍然是一条记录。',
-    'olibTopo.explain.core': '**骨干核心节点** = 名单里与 CORE_NAMES 同名（忽略大小写与空格）的站点，共 {n} 个：Orange、Kakata City、Gbarnga 2、Sanniquellie 2、EPCM、Danane、R.I.A、Buchanan 2、Botota。',
-    'olibTopo.explain.backbone': '**骨干光纤** = 第 2 页逻辑图标注的骨干环网速率档位（40G / 10G），是链路规格，不是当前流量。',
-    'olibTopo.explain.dc': '**AML 数据中心** = 逻辑图上的 2 个 AML Data Center 节点（Yekepa / Tokadeh）；它们不在 553 条站点名单里，只出现在骨干示意中。',
+    // 2026-11-16：顶部四张统计卡已去掉（用户要求），kpi./explain.* 两组键随之删除；
+    // 站点 / 骨干核心 / AML 数据中心的数字口径并入页底问号里的「数据口径与来源」。
     'olibTopo.view.tabs': '拓扑视图',
     'olibTopo.view.physical': '原图 · 物理拓扑',
     'olibTopo.view.logical': '原图 · 逻辑拓扑',
@@ -3223,7 +3213,7 @@ const translations: Record<Locale, Record<string, string>> = {
     'olibTopo.legend.site.core': '骨干核心站点',
     'olibTopo.legend.footnote': 'Danane–Sanniquellie–Tokadeh 95km · –Gbarnga 185km',
     'olibTopo.core.notInList': '「{name}」在第 1 页提取名单中未找到同名站点',
-    'olibTopo.note.title': '数据口径与来源（点此展开）',
+    'olibTopo.note.title': '数据口径与来源',
     'olibTopo.note.sec.source': '数据来源',
     'olibTopo.note.source.1': '物理拓扑 / 逻辑拓扑图来自 Orange Liberia《Orange_network_topology_20251226.pdf》第 1、2 页，由 PDF 矢量导出为 SVG 后嵌入：线条与文字都是矢量，放大到任意倍数仍然清晰，不是位图截图。',
     'olibTopo.note.source.2': '站点名单（553 条）与坐标来自 202503 逻辑图的一次性提取；骨干示意由第 2 页逻辑图人工梳理（见 networkTopology/topologyData.ts）。',
@@ -9815,18 +9805,9 @@ const translations: Record<Locale, Record<string, string>> = {
 
     // OLIB FO network topology (?page=olibTopo, 2026-11-16): PDF originals + 553 extracted sites, static reference page
     'nav.olibTopo': 'OLIB FO Topology',
-    'olibTopo.kpi.sites': 'Extracted sites',
-    'olibTopo.kpi.sitesSub': 'Physical map + logical list',
-    'olibTopo.kpi.core': 'Backbone core nodes',
-    'olibTopo.kpi.coreSub': 'IPRAN / DWDM',
-    'olibTopo.kpi.backbone': 'Backbone fiber',
-    'olibTopo.kpi.backboneSub': 'Backbone ring port speed',
-    'olibTopo.kpi.dc': 'AML data centers',
-    'olibTopo.kpi.dcSub': 'Yekepa / Tokadeh',
-    'olibTopo.explain.sites': '**Extracted sites** = site names taken from the 202503 logical list that can be placed on the page-1 physical map, {n} in total; duplicate names are still one record.',
-    'olibTopo.explain.core': '**Backbone core nodes** = sites whose names match CORE_NAMES (case and spaces ignored), {n} in total: Orange, Kakata City, Gbarnga 2, Sanniquellie 2, EPCM, Danane, R.I.A, Buchanan 2, Botota.',
-    'olibTopo.explain.backbone': '**Backbone fiber** = the ring speed tiers marked on the page-2 logical drawing (40G / 10G). It is a link specification, not current traffic.',
-    'olibTopo.explain.dc': '**AML data centers** = the two AML Data Center nodes on the logical drawing (Yekepa / Tokadeh). They are not in the 553-site list and only appear in the backbone schematic.',
+    // 2026-11-16: the four stat cards are gone (user request); the kpi./explain.* keys were
+    // removed with them. Site / core / AML data-center definitions now live in the
+    // "Data scope & sources" popover at the bottom of the page.
     'olibTopo.view.tabs': 'Topology views',
     'olibTopo.view.physical': 'Original · Physical',
     'olibTopo.view.logical': 'Original · Logical',
@@ -9888,7 +9869,7 @@ const translations: Record<Locale, Record<string, string>> = {
     'olibTopo.legend.site.core': 'Backbone core site',
     'olibTopo.legend.footnote': 'Danane–Sanniquellie–Tokadeh 95km · –Gbarnga 185km',
     'olibTopo.core.notInList': '"{name}" has no matching site in the page-1 list',
-    'olibTopo.note.title': 'Data scope & sources (expand)',
+    'olibTopo.note.title': 'Data scope & sources',
     'olibTopo.note.sec.source': 'Sources',
     'olibTopo.note.source.1': 'The physical / logical drawings come from pages 1-2 of Orange Liberia "Orange_network_topology_20251226.pdf" and are embedded as vector SVGs exported from the PDF: lines and text stay sharp at any zoom level — this is not a bitmap screenshot.',
     'olibTopo.note.source.2': 'The 553-site list and coordinates come from a one-off extraction of the 202503 logical drawing; the backbone schematic was traced by hand from the page-2 drawing (see networkTopology/topologyData.ts).',

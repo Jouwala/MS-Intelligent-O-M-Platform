@@ -576,9 +576,10 @@ Orange Liberia 全国光纤网络拓扑的**静态参考页**：把《Orange_net
 - **数据与资源**：站点名单 / 坐标 / 骨干节点与链路在 `frontend/src/pages/networkTopology/topologyData.ts`；两张图是**由 PDF 矢量导出的 SVG**（`frontend/public/topology/physical.svg`、`logical.svg`，构建后落到 `_fe_dist/topology/`，经 vite base `/myapp/` 加载），不是位图截图 —— 放大到任意倍率线条与文字都保持清晰。坐标口径、已知限制写在 `topologyData.ts` 文件头与本页可展开的口径说明里。
 - **四个视图**（`TopologyViewer.tsx`）：「原图 · 物理拓扑」叠加全部站点点位；「原图 · 逻辑拓扑」只看第 2 页原图；「骨干示意」按第 2 页逻辑图重绘 13 个节点、18 条链路（`CoreSchematic.tsx`）；「站点分布」是按区域着色的散点图（`ScatterView.tsx`）。
 - **交互**：滚轮以光标为中心缩放、拖动平移、工具条缩放/重置/全屏/显示隐藏点位；右下角缩略图（仅物理图）显示当前视野并可点击跳转。画布按「原图尺寸 × 倍率」重新渲染 SVG（不是 CSS transform 拉伸），所以放大后文字、链路仍清晰；点位半径按 `1/scale` 反向补偿，放大后仍是细小圆点；选中站点画十字虚线 + 橙色脉冲光圈 + 名称标签。
+- **布局与高度自适应**（2026-11-16 用户要求「下面不要一大块空白」）：画布卡片不再固定 `62vh`，改为**认领内容区剩余高度**——embed 下 `#main-content` 是定高 `100vh`，直链下按内容高度；左画布 : 右栏 = 3 : 1。右栏（站点查询 / 详情 / 图例）内容比画布高时**在自己容器里滚动**，子卡片必须 `flex-shrink:0`，否则会被压扁、内容被 `overflow:hidden` 裁掉且滚不到（实测图例底部就是这样消失的）。窄屏（`<1000px`）换行堆叠，回到按内容高度排布。左右两栏用普通 flex 而非 antd `Row/Col`：Row 的 flex 行高在内容高于可用高度时不参与收缩，`Col` 会被内容撑到 1010px 再溢出视野。骨架见 `NetworkTopology.tsx` 的 `PAGE_CSS`。
 - **站点查询与详情**：站名/区域**模糊搜索**（忽略大小写与标点；多词都要出现；允许打错一个字母或漏写少量字母，见 `networkTopology/siteMatch.ts`）+ 区域下拉 +「全部 / 5G / ISP / 骨干核心」快捷筛选（`SiteSearch.tsx`）；结果超过 300 条时只渲染前 300 条并显示明确提示，不静默截断。点结果会放大到该站。点位后详情卡显示区域、原图相对位置（近似值，不是 GPS）与类型，并提供「全图定位 / 放大看周边链路 / 在分布图上查看」（`SiteDetail.tsx`）。
 - **门户入口**（2026-11-16）：`/v3/olbrportal/` 以及勾了 IP 页签的团队门户（fo / bo / flm）的 GIS Map「IP」页签，内嵌 `?page=olibTopo&view=physical&maponly=1`。只留物理图，左上角搜索框做同样的模糊匹配，点一条结果放大到该站。Open Link 去掉 `maponly`，新窗口是完整页并停在物理图。直开不带 `maponly` 时四个视图都在。smc / cxo 按矩阵不显示这一页。
-- **口径与数字**：4 张统计卡（553 站点 / 9 个骨干核心 / 40G·10G 骨干光纤 / 2 个 AML 数据中心）的数字悬浮说明取本页静态事实（`SITES.length`、`CORE_SITE_COUNT`、`AML_DC_COUNT`），不在前端重算；整页口径走 `CalcChainNote` 默认收起。
+- **口径与数字**：顶部**不再有统计卡**（2026-11-16 用户要求去掉 553 站点 / 9 个骨干核心 / 40G·10G 骨干光纤 / 2 个 AML 数据中心四张卡 —— 数字都在图例与说明里，卡只占首屏）。整页口径与来源走 `CalcChainNote`，以 **页面最下面一个问号**（`trigger="icon"`，点开气泡、不占一行）承载：数据来源、坐标口径、骨干核心与链路、已知限制四节。站点数等静态事实仍取 `SITES.length` / `CORE_SITE_COUNT` / `AML_DC_COUNT`（`topologyData.ts`），不在前端重算。
 - **刷新**：`AR_PAGE_DEFAULTS.olibTopo = 1800`。页面本身没有接口可重取，自动刷新只走外壳默认重挂载（会回到初始视图），不会产生新数据。
 
 ## 9. MW 微波实时（`?page=mwRealTime`）— iframe

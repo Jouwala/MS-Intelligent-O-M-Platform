@@ -2066,6 +2066,7 @@ OLIB FO nationwide fiber topology (static reference page): pages 1-2 of the Oran
 - Physical-map dots: grey = regular, red = 5G, blue = ISP, purple = backbone core. The radius is compensated against zoom so dots stay small when zoomed in. Wheel to zoom, drag to pan; the bottom-right mini map jumps on click, and the toolbar resets / goes fullscreen / hides dots
 - The site search on the right is fuzzy: it ignores case and punctuation, matches words in the site name or region, and still hits when one letter is wrong or a couple are missing. A region dropdown and the All / 5G / ISP / Backbone core chips sit beside it. When more than 300 rows match only the first 300 are rendered, with an explicit notice (never silently truncated). Picking a row zooms to that site
 - After selecting a site the detail card shows its region, approximate page position (not GPS) and type; "Locate on map", "Zoom to nearby links" and "Show on distribution" match the reference page
+- Data scope & sources (PDF origin, coordinate conversion, backbone cores and links, known limits) sits at the **bottom of the page**: a single question mark in the bottom-right corner that expands on click — no banner eating the first screen
 - This page is a **static reference**: the data is a one-off PDF extraction kept in networkTopology/topologyData.ts and the originals live in public/topology/. It reads no backend and writes no database, so auto-refresh defaults to 1800s and its content does not change
 
 #### MW Realtime（`mwRealTime`, iframe page）
