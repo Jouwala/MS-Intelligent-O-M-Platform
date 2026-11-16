@@ -301,8 +301,21 @@ function Convert-SmokeResultToReport {
     if ($txt -match 'RESULT:\s*(PASS|FAIL|REFUSED)') { $passLine = $Matches[1] }
     elseif ($txt -match 'TOTAL=\d+\s+FAIL=(\d+)') { if ($Matches[1] -eq '0') { $passLine = 'PASS' } else { $passLine = 'FAIL' } }
     if ($VerdictHint) { $Results['结论源'] = $VerdictHint }
+    if ($passLine -eq 'REFUSED') {
+        # 预检拒绝 ≠ 冒烟失败（2026-11-16 实测踩坑）：
+        # smoke.ps1 预检发现 02 端口被占（或 HEAD 不匹配）时**什么都没验证**就 exit 2。
+        # 旧实现把它写成「失败」，报告模板又把 §8.1–§8.3 填成「通过」，
+        # watcher 再据此打 state:qa-failed，并把这个 head 记进 failed 永不再跑。
+        # 这里统一改成「未执行」，并带上预检给出的拒绝原因，供报告与 watcher 判读。
+        $pre = Get-MdCell $txt '预检'
+        $why = $(if ($pre) { "$($pre.Detail)" } else { '见 ops\smoke\smoke.ps1 报告' })
+        $Results['结论'] = '未执行：预检拒绝'
+        foreach ($k in @('8.1', '8.2', '8.3', '8.4', 'pytest')) {
+            $Results[$k] = "未执行：预检拒绝，冒烟脚本没有启动或停止任何进程。原因 $why"
+        }
+        return
+    }
     if ($passLine -eq 'PASS') { $Results['结论'] = '通过' }
-    elseif ($passLine -eq 'REFUSED') { $Results['结论'] = '失败：预检拒绝' }
     else { $Results['结论'] = '失败' }
 
     $noteBlock = $false
@@ -319,7 +332,8 @@ function Write-SmokeReport {
     $EndedAt = Get-Date
     $Duration = [math]::Round(($EndedAt - $StartedAt).TotalSeconds, 1)
     $passed = ($Results['结论'] -eq '通过')
-    $verdict = $(if ($passed) { '通过' } else { '失败' })
+    $isRefused = ($Results['结论'] -like '未执行*')
+    $verdict = $(if ($passed) { '通过' } elseif ($isRefused) { '未执行（预检拒绝）' } else { '失败' })
     if ($DryRun) { $verdict = '干跑' }
     $report = @()
     $report += "## D:\02 冒烟结果：$verdict"
@@ -350,7 +364,11 @@ function Write-SmokeReport {
     }
     $report += ''
     $report += '### 标签'
-    $report += '未打 `smoke-passed`。本脚本不负责贴标签，由 watcher 在通过后处理。'
+    if ($isRefused) {
+        $report += '未打 `smoke-passed`：本次**未执行**（不算失败、不触发 auto-fix），watcher 下一轮会自动重试同一个 head。'
+    } else {
+        $report += '未打 `smoke-passed`。本脚本不负责贴标签，由 watcher 在通过后处理。'
+    }
     $utf8Bom = New-Object System.Text.UTF8Encoding $true
     [IO.File]::WriteAllText($ReportFile, (($report -join "`n") + "`n"), $utf8Bom)
     Write-Log "报告已写：$ReportFile（结论：$($Results['结论'])，耗时 ${Duration}s）"

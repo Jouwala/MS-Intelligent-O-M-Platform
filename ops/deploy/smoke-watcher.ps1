@@ -45,6 +45,13 @@
   （qa-started: / qa-result: pr-<N>-sha-<短SHA>），同一 (PR, SHA) 不重复
   发；发前先查 Issue 评论里有没有同标记，不依赖本机状态文件。
 
+  预检拒绝（smoke-local 退出码 2）：02 端口被别的栈占住、HEAD 不匹配、
+  冒烟锁冲突时，smoke-local 什么都没验证就退出。这类结果**不算通过也
+  不算失败**：不贴评论、不打 smoke-passed、不写 failed 状态、不回写
+  state:qa-failed，下一轮自动重试同一个 head（2026-11-16 修：旧实现把它
+  当失败写进 failed，该 head 就永不再跑，Issue 被误打 qa-failed 并触发
+  auto-fix，实测见 #100/#104）。
+
   smoke-passed 的 SHA 绑定（TASK-06-A #48，堵过期结果触发合并）：
   贴到 PR 的冒烟报告评论首行带机器可读标记
   <!-- smoke-result: pr-<N> sha-<40位SHA> result=passed|failed -->，
@@ -538,6 +545,14 @@ function Invoke-OneCycle {
             Write-WatchLog "smoke-local 退出码=$smokeExit"
         } finally {
             Exit-PrCheckout -Plan $plan
+        }
+
+        if ($smokeExit -eq 2) {
+            # 预检拒绝：冒烟脚本没启动/停止任何进程，什么都没验证。
+            # 记成失败会让这个 head 永久不再重跑（state['failed']），Issue 被
+            # 误打 state:qa-failed 并触发 auto-fix（2026-11-16 实测 #100/#104）。
+            Write-SkipOnce "refused-$n-$sha" "PR #$n head $short 冒烟预检拒绝（02 端口被占/环境未就绪），本轮不计失败；下一轮重试同一 head。"
+            continue
         }
 
         $passed = ($smokeExit -eq 0)
