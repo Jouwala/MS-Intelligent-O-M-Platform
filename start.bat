@@ -33,6 +33,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start_all.ps1"
 exit /b %errorlevel%
 
 :promoted
+if not "%~1"=="" (
+    echo [FAIL] Promoted copy: switch arguments are isolated-only ^(-DryRun / -SkipNginxConf^).
+    echo        Refusing to start with: %*
+    exit /b 2
+)
 echo [*] Promoted copy (no ISOLATED_COPY.flag): my_portal_ctl.ps1 8-start-all
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0my_portal_ctl.ps1" 8-start-all
 exit /b %errorlevel%

@@ -28,6 +28,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\stop_all.ps1" 
 exit /b %errorlevel%
 
 :promoted
+if not "%~1"=="" (
+    echo [FAIL] Promoted copy: switch arguments are isolated-only ^(-DryRun^).
+    echo        Refusing to stop with: %*
+    exit /b 2
+)
 echo [*] Promoted copy (no ISOLATED_COPY.flag): my_portal_ctl.ps1 9-stop-all
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0my_portal_ctl.ps1" 9-stop-all
 exit /b %errorlevel%
