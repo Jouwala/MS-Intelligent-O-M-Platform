@@ -48,7 +48,7 @@
       "sub": null,
       "probe": "SCOPE.mapPages()",
       "title": "GIS MAP 地图",
-      "note": "按 MAP_TABS 的 page 过滤（gis / person / mwRealTime / ipt_power；ipranTopo 只在上游 MAP_TABS，矩阵未登记故团队门户滤掉）。"
+      "note": "按 MAP_TABS 的 page 过滤（gis / person / mwRealTime / ipt_power / olibTopo / packet_loss）。olibTopo 是 IP 页签（2026-11-16 起为物理图），与 packet_loss 只勾 fo / bo / flm。"
     },
     {
       "id": "qaSlot",

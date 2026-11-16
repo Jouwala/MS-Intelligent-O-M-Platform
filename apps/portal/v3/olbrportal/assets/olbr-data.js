@@ -149,7 +149,7 @@ window.OLBR_DATA = (function () {
          ⚠️ 只改显示值 —— page（ipt_power）与键（map.iptPower）都不动，
             服务端已存过的 catalog.tabLabels 改名记录不会因此失配。 */
       'map.iptPower': 'Power',
-       /* 2026-11-10 加：内嵌 my_app 的 ?page=ipranTopo&layer=ipran。页签名是用户点名的 IP，中英两份照写同一串，不翻译。 */
+       /* 2026-11-10 加：页签名仍是用户点名的 IP，中英两份照写同一串，不翻译。2026-11-16 起内嵌改为 ?page=olibTopo 的物理图。 */
        'map.ip': 'IP',
       /* 2026-11-11 加：内嵌 my_app 的 ?page=packet_loss（Packet Loss Map）。
          用户点名的短名 "PL"，中英两份照写同一串，不翻译。
@@ -906,7 +906,7 @@ window.OLBR_DATA = (function () {
       /* 2026-11-06 加，与中文那份同值（原 "IPT Power"）。
          2026-11-11 起按用户要求缩短为 "Power"，中文那份同步。 */
       'map.iptPower': 'Power',
-       /* 2026-11-10 加：内嵌 my_app 的 ?page=ipranTopo&layer=ipran。页签名是用户点名的 IP，中英两份照写同一串，不翻译。 */
+       /* 2026-11-10 加：页签名仍是用户点名的 IP，中英两份照写同一串，不翻译。2026-11-16 起内嵌改为 ?page=olibTopo 的物理图。 */
        'map.ip': 'IP',
       /* 2026-11-11 加，与中文那份同值（用户点名的 "PL"）。 */
       'map.pl': 'PL',
@@ -1559,20 +1559,20 @@ window.OLBR_DATA = (function () {
      ⚠️ 该页在 my_app 里是「筛选条 + 4 张数字卡 + 左地图 / 右站点清单」的完整业务页。
         但门户里只展示地图（2026-11-06 用户原话：「能只显示 Site map 吗，不要上面的
         统计卡片」），故走 MAP_TAB_CSS 给它一份定制剥离样式，而不是照搬纯画布那份。 */
-  /* 2026-11-10：IP 页签内嵌 ?page=ipranTopo，qs 固定 layer=ipran（IP RAN 光纤层）。
+  /* 2026-11-16：IP 页签内嵌 ?page=olibTopo，qs 固定 view=physical（物理拓扑原图，可模糊搜站点）。
       page 必须与 my_app PageKey 一致。这页是自绘 SVG，不是 Leaflet，
       门户再带 maponly=1，页面只留网络拓扑画布（跟 Person 页签同一约定）。MAP_TAB_CSS 仍是空串：这页没有 Leaflet，套剥离样式会把 SVG 藏掉。
-      ⚠️ 2026-11-11 起团队门户矩阵（scope-map.json 的 map 域）已登记 ipranTopo，
+      ⚠️ 2026-11-11 起团队门户矩阵（scope-map.json 的 map 域）已登记 olibTopo（由 ipranTopo 改来），
         勾了 fo / bo / flm —— 这三个团队门户现在也显示 IP 页签；smc / cxo 未勾、仍过滤掉。
         上游 /v3/olbrportal/ 不读矩阵，页签恒在。子键必须与这里的 page 值逐字一致。
-      编辑态改名还要后端 TAB_PAGES 白名单带上 ipranTopo，否则改名被静默丢弃。 */
+      编辑态改名还要后端 TAB_PAGES 白名单带上 olibTopo，否则改名被静默丢弃。ipranTopo 仍留在白名单，避免旧改名记录在下次保存时被丢掉。 */
   /* 2026-11-11：再加 ?page=packet_loss（Packet Loss Map），页签名 "PL"。
      page 必须与 my_app 的 PageKey 一致；后端 TAB_PAGES 白名单里 packet_loss
      **早已存在**（2026-09-25 下线该页签时特意保留），故这次不用改后端。
      ⚠️ 该页在 my_app 里是「横幅 + KPI 卡 + 三张图表 + 左地图 / 右指标」的完整看板，
         门户里只留 Packet Loss Map 地图卡：MAP_TAB_CSS 给它一份自包含的剥离样式。
      ⚠️ 2026-11-11 起团队门户 scope-map.json 的 map 域已登记 packet_loss，
-        与 ipranTopo 同口径：勾了 fo / bo / flm，smc / cxo 未勾、按矩阵过滤掉这一页。
+        与 olibTopo（IP 页签）同口径：勾了 fo / bo / flm，smc / cxo 未勾、按矩阵过滤掉这一页。
         ⚠️ 子键就是这里的 page 值；改 page 必须同步改矩阵，否则页签静默消失。
         运行时矩阵以 SQLite 为准，新键还要同步写进 team_scope 行（见 docs/architecture.md 九之十七）。 */
    var MAP_TABS = [
@@ -1580,7 +1580,7 @@ window.OLBR_DATA = (function () {
     { page: 'person', key: 'map.person', icon: 'users' },
     { page: 'mwRealTime', key: 'map.mw', icon: 'broadcast' },
     { page: 'ipt_power', key: 'map.iptPower', icon: 'battery' },
-     { page: 'ipranTopo', key: 'map.ip', icon: 'share-network', qs: 'layer=ipran' },
+     { page: 'olibTopo', key: 'map.ip', icon: 'share-network', qs: 'view=physical' },
      { page: 'packet_loss', key: 'map.pl', icon: 'link' }
   ];
   /* 保留伪页签 key：本栏标题/副标题不是地图页签，但与页签共用同一份
@@ -1822,9 +1822,9 @@ window.OLBR_DATA = (function () {
   /** page → 该页 iframe 应注入的完整 CSS。缺省（未登记）用 MAP_STRIP_CSS。 */
   var MAP_TAB_CSS = {
     'ipt_power': MAP_STRIP_CSS + IPT_MAP_ONLY_EXTRA_CSS,
-     /* 空串 = 不注入剥离样式。ipranTopo 是自绘 SVG，没有 Leaflet；
+     /* 空串 = 不注入剥离样式。olibTopo 物理图是 SVG/IMG，没有 Leaflet；
         套默认 MAP_STRIP_CSS 会藏掉所有不含 .leaflet-container 的节点，iframe 变空白。 */
-     'ipranTopo': '',
+     'olibTopo': '',
      /* 2026-11-11：packet_loss 用自包含的那一份，见上方 PL_MAP_ONLY_CSS 说明。 */
      'packet_loss': PL_MAP_ONLY_CSS
   };

@@ -40,9 +40,9 @@
   },
   "map": {
     "gis": {},
-    "ipranTopo": {},
     "ipt_power": {},
     "mwRealTime": {},
+    "olibTopo": {},
     "packet_loss": {},
     "person": {}
   },

@@ -72,11 +72,6 @@
       "smc",
       "cxo"
     ],
-    "ipranTopo": [
-      "fo",
-      "bo",
-      "flm"
-    ],
     "ipt_power": [
       "fo",
       "flm",
@@ -89,6 +84,11 @@
       "flm",
       "smc",
       "cxo"
+    ],
+    "olibTopo": [
+      "fo",
+      "bo",
+      "flm"
     ],
     "packet_loss": [
       "fo",

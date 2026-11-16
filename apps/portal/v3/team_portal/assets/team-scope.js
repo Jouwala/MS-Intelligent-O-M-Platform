@@ -265,7 +265,7 @@
   /* ============================================================ 地图页签 ==
      scope-map.json 的 map 域 → DATA.MAP_TABS 的 page。
      2026-11-11 起六个页签全部登记：gis / person / mwRealTime / ipt_power /
-     ipranTopo（IP）/ packet_loss（PL），后两个只勾 fo / bo / flm。
+     olibTopo（IP，物理图）/ packet_loss（PL），后两个只勾 fo / bo / flm。
      ⚠️ 子键就是 page 值 —— 改上游 MAP_TABS 的 page 必须同步改矩阵子键，
         否则 mapItems() 的过滤钩子拿不到匹配项，页签会静默消失。 */
   function mapPages() {
