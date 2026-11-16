@@ -118,9 +118,12 @@ _probe_file.txt
 #   - portal_catalog.json  → backend/routers/portal_catalog.py，缺文件前端回落内置 data.js
 #   - ui_menu_layout.json  → backend/routers/ui_config.py，缺文件前端回落默认结构
 #   - tt_timeline_cache/   → backend/services/tt_postmortem/__init__.py:_TIMELINE_CACHE_DIR
+#   - ui_tool_visibility.json → 工具页显隐开关，页面点一次就写一次（2026-11-16 实测
+#     启动即生成，未跟踪时每次 git status 都会冒出来），同属本机状态、不入库
 /backend/data/settings.json
 /backend/data/portal_catalog.json
 /backend/data/ui_menu_layout.json
+/backend/data/ui_tool_visibility.json
 /backend/data/tt_timeline_cache/
 # gp_ran 导出的 VoLTE / N78 用户号码清单（D023=MSISDN，**用户个人信息**）。
 # 上面 `!backend/data/` 的取反会让这个目录变成可提交，必须在这里挡回来：
