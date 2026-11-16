@@ -2472,6 +2472,47 @@ my_app 表浏览器自带的 `Browse Data` / `Field Profile` / `Ask AI` 三个�
 居中（中心差 0px）、右边缘距面板右边框 24px；导出 xlsx / CSV 均能下载
 （`master_site_db.xlsx` 156 KB、`.csv` 366 KB，同一批 894 行）。
 
+## 九之二十、2026-11-16 GIS Map「PL」页签收成纯地图
+
+**起因。** 用户要求 `/v3/olbrportal/` 的 GIS Map 里，PL 页签「只显示地图，跟其它的页签一样」。
+
+**实测症状（改前）。** 730×858 的 iframe 里，地图卡只有 104px 高（卡头 35 + 卡体 70），
+`.leaflet-container` 实测 **714×0**（地图完全看不见）；右侧「丢包分布 / 每日趋势 /
+受影响站点（按区域）」三张图照旧排在下面。用户实际看到的是「一条标题 + 三个图表」。
+
+**根因。** packet_loss 页在窄 iframe 下把「地图列 + 右图表列」排成**纵向 flex**；地图列
+高度按内容算，`PL_MAP_ONLY_CSS` 原来那套 `height:100%` 链在纵向 flex 里没有确定高度，
+断在卡片/卡体这一层。地图容器被压成 0 高，Leaflet 初始化时量到的也是 0。
+
+**做法（只改门户，my_app 一行未动）。**
+
+1. 重写 `v3/olbrportal/assets/olbr-data.js` 的 `PL_MAP_ONLY_CSS`：不再依赖 flex 高度链，
+   地图卡直接用 `position:absolute; inset:0` 钉满 `main#main-content`，卡体、地图 wrapper、
+   `.leaflet-container` 层层 `inset:0`；同时去掉卡头、状态/拓扑图例行、图层开关与地图
+   控制行（Alarm / MW / Person 三页本来就只有画布）。选择器全部基于 `:has(.leaflet-container)`
+   与直接子代，不认 class 名与具体层级深度。
+2. `v3/olbrportal/assets/olbr.js` 新增 `schedulePlZoom()` / `tunePlZoom()`：page 按
+   `window.innerWidth` 选档，iframe 只有 730px 时落在 zoom 6（国土仅 188×192），
+   补到 8；iframe <700px 时补到 7.5（8 会把国土左右各裁约 9%）。每个 document 只补一次，
+   用户之后手动缩放不被覆盖；点 Reload 重建 iframe 会重新补。同时把
+   `MapControlsBridge` 摘掉的 Leaflet 默认 +/- 控件重新挂回（剥离样式藏掉了页面自己的
+   「地图控制」行，不补就没有可见的缩放入口），与 Alarm / MW 左上角那颗一致。
+3. `findLeafletMap()` 补了一条「从宿主 div 的 React fiber 往上爬 hook 链表」的通道：
+   my_app 的 `LeafletMap` 把 `.leaflet-container` 自己 createElement 出来，该节点上
+   **没有 fiber**，原实现第一行就 `return null`，导致门户拿不到 packet_loss / person
+   这类自研地图页的实例（顺带让 `invalidateLeaflet` / 滚轮锁对这些页真正生效）。
+   认实例时用 `_container === lc`，避免命中 StrictMode 已销毁的旧 map。
+
+**范围。** 只对 `packet_loss` 生效；直开 `/myapp/?page=packet_loss` 仍是完整业务页。
+`v3/team_portal/` 的副本由 `patch_team_portal.py` / `sync_team_assets.py` 重新生成，
+FO / BO / FLM 三个团队门户的 PL 页签同步生效（smc / cxo 仍按矩阵过滤）。
+
+**验收（无头浏览器实测）。** 1920×1080（iframe 885×858）、1600×900（730×858）、
+1366×768（617×858）三档：根下除「含地图的那一块」外全部 `display:none`；可见图表数 0；
+`.leaflet-container` 分别是 885×858 / 730×858 / 617×858；地图分别落 zoom 8 / 8 / 7.5，
+底图、县色、站点圆点齐全。本次截图与探针均为一次性产物（`TMP/`，不入库）；
+留档图 `TMP/_shot_pl_final.png`。
+
 ## 十、相关文档
 
 | 内容 | 去哪里 |

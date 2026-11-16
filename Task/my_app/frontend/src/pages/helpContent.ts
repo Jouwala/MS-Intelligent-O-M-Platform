@@ -30,6 +30,7 @@ export const PAGE_LIST: { key: string; iframe?: boolean }[] = [
   { key: 'mwUmeTopology', iframe: true },
   { key: 'ipranTopo' },
   { key: 'olibTopo' },
+  { key: 'olibTopo_v2' },
   { key: 'mwRealTime', iframe: true },
   { key: 'gis' },
   { key: 'realtime_alarm' },
@@ -103,6 +104,7 @@ export const NAV_KEY_MAP: Record<string, string> = {
   mwUmeTopology: 'nav.mwUmeTopology',
   ipranTopo: 'nav.ipranTopo',
   olibTopo: 'nav.olibTopo',
+  olibTopo_v2: 'nav.olibTopoV2',
   mwRealTime: 'nav.mwRealTime',
   gis: 'nav.gis',
   realtime_alarm: 'nav.realtimeAlarm',
@@ -152,7 +154,7 @@ export const CATEGORIES: { id: string; pages: string[] }[] = [
   { id: 'tasks', pages: ['sync', 'email_reports', 'upload', 'tables', 'overview'] },
   {
     id: 'boards',
-    pages: ['alarm', 'ttwo', 'v1_ttwo', 'tt', 'wo', 'nur', 'ms_nur_only', 'ms_sla', 'ms_sla_only', 'ms_wo_sla', 'ms_contract_kpi', 'cxoDashboard', 'vmaxCxoDashboard', 'vmaxCxoDashboard_Daily', 'vmaxCxoDashboard_90Days', 'socTrendDashboard', 'mwUmeTopology', 'ipranTopo', 'olibTopo', 'mwRealTime', 'alarmManagement', 'fme_ranking', 'site_avail', 'avail_ms', 'avail_flm', 'avail_county', 'bm_speedtest', 'bm_meta', 'noc_analyst', 'repeat_site_down', 'cr_analysis', 'pm_analysis', 'bp_report', 'ran_cells_kpi', 'packet_loss', 'battery', 'ume_in_kpi', 'cn_kpi', 'cn_kpi_5mins', 'imonitor', 'gis', 'realtime_alarm', 'person', 'incident_overview', 'warehouse', 'sp_material', 'sp_details', 'sp_report', 'com_report', 'warehouse_summary'],
+    pages: ['alarm', 'ttwo', 'v1_ttwo', 'tt', 'wo', 'nur', 'ms_nur_only', 'ms_sla', 'ms_sla_only', 'ms_wo_sla', 'ms_contract_kpi', 'cxoDashboard', 'vmaxCxoDashboard', 'vmaxCxoDashboard_Daily', 'vmaxCxoDashboard_90Days', 'socTrendDashboard', 'mwUmeTopology', 'ipranTopo', 'olibTopo', 'olibTopo_v2', 'mwRealTime', 'alarmManagement', 'fme_ranking', 'site_avail', 'avail_ms', 'avail_flm', 'avail_county', 'bm_speedtest', 'bm_meta', 'noc_analyst', 'repeat_site_down', 'cr_analysis', 'pm_analysis', 'bp_report', 'ran_cells_kpi', 'packet_loss', 'battery', 'ume_in_kpi', 'cn_kpi', 'cn_kpi_5mins', 'imonitor', 'gis', 'realtime_alarm', 'person', 'incident_overview', 'warehouse', 'sp_material', 'sp_details', 'sp_report', 'com_report', 'warehouse_summary'],
   },
   { id: 'analysis', pages: ['eflow_qa', 'eflow_flow', 'dashboard', 'archive', 'ip_trace', 'vmax_user_query', 'vmax_user_cca', 'ipt_power'] },
   { id: 'workflow', pages: ['ap_center', 'feedback'] },
@@ -392,6 +394,18 @@ export const PAGE_DOCS: Record<Locale, Record<string, PageDoc>> = {
         '点站点后详情卡显示区域、原图相对位置（近似值，不是 GPS）与类型；「全图定位」「放大看周边链路」两个按钮与参考页一致',
         '数据口径与来源（PDF 出处、坐标换算、骨干核心与链路、已知限制）在**页面最下面**：右下角只有一个问号，点开才展开，不占首屏也没有常驻说明条',
         '本页是**纯静态参考页**：数据来自 PDF 一次性提取，存于 networkTopology/topologyData.ts，原图在 public/topology/；不连后端、不写库，自动刷新建议 1800 秒且内容不会变化',
+      ],
+    },
+    olibTopo_v2: {
+      desc: 'OLIB 光纤网络的**地理版拓扑**：把 PDF 里的 553 个站点按 master_site_db 的真实 GPS 落到 Liberia 地图上（自托管 PMTiles 底图 + 县界），默认就是地理视图；PDF 的物理/逻辑/骨干原图保留为参考视图。右栏可搜索站点、查看 GPS 匹配来源与相连骨干链路。',
+      usage: [
+        '四种视图：地理地图（默认）/ 物理拓扑 / 逻辑拓扑 / 骨干核心。后三种复用 v1 的 PDF 原图查看器，v1 页面本身没有改动',
+        '地图上站点按类型区分：紫环=骨干核心、蓝菱形=ISP、红点=5G、灰点=普通；密集区自动聚合成圆圈，点圆圈展开。只有选中站点有脉冲光环',
+        '缩放/平移后自动重算聚合；站名在放大后分级出现（重点站点更早），悬浮可看站名、类型与县。县界为虚线，放大后显示县名',
+        '定位口径：站名规范化后唯一命中主数据 → 精确匹配；拼写差异走人工别名表；同名多坐标或无同名站点一律标「未定位」不上图。实测 463/553 已定位，未定位名单从右栏「未定位 N」逐条查看原因',
+        '链路只画 PDF 第 2 页梳理的骨干链路中两端都有 GPS 的 11 条（共 18 条）；直线只表示连接关系，不是光缆实际走向',
+        '点站点看详情：PDF 区域、GPS、主数据站点与 ID、县/Region、匹配方式和核验状态；「地图定位」「放大」会把地图飞到该站',
+        '**静态数据页**：GPS 映射表是 public/olib/olib-site-geo.json（由 scripts/gen-olib-site-geo.mjs 生成），页面不直连 GIS 接口；自动刷新建议 1800 秒，内容不会变化',
       ],
     },
     mwRealTime: {
@@ -1087,6 +1101,18 @@ export const PAGE_DOCS: Record<Locale, Record<string, PageDoc>> = {
         'After selecting a site the detail card shows its region, approximate page position (not GPS) and type; "Locate on map" and "Zoom to nearby links" match the reference page',
         'Data scope & sources (PDF origin, coordinate conversion, backbone cores and links, known limits) sits at the **bottom of the page**: a single question mark in the bottom-right corner that expands on click — no banner eating the first screen',
         'This page is a **static reference**: the data is a one-off PDF extraction kept in networkTopology/topologyData.ts and the originals live in public/topology/. It reads no backend and writes no database, so auto-refresh defaults to 1800s and its content does not change',
+      ],
+    },
+    olibTopo_v2: {
+      desc: 'The **geographic version** of the OLIB fiber topology: the 553 PDF sites are placed on the real Liberia map using master_site_db GPS (self-hosted PMTiles basemap + county borders). The geographic map is the default; the PDF physical / logical / backbone drawings stay available as reference views. The right panel searches sites and shows GPS provenance plus connected backbone links.',
+      usage: [
+        'Four views: Geographic map (default) / Physical topology / Logical topology / Backbone core. The last three reuse the v1 PDF viewer; the v1 page itself is unchanged',
+        'Site shapes encode type: purple ring = backbone core, blue diamond = ISP, red dot = 5G, grey dot = regular. Dense areas collapse into a count circle; click it to expand. Only the selected site pulses',
+        'Clusters are recomputed after every pan/zoom; site names appear progressively when zooming in (major types first), and hovering shows name, type and county. County borders are dashed and get labels when zoomed in',
+        'Matching rules: a normalized unique name match against master data is exact; known spelling variants use a curated alias table; duplicate names with different coordinates and missing names stay "not located" and are never plotted. 463 of 553 are located; open "not located N" on the right to see each reason',
+        'Links cover only the 11 of 18 backbone links whose both endpoints have GPS; straight lines show connectivity only, not the actual cable route',
+        'Click a site for PDF region, GPS, master-data site and id, county/region, match method and verification; Locate / Zoom fly the map to it',
+        '**Static data page**: the GPS mapping is public/olib/olib-site-geo.json, generated by scripts/gen-olib-site-geo.mjs; the page does not call the GIS API. Auto-refresh defaults to 1800s and the content does not change',
       ],
     },
     mwRealTime: {

@@ -87,7 +87,7 @@ window.OLBR_DATA = (function () {
          六张卡现在一律是纯文案，断站数由卡片中央的大数字呈现。 */
       'qc.sub.alarm': 'Cells/ Sites Outage', 'qc.sub.tt': 'Ongoing TTs',
       'qc.sub.wo': 'Ongoing WOs', 'qc.sub.cr': 'Unclosed CRs',
-      'qc.sub.pmt': 'Unclosed PMTs',
+      'qc.sub.pmt': 'Waiting PM Manager Approve',
       'qc.sub.spms': 'Unclosed SPMS',
       'qc.targetTip.up': '分级阈值：关注 ≥ {warn} · 严重 ≥ {crit}（数值越大越差）',
       'qc.targetTip.down': '分级阈值：关注 < {crit} · 严重 < {warn}（数值越大越好）',
@@ -115,10 +115,17 @@ window.OLBR_DATA = (function () {
                     + '注意：快照只在门户被打开过的小时才有，断档处折线会断开，**不补 0**\n'
                     + '（补 0 会画出一个「积压突然清零」的假谷底）。',
       'qc.stock.capPmt': '近 {n} 小时超期数',
-      'qc.stock.tipPmt': '按每小时快照取样的「超期未完成 PMT 数」（近 {n} 小时，每格 1 小时）。\n'
-                       + '与卡片大数字（未完成 PMT 总数）是同一批数据的不同侧面：\n'
-                       + '总数看积压有多大，这条线看超期那部分是在堆积还是在消化。\n'
-                       + '注意：快照只在门户被打开过的小时才有，断档处折线会断开，**不补 0**。',
+      /* 2026-11-16：PMT 卡改用「等待 PM Manager Approve」口径，柱子也跟着换成
+         同一批工单的存量快照 —— 大数字与柱子必须是同一件事，否则读者没法互相印证。
+         历史小时没有这个数（口径当日才上线），断档不补 0。 */
+      'qc.stock.tipPmt': '按每小时快照取样的「等待 PM Manager Approve 的 PMT 数」（近 {n} 小时，每格 1 小时）。\n'
+                       + '与卡片大数字是**同一个口径**（同一批工单），柱子的高低就是这条积压的涨落。\n'
+                       + '注意：快照只从本口径上线那一刻起才有，更早的小时没有这个数，断档处断开、**不补 0**。',
+      /* PMT 卡口径说明（挂在卡片 title 上，hover 才看得到 —— 与其余五张卡同一套做法） */
+      'qc.pmtWait.tip': '等待 PM Manager Approve：当前停留在「PM Manager Approve」节点、等下一环节'
+                      + '（FLM Leader Approve）的 PMT 数。\n'
+                      + '与 my_app「PM 执行分析」页（?page=pm_analysis）里程碑条上同名节点的 Waiting '
+                      + '是**同一个定义**，不是另算一份。',
       'qc.stock.starving': '存量样本不足',
       'qc.cadenceTip': '本面板分两档刷新：断站告警每 5 分钟（源 eflow_active_alarm 每 5 分钟同步，最近 {a}）；'
                      + 'TT/WO/CR/PMT/SPMS 与达标率每小时 :06（源 eflow_sync 每小时 :00 起跑、实测约 :06 跑完，'
@@ -866,7 +873,7 @@ window.OLBR_DATA = (function () {
          2026-10-08：alarm 前面的断站数字前缀已按要求去掉，与其余五条同为纯文案。 */
       'qc.sub.alarm': 'Cells/ Sites Outage', 'qc.sub.tt': 'Ongoing TTs',
       'qc.sub.wo': 'Ongoing WOs', 'qc.sub.cr': 'Unclosed CRs',
-      'qc.sub.pmt': 'Unclosed PMTs',
+      'qc.sub.pmt': 'Waiting PM Manager Approve',
       'qc.sub.spms': 'Unclosed SPMS',
       'qc.targetTip.up': 'Thresholds: watch ≥ {warn} · critical ≥ {crit} (higher is worse)',
       'qc.targetTip.down': 'Thresholds: watch < {crit} · critical < {warn} (higher is better)',
@@ -889,10 +896,18 @@ window.OLBR_DATA = (function () {
                     + 'Snapshots only exist for hours the portal was open, so gaps break the line\n'
                     + 'and are NEVER filled with 0 (that would fake a "backlog suddenly cleared" dip).',
       'qc.stock.capPmt': 'Overdue, last {n} h',
-      'qc.stock.tipPmt': 'Sampled hourly snapshots of overdue (unfinished) PMT count (last {n} hours, 1 h per slot).\n'
-                       + 'Same data as the card\'s big number, seen from a different side: the total shows\n'
-                       + 'how large the backlog is, this line shows whether the overdue part is piling up or draining.\n'
-                       + 'Snapshots only exist for hours the portal was open, so gaps break the line and are NEVER filled with 0.',
+      /* 2026-11-16: the PMT card switched to "Waiting PM Manager Approve", so the bars
+         now plot the SAME cohort's hourly stock. Big number and bars must describe one
+         thing or readers cannot cross-check them. Hours before the cut have no sample. */
+      'qc.stock.tipPmt': 'Sampled hourly snapshots of PMTs waiting at "PM Manager Approve" (last {n} hours, 1 h per slot).\n'
+                       + 'This is the SAME measure as the card\'s big number (same cohort of work orders).\n'
+                       + 'Note: snapshots start when this caliber went live; earlier hours have no sample, '
+                       + 'so gaps break the line and are NEVER filled with 0.',
+      /* PMT card caliber note (hover on the card title; same pattern as the other cards) */
+      'qc.pmtWait.tip': 'Waiting PM Manager Approve: PMTs currently sitting at the "PM Manager Approve" node, '
+                      + 'waiting for the next step (FLM Leader Approve).\n'
+                      + 'Same definition as the "Waiting" figure at that node on the my_app PM Execution '
+                      + 'Analysis page (?page=pm_analysis) — not a separately derived number.',
       'qc.stock.starving': 'Not enough samples',
       'qc.cadenceTip': 'Two refresh cadences: site-outage alarms every 5 min (source eflow_active_alarm syncs every '
                      + '5 min, latest {a}); TT/WO/CR/PMT/SPMS and the SLA rate hourly at :06 (eflow_sync starts at '
@@ -1770,53 +1785,78 @@ window.OLBR_DATA = (function () {
        只剩一列时这 6px 会在地图四周留白边，铺满形态下归零。 */
     'main#main-content > div > .ant-row:has(.leaflet-container){margin:0!important;height:100%!important}',
     /* MAP_STRIP_CSS 为纯画布页隐藏了卡片头（gis 的地图卡本就没有标题栏）。
-       Site map 这张卡的头里有标题 + 三色图例，是用户点名要保留的那张卡，
+       Site map 这张卡的头里有标题（+ 县底色下拉），是用户点名要保留的那张卡，
        故恢复显示；同时把卡片改成列式 flex，让 body 吃掉剩余高度，
-       否则 head 与 height:100% 的 body 会叠出 38px 溢出。 */
+       否则 head 与 height:100% 的 body 会叠出 38px 溢出。
+       （三色圆点图例 2026-11-16 起不在卡片头里了 —— 已挪到地图左下角，走
+        my_app 自己的 MapLegendOverlay 浮层，门户这份 CSS 不为它留位置。） */
     'main#main-content .ant-card:has(.leaflet-container){display:flex!important;flex-direction:column!important}',
     'main#main-content .ant-card:has(.leaflet-container) > .ant-card-head{display:flex!important;flex:0 0 auto!important}',
     'main#main-content .ant-card:has(.leaflet-container) > .ant-card-body{flex:1 1 auto!important;height:auto!important;min-height:0!important;overflow:hidden!important}',
     /* 不依赖「百分比高度能否解析」：相对已定位的 body 直接铺满四个边。
-       MAP_STRIP_CSS 已给该 body 加了 position:relative。 */
+       MAP_STRIP_CSS 已给该 body 加了 position:relative。
+       ⚠ 2026-11-16：地图容器现在包在一层 wrapper 里（页内图例浮层要它的定位锚点），
+       这条 `> .leaflet-container` 对 ipt_power 实际不再命中；铺满由 MAP_STRIP_CSS 的
+       `*:has(.leaflet-container){height:100%}` + `.leaflet-container{height:100%}`
+       两层保底，窄屏（两列堆叠）下也不会塌。 */
     'main#main-content .ant-card-body:has(.leaflet-container) > .leaflet-container{position:absolute!important;inset:0!important;height:100%!important;width:100%!important}'
   ].join('');
 
   /* ---------------------------------------------------------------------
-     packet_loss（"PL" 页签）专用剥离样式（2026-11-11 加）
+     packet_loss（"PL" 页签）专用剥离样式（2026-11-11 加，2026-11-16 重写）
      ---------------------------------------------------------------------
+     目标与其它页签一致：iframe 里只剩一张铺满的 Leaflet 画布 —— 页面自己的
+     状态横幅 / KPI 卡 / 右侧三张图表 / Top 10 全部藏掉，卡片标题、图层开关、
+     地图控制行也一起去掉（Alarm / MW / Person 三页就是这个形态）。
+
      ⚠️ 这一份**刻意不叠加 MAP_STRIP_CSS**，与 ipt_power 的做法不同：
         MAP_STRIP_CSS 后半段有一批 GIS / Alarm 页专属规则 —— 把 .ant-card-body
         里「非 .leaflet-container 的直接子元素」全改成贴底绝对定位浮层、
-        .gis-rank-overlay / .gis-legend-overlay 的位移修正等。而 packet_loss 的
-        地图卡 body 里与地图同级的，是**状态图例**（开启拓扑时还有链路图例），
-        它们是正常流式内容，套上那批规则会互相重叠并盖掉地图下缘。
-        故这里自包含一份最小样式，不与那批 GIS 专属规则耦合。
+        .gis-rank-overlay / .gis-legend-overlay 的位移修正等。packet_loss 的
+        地图卡结构完全不同，套那批规则只会互相打架。故这里自包含一份。
      ⚠️ 只注入门户的 iframe document；直开 /myapp/?page=packet_loss 仍是完整看板。
-     ⚠️ 下钻弹窗 portal 到 body，不在 main#main-content 下，点圆点仍可下钻。 */
+     ⚠️ 下钻弹窗 portal 到 body，不在 main#main-content 下，点圆点仍可下钻。
+
+     ---- 2026-11-16 为什么重写（必读，别再退回按高度链拉伸的写法）----
+     用户报「PL 页签要只显示地图，跟其它页签一样」。实测（无头浏览器探针，
+     2026-11-16，探针为一次性产物未入库）当时的真实症状是**地图根本看不见**：
+       · 页面在 730px 宽的 iframe 里走窄屏分支，「地图列 + 右图表列」被排成
+         **纵向 flex**；地图列高度按内容算 → 104px（卡头 35 + 卡体 70）。
+       · 旧 CSS 给的是 `height:100%` 链：卡/卡体在纵向 flex 里没有确定高度，
+         高度链断掉 —— 卡体里的地图 wrapper 实测 714x0、.leaflet-container 714x0，
+         地图被压成 0 高；同时右侧三张图表（303px 一张）照旧排在下面。
+     改成**绝对定位**后不依赖任何 flex 高度链：卡片直接钉满 main#main-content，
+     卡体、地图 wrapper、.leaflet-container 层层 inset:0，宽屏 row / 窄屏 column
+     两种排版都成立。Leaflet 在挂载时量到的就是满高容器，无需等拉伸后再 invalidate。
+     ⚠️ 若将来 packet_loss 页的地图卡外面多包一层节点，只需确认「含
+        .leaflet-container 的那一支」仍是 main#main-content 下第二层以内的唯一分支；
+        选择器全部基于 :has(.leaflet-container) 与直接子代，不依赖 class 名。 */
   var PL_MAP_ONLY_CSS = [
     'html,body{margin:0!important;padding:0!important;height:100%!important;overflow:hidden!important;background:#ffffff!important}',
     '#root,.ant-layout,.ant-layout-content{height:100%!important;min-height:0!important;margin:0!important;padding:0!important;background:#ffffff!important}',
-    'main#main-content{height:100%!important;padding:0!important;margin:0!important;overflow:hidden!important}',
-    /* 页面根 div 原本是 display:flex 的两列（左 1/3 地图 / 右 2/3 指标图表）。
-       改成 block 后子项的 flex 宽度不再生效，只留含地图那一列并拉满。 */
+    /* main 必须是定位祖先：下面的卡片用 absolute 钉在它身上。 */
+    'main#main-content{height:100%!important;padding:0!important;margin:0!important;overflow:hidden!important;position:relative!important}',
+    /* 页面根 div 原本是纵向 flex：横幅 / KPI 行 / 两列 / Top10。改成 block，去掉 gap。 */
     'main#main-content > div{display:block!important;height:100%!important;min-height:0!important;padding:0!important;margin:0!important;gap:0!important}',
-    'main#main-content > div > *:not(:has(.leaflet-container)):not(:has(iframe)):not(iframe){display:none!important}',
-    'main#main-content > div > *:has(.leaflet-container){width:100%!important;max-width:100%!important;height:100%!important;min-height:0!important;flex:1 1 auto!important;position:static!important;top:auto!important;align-self:stretch!important;margin:0!important}',
-    /* 地图卡：列式 flex，卡头保留（Packet Loss Map 标题 + 拓扑开关 + 正常站点开关）。 */
-    'main#main-content .ant-card:has(.leaflet-container){display:flex!important;flex-direction:column!important;height:100%!important;min-height:0!important;margin:0!important;border:0!important;border-radius:0!important;box-shadow:none!important;background:#ffffff!important}',
-    'main#main-content .ant-card:has(.leaflet-container) > .ant-card-head{display:flex!important;flex:0 0 auto!important;min-height:0!important;padding:6px 12px!important}',
-    'main#main-content .ant-card:has(.leaflet-container) > .ant-card-body{display:flex!important;flex-direction:column!important;flex:1 1 auto!important;height:auto!important;min-height:0!important;max-height:none!important;overflow:hidden!important;padding:8px 8px 0!important;position:relative!important}',
-    /* ⚠️ 线上预编译产物里 MapContainer 外面还包了一层无 class 的 div
+    /* 根下只留「含地图的那一块」：状态横幅、KPI 行、Top10 都藏掉。 */
+    'main#main-content > div > *:not(:has(.leaflet-container)){display:none!important}',
+    /* 那一块就是「地图列 + 右侧图表列」的 flex 容器，先铺满。 */
+    'main#main-content > div > *:has(.leaflet-container){display:block!important;width:100%!important;height:100%!important;min-height:0!important;padding:0!important;margin:0!important;gap:0!important}',
+    /* 容器里除地图列以外的兄弟 —— 右侧「丢包分布 / 每日趋势 / 按区域」三张图 —— 全藏。 */
+    'main#main-content > div > *:has(.leaflet-container) > *:not(:has(.leaflet-container)){display:none!important}',
+    'main#main-content > div > *:has(.leaflet-container) > *:has(.leaflet-container){display:block!important;width:100%!important;height:100%!important;min-height:0!important;flex:none!important;padding:0!important;margin:0!important}',
+    /* 地图卡：绝对定位钉满 main#main-content（理由见上方长注释）。 */
+    'main#main-content .ant-card:has(.leaflet-container){display:block!important;position:absolute!important;inset:0!important;width:auto!important;height:auto!important;min-height:0!important;margin:0!important;border:0!important;border-radius:0!important;box-shadow:none!important;background:#ffffff!important}',
+    /* 卡头（丢包地图标题 + 点击提示）不是地图本身，与其它页签一致去掉。 */
+    'main#main-content .ant-card:has(.leaflet-container) > .ant-card-head{display:none!important}',
+    'main#main-content .ant-card:has(.leaflet-container) > .ant-card-body{position:absolute!important;inset:0!important;display:block!important;width:auto!important;height:auto!important;min-height:0!important;margin:0!important;padding:0!important;overflow:hidden!important}',
+    /* 卡体里除地图 wrapper 以外的直接子节点（拓扑/状态图例行、图层开关 + 地图控制行）去掉。 */
+    'main#main-content .ant-card-body:has(.leaflet-container) > *:not(:has(.leaflet-container)){display:none!important}',
+    /* 线上预编译产物里 MapContainer 外面还包了一层无 class 的 div
        （CDP 实测 lcParent: DIV/display:block，.leaflet-container 是它的子元素），
-       所以不能写 `> .leaflet-container` —— 那样一条都不命中，地图会退回
-       inline height，卡片下半部留一大块空白（2026-11-11 实测 466 / 858）。
-       改成两级：先让「含地图的那层 wrapper」在 body 的 flex 列里伸展，
-       再让它内部的 leaflet 容器跟着伸展，不依赖具体层级深度。 */
-    'main#main-content .ant-card-body:has(.leaflet-container) > *:has(.leaflet-container){flex:1 1 auto!important;min-height:0!important;height:auto!important;max-height:none!important;display:flex!important;flex-direction:column!important;margin:0!important;padding:0!important;position:relative!important}',
-    'main#main-content .ant-card-body:has(.leaflet-container) .leaflet-container{flex:1 1 auto!important;height:auto!important;min-height:0!important;max-height:none!important;width:100%!important;position:relative!important;inset:auto!important;border-radius:0!important;background:#ffffff!important}',
-    /* 两个图例行保持流式、贴在地图下方，不做绝对定位浮层；
-       :not(:has(.leaflet-container)) 把上面那层 wrapper 排除掉，别把它压回固定高度。 */
-    'main#main-content .ant-card-body:has(.leaflet-container) > div:not(:has(.leaflet-container)){position:static!important;flex:0 0 auto!important;margin:4px 0 0!important;padding:0 4px 6px!important;background:transparent!important;z-index:auto!important}'
+       所以不能写 `> .leaflet-container`。这里按「含地图的那一层」定位，不认层级深度。 */
+    'main#main-content .ant-card-body:has(.leaflet-container) > *:has(.leaflet-container){position:absolute!important;inset:0!important;display:block!important;width:auto!important;height:auto!important;min-height:0!important;margin:0!important;padding:0!important}',
+    'main#main-content .leaflet-container{position:absolute!important;inset:0!important;width:auto!important;height:auto!important;min-height:0!important;max-height:none!important;border-radius:0!important;background:#ffffff!important}'
   ].join('');
 
   /** page → 该页 iframe 应注入的完整 CSS。缺省（未登记）用 MAP_STRIP_CSS。 */
@@ -1856,6 +1896,18 @@ window.OLBR_DATA = (function () {
      六张等宽同排后「主/次」靠字号表达，不再各占一行分组小标题。 */
   var QC_PRIMARY_ORDER = ['alarm', 'tt', 'wo'];
   var QC_SECONDARY_ORDER = ['cr', 'pmt', 'spms'];
+  /* v3 独有（2026-11-16 用户要求）：卡片 id → 后端接口的 metric 名。
+     PMT 卡的大数字与下钻改用「等待 PM Manager Approve」的口径（后端 `pmt_wait`），
+     而卡片 id 仍是 `pmt` —— 六张卡的 id / 中英文名来自共享的
+     `MsPortal/assets/data.js`，不能为了本页去改那份（会把 MsPortal / v1 / v2 一起改掉）。
+     没有条目的卡片 = 卡片 id 就是 metric 名。
+     ⚠️ 本次**只改 v3 这一份**：`/olbrportal/`、`/v1/olbrportal/`、`/v2/olbrportal/`、
+     MsPortal 的 PMT 卡仍是「Unclosed PMTs」——用户点名的页面是 `/v3/olbrportal/`，
+     与既有「v1 独有、别处刻意不改」的先例同一条取舍。要拉齐就把这四份的
+     `qc.sub.pmt` 文案与 drill 的 metric 一起改，别只改一半。
+     口径真相源在 my_app `pm_workflow_service.waiting_snapshot()`，与
+     `?page=pm_analysis` 里程碑条同名节点的 Waiting 同一个定义。 */
+  var QC_CARD_METRIC = { pmt: 'pmt_wait' };
   /* 只有这四项后端提供「新增量」趋势（cr / pmt 明确回 no_trend）：不发请求、也不画线。 */
   var QC_TREND_METRICS = ['alarm', 'tt', 'wo', 'spms'];
   var QC_SUB_KEY = { alarm: 'qc.sub.alarm', tt: 'qc.sub.tt', wo: 'qc.sub.wo',
@@ -2250,6 +2302,7 @@ window.OLBR_DATA = (function () {
     QC_TARGETS: QC_TARGETS, QC_LEVEL_ABS: QC_LEVEL_ABS,
     QC_PRIMARY_ORDER: QC_PRIMARY_ORDER, QC_SECONDARY_ORDER: QC_SECONDARY_ORDER,
     QC_TREND_METRICS: QC_TREND_METRICS, QC_SUB_KEY: QC_SUB_KEY, QC_LV_KEY: QC_LV_KEY,
+    QC_CARD_METRIC: QC_CARD_METRIC,
     QC_FULL_MIN: QC_FULL_MIN, QC_FULL_OFFSET: QC_FULL_OFFSET,
     QC_ALARM_MIN: QC_ALARM_MIN, QC_ALARM_OFFSET: QC_ALARM_OFFSET,
     KPI_RICH: KPI_RICH, KPI_RICH_BY_ID: KPI_RICH_BY_ID,

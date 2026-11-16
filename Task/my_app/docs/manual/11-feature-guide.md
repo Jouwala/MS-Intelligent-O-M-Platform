@@ -52,6 +52,7 @@
 | 37 | MW 微波拓扑 | `mwUmeTopology` | **iframe** |
 | 37b | IP RAN 光纤拓扑 | `ipranTopo` | React |
 | 37c | OLIB 光纤拓扑 | `olibTopo` | React |
+| 37d | OLIB 地理网络拓扑 | `olibTopo_v2` | React |
 | 38 | MW 微波实时 | `mwRealTime` | **iframe** |
 | 39 | GIS 地图 | `gis` | React |
 | 40 | 实时告警地图 | `realtime_alarm` | React（同组件另一模式） |
@@ -581,6 +582,19 @@ Orange Liberia 全国光纤网络拓扑的**静态参考页**：把《Orange_net
 - **门户入口**（2026-11-16）：`/v3/olbrportal/` 以及勾了 IP 页签的团队门户（fo / bo / flm）的 GIS Map「IP」页签，内嵌 `?page=olibTopo&view=physical&maponly=1`。只留物理图，左上角搜索框做同样的模糊匹配，点一条结果放大到该站。Open Link 去掉 `maponly`，新窗口是完整页并停在物理图。直开不带 `maponly` 时三个视图都在。smc / cxo 按矩阵不显示这一页。
 - **口径与数字**：顶部**不再有统计卡**（2026-11-16 用户要求去掉 553 站点 / 9 个骨干核心 / 40G·10G 骨干光纤 / 2 个 AML 数据中心四张卡 —— 数字都在图例与说明里，卡只占首屏）。整页口径与来源走 `CalcChainNote`，以 **页面最下面一个问号**（`trigger="icon"`，点开气泡、不占一行）承载：数据来源、坐标口径、骨干核心与链路、已知限制四节。站点数等静态事实仍取 `SITES.length` / `CORE_SITE_COUNT` / `AML_DC_COUNT`（`topologyData.ts`），不在前端重算。
 - **刷新**：`AR_PAGE_DEFAULTS.olibTopo = 1800`。页面本身没有接口可重取，自动刷新只走外壳默认重挂载（会回到初始视图），不会产生新数据。
+
+## 8d. OLIB 地理网络拓扑（`?page=olibTopo_v2`，2026-11-16 新增）
+
+v1（8c）的升级版，**v1 页面与它的三个文件完全不动**：v2 默认把 OLIB 站点画到真实的 Liberia 地理底图上，PDF 原图降级为参考视图。解决的核心问题是 v1「无论怎么缩放都还像一张拓扑图片」——v2 的站点用 `master_site_db` 的真实经纬度定位，县界、道路、海岸线来自自托管 PMTiles 底图。
+
+- **四种视图**：`地理地图`（默认）/ `物理拓扑` / `逻辑拓扑` / `骨干核心`。后三种直接复用 v1 的 `TopologyViewer`（只读引用，不改 v1 文件），页面级 tabs 与它的内部 tabs 状态同步；v2 用 CSS 隐藏内部重复 tabs。
+- **数据与资源**：553 条站名/相对坐标仍来自 `frontend/src/pages/networkTopology/topologyData.ts`；GPS 映射表是 `frontend/public/olib/olib-site-geo.json`，由 `frontend/scripts/gen-olib-site-geo.mjs` 从 `GET /api/gis/sites` 生成，人工别名表在 `frontend/scripts/olib-site-aliases.json`。**页面不直连 GIS 接口**，映射口径可 diff、可复查。
+- **定位口径（宁缺勿错）**：站名规范化后唯一命中 → `name-exact`；拼写差异走人工别名 → `alias`；同名多坐标 → `ambiguous`；无同名 → `unmatched`，一律不上图。**不做自动模糊匹配**（避免 `6th Street → 16th Street` 这类错配）。实测 553 条中 **463 条已定位（418 精确 + 45 别名）、88 条未匹配、2 条同名歧义**；未定位名单可在右侧「未定位 N」弹窗逐条查看原因。映射表按站点下标对齐并复核站名，`topologyData.ts` 增删站点后不一致会自动判为未定位。
+- **地图交互**：Leaflet + 自托管 PMTiles（与 `?page=gis` 同一套，不依赖公网瓦片）；站点按屏幕像素网格聚合（zoom<11.5），点击聚合圈 `fitBounds` 展开；站点形状区分核心/ISP/5G/普通，只有选中站点有脉冲光环；名称分级显示（zoom≥9 显示重点站点、≥11 显示全部、悬浮 tooltip 兜底）；县界虚线 + 县名（zoom≥8.5）；点击站点看详情，搜索/详情「地图定位」用 `flyTo` 落到站点。
+- **链路**：只画 PDF 第 2 页人工梳理的骨干链路（`CORE_LINKS`）中**两端都有 GPS** 的 11 条（共 18 条，另 7 条因 HQ/ODC/AML/Danane 等端点无坐标跳过，图例报数）。同端点多条链路平行错开；线型按「现有 / DWDM / 铁路 / P25A」区分。**直线只表示连接关系，不是光缆实际走向**，这一点在图例与页面口径说明里都写明。
+- **布局**：左地图 : 右栏 ≈ 3 : 1；右栏 = 站点查询（模糊搜索 + 区域下拉 + 全部/5G/ISP/核心 + 未定位入口）、站点详情（PDF 区域、GPS、主数据站点 ID、县、匹配方式与核验状态、相连链路）、图例；右栏内容超长时在自己的容器里滚动。窄屏（<1000px）堆叠，地图至少 62vh。
+- **刷新**：`AR_PAGE_DEFAULTS.olibTopo_v2 = 1800`。页面只读一份静态映射表 + 县界（前端缓存 30 分钟），没有可实时变化的内容。
+- **生效位置**：`https://localhost/myapp/?page=olibTopo_v2`（直链）；v1 仍为 `?page=olibTopo`，未做任何修改。
 
 ## 9. MW 微波实时（`?page=mwRealTime`）— iframe
 
@@ -1327,6 +1341,7 @@ LTE 丢包（RAN UME SDR/IPRAN IPPD），最近 **7 个完整自然日、小时�
   下钻「共 N 行」气泡写明它是**搜索框筛过**的行数且接口按上限截断；饼图百分比由 ECharts 按当前显示扇区算，
   用图例隐掉一档后与后端 `status_pie.pct`（分母恒为全量站点）不再相等 —— 这句也写进 ⓘ，避免用户拿两边对账。
 
+- **地图图例移到左下角（2026-11-16 用户要求）**：状态图例原先挤在地图下方控制行的 Layers / Show OK sites 那一带，现**移进地图、贴左下角**，直接复用 `pages/gismap/MapLegendOverlay.tsx`（与 GIS / 人员地图同一份浮层；位置、置灰删除线、点击隐藏都在那边，本页只喂行数据，`PacketLossDashboard.tsx` 只多一个 `MapLegendOverlay` 引用与 `legendRows`）。为了让浮层有定位父级，地图外面包了一层 `position:relative` 的 flex 容器（`:777-800`，画布高度与改造前一致）。三处口径必须记住：① 行数字取 `status_counts`，与顶部状态卡 / 饼图同源，**含无坐标站点**，地图圆点只画有坐标站点（实测 Critical 230 vs 红点 228），这句写进 `pl.legendNote` 的 ⓘ；② 点某行 = 客户端 `hiddenStatuses` 显隐（即刻生效，县名数字联动），不触发取数；③ OK 行同时受 `include_ok` 开关控制 —— 开关关闭时后端不返回 OK 站点（`toggleLegendStatus` 会先把它重新打开），图例据此置灰，避免「图例显示 438、地图一个绿点都没有、点了还没反应」。控制行因此只剩 Layers（地名 / 道路）· Topology · Show OK sites · Map Controls。另：页面根节点加了 `flexShrink: 0` —— `?embed=1`（门户 iframe 与直开内嵌地址）时 App 的 Content 被钉成 `height:100%`，根节点默认 `flex-shrink:1`，内容高于视口时整页被**压进一屏**而不是滚动：头部横幅压到 5px、Top Sites 卡只剩 31px（卡片 `overflow:hidden` 裁掉 380px 画布），看起来就是「Top Sites 只有一行数据」（2026-11-16 用户反馈）。固定为不可收缩后按内容高度排版、由 `main` 滚动；门户的 PL_MAP_ONLY_CSS 用 `!important` 把高度改回 100%，不受影响。
 - 口径与 Excel 报告 `Packet_Loss_Status_Output Automation` **完全一致**：`STATUS` 是 0~23 的标志块，最近 3 天同整点丢包均 >0.5% 记 1，全 0 为 OK；`FINAL_STATUS` 在 OK 时强制 `No Packet loss[<0.1]`，否则按 Last 1 day Max PL 五级分类（:3-5）。
 - 操作：`Switch` 控制是否包含 OK 站点（`include_ok`，:249）、Popover 显示口径说明、下钻 `GET /api/packet-loss-dashboard/drilldown?status=&limit=800`（:273）、拓扑叠加复用 `GET /api/gis/topology`（:224，该端点 2026-09-25 起读 `kml_mw_links`；本页线宽加粗按 KML 线色判定，见 10c）。
 - **站点点击下钻（2026-11-11）**：地图圆点 `CircleMarker onClick` → 统一 `DraggableClickModal`（`placement="top"`，`PacketLossDashboard.tsx:909`；异步内容长高后仍留在视口内），**不再用 Leaflet Popup**。数据走新增只读端点 `GET /api/packet-loss-dashboard/site-detail?site_code=&site_name=`（`packet_loss_dashboard.py:309`）：按 code→name 关联 `site_pl_summary`，原始读数用参数化 `Managed Element LIKE '%(code)'` 查询，窗口与概览同口径（最近 7 个完整自然日、剔除当天），返回 `daily`（逐日 max / 中位 / 受影响小时 / 读数数）与 `hourly`（最后一个完整日 24 小时）。弹窗内：统计条（`ExplainPopover`）+ 每日柱线图 + 逐小时表（搜索 / 排序 / 筛选 / `exportAoaReport` 导出）。
@@ -5702,7 +5717,11 @@ VMAX 数仓 GBase（10.123.255.12:5258/zxvmax，只读）
   - **平均在前端算、不加后端接口**：与 `GISMap.tsx:1089`（2026-10-21 起县告警数不再用后端静态值）同一个理由 —— 底色必须与**地图上此刻画出来的那批点**同源，搜索词一改标签数字与 SOC 档位跟着改；「只看关注」只过滤表格，不动地图也不动底色。吃的就是 `/api/ipt-power/sites` 已返回的 501 行，零额外请求。
   - **organization → 县名要归一化**：IPT 上游 16 种写法里 13 种与 GeoJSON 县名逐字相同，另 3 种是 `Grand bassa`→Grand Bassa、`River cess`→Rivercess（GeoJSON 的 `name` 连写，`db_name` 才分开）、`Bopolu`→Gbarpolu（Bopolu 是 Gbarpolu 县首府，不是县）。漏了这三条就会有 66 站不进任何县。
   - **圆点必须点得到**：县块是可 hover 的整面多边形，默认和圆点同在 `overlayPane(400)`，命中只靠 DOM 顺序不保证 → 圆点抬到 `iptSitePane(650)`（同 `GISMap.tsx:2808`）；县名标签在 `iptCountyLabelPane(670)`，但 `Marker interactive={false}` + `.gis-county-label` 的 `pointer-events:none` 保证它不拦点击。
-  - 图层状态刻意不写进 URL（与 GIS 页「图层开关不持久化」同一约定），刷新回「按县分色」。**SOC 分档图例浮在地图右上角**（只在 SOC 模式出现，`pointerEvents:none` 不拦圆点点击）：四档色块若塞进卡片头，实测 `extra` 宽 898px、标题被挤到 **4px**（旧版开关形态也已有同类截断），故照 GIS / 人员页「图例在地图上」的惯例挪走。鼠标停在县块上出 tooltip；口径全文在页面「数据口径说明」第 4 段（默认收起）。
+- **标题、图例与「等高铺满」布局（2026-11-16 用户要求）**：卡片标题只写 `Site map` / `站点地图`（去掉「点击圆点下钻」）；三色圆点图例（在线正常 / 有活动告警 / 离线）从卡片头移到**地图左下角**，复用 `pages/gismap/MapLegendOverlay.tsx`（与 GIS / 人员页同一份浮层，颜色取 `markerColor` 同源、**不显示数量** —— 站点数在 KPI 卡里，且 `Online` 的 KPI 含告警站点，图例会与「离线 > 告警 > 正常」的圆点分类口径打架）；卡片头只留县底色下拉。
+  - **地图与右侧清单卡等高、铺满剩余高度**，只在**宽屏（≥`xl` 1200px）+ 单模块嵌入**（`?embed=1` / `?layout=bare`，判定在 `src/embedMode.ts`）时启用：根节点 `flex:1`、地图行 `flex:1`（最小 320px）、两张卡同高，地图绝对定位铺满卡片体。高度链**全走 flex，不写 `height:100%`**（`flex-basis:0%` 撑出的高度对后代是不确定高度，百分比会塌成 0 —— 实测记录见 `GISMap.tsx:2670`）；窄屏两列上下堆叠、或直开应用外壳（`#main-content` 高度由内容决定）时，仍用原定高 `clamp(440px, calc(100vh - 280px), 820px)`，页面照旧滚动。
+  - **表格填满卡片**：`pages/iptPower/useTableFit.ts` 量「可视区 − 表头 − 分页」得到表体高度，并按它算一页行数（下限 10 行，装不下就在表体内部滚动）；表体高度用 DOM `height` 钉住，否则 rc-table 只把它当 `max-height`、一页装不满时分页会被顶到卡片中间。铺满形态下不提供「每页行数」下拉（行数由卡片高度决定）。容器尺寸变化由 `pages/iptPower/IptMapFit.tsx` 通知 Leaflet `invalidateSize`，否则缩放窗口 / 展开口径说明后地图右下角露灰底。
+  - **门户注入样式**：`olbrportal/assets/olbr-data.js` 的 `IPT_MAP_ONLY_EXTRA_CSS` 仍负责「只留地图卡铺满 iframe」；地图容器现在包在一层 wrapper 里（放图例浮层），那份 CSS 里 `> .leaflet-container` 那条对 ipt_power 不再命中，铺满由 `MAP_STRIP_CSS` 的 `*:has(.leaflet-container){height:100%}` 保底（已在注释里标明）。
+- **SOC 分档图例浮在地图右上角**（只在 SOC 模式出现，`pointerEvents:none` 不拦圆点点击）：四档色块若塞进卡片头，实测 `extra` 宽 898px、标题被挤到 **4px**（旧版开关形态也已有同类截断），故照 GIS / 人员页「图例在地图上」的惯例挪走。图层状态刻意不写进 URL（与 GIS 页「图层开关不持久化」同一约定），刷新回「按县分色」。鼠标停在县块上出 tooltip；口径全文在页面「数据口径说明」第 4 段（默认收起）。
 - **电源详情抽屉（2026-11-06 由弹窗改来）**：形态照 `?page=mwRealTime` 点链路的右侧抽屉与 `?page=gis` 的 `SiteDrilldownDrawer`——**antd `Drawer` `placement="right"`、宽 `min(95vw, 45rem)`、通高、带遮罩**，标题栏左侧站点名、右侧「立即刷新」+ ×；遮罩点击 / × / Esc 均可关闭。抽屉壳走全局「浮层玻璃」样式（`index.css` 的 `.ant-drawer-content`），不再单独指定 body 背景。
   - **为什么不是项目统一的 `DraggableClickModal`**（AGENTS.md 三.3 的下钻弹窗入口）：那个窗跟着点击锚点走（居中/置顶），做不出「贴右、通高、滑入」，而用户指定的参考实现正是 MW 页的右侧抽屉。先例同为照参考页做抽屉的 `pages/personmap/PersonDrilldownDrawer.tsx`（其文件头注释有同样的说明）。抽屉是 antd 组件而不是自造骨架，不属于「各页写一套弹窗」。
   - **宽度与 GIS 下钻抽屉同宽，与 MW 页只是「同公式」**：本页 `DRAWER_WIDTH` 与 `pages/gismap/SiteDrilldownDrawer.tsx` 都写 `min(95vw, 45rem)`，同一根字号 → 像素级一致（桌面 **810px**）。`public/mw_real_time.html` 那份 legacy HTML 用的是同一个表达式，但它没设 `html{font-size}`，按浏览器默认 16px 算 = **720px**；站内根字号是 `index.css:680` 的 `clamp(14px,.55vw+12.2px,18px)`，桌面取到 18px。该文件 :187 的注释「45rem = 720px，与 GIS 抽屉保持一致」只对了前半句，GIS 那侧实际是 810px —— 位置与观感一致，宽度差 90px。

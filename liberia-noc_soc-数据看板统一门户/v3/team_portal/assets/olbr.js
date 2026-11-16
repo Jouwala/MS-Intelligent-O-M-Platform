@@ -532,11 +532,18 @@
     var n = Number(v), a = DATA.QC_LEVEL_ABS;
     return n >= a.crit ? 'crit' : (n >= a.warn ? 'warn' : 'ok');
   }
+  /* 卡片 id → 后端接口的 metric 名（2026-11-16 加）。
+     默认同名；只有 PMT 卡在 v3 改了口径（见 olbr-data.js 的 QC_CARD_METRIC）。
+     凡是要拿「后端数据」的地方（卡片大数字 / 存量趋势 / 下钻明细）都过这一层，
+     而卡片 id 本身仍用于文案与「打开完整看板」的映射 —— 两者刻意分开。 */
+  function qcMetricOf(id) {
+    return (DATA.QC_CARD_METRIC && DATA.QC_CARD_METRIC[id]) || id;
+  }
   /* 告警优先用 5 分钟那一档：它比全量新，且失败时会被置成 error 态，
      不会把一小时前的旧数字留在屏幕上冒充实时值。 */
   function qcMetric(id) {
     if (id === 'alarm' && state.qcAlarm) return state.qcAlarm;
-    return (state.qc.m && state.qc.m[id]) || null;
+    return (state.qc.m && state.qc.m[qcMetricOf(id)]) || null;
   }
   /* 后端 generated_at 写死 +08:00，页面时钟用浏览器本地时区：直接切字符串会出现
      「时钟 18:07 / 更新于 02:07」，看着像 8 小时前的旧数据（MsPortal 踩过这个坑）。 */
@@ -784,7 +791,9 @@
      为什么必须连续轴：按点数等距排开，会把「中间断了 20 小时」画成
      「连续 20 小时」—— 等于在横轴上撒谎（本文件 qcTrendSeries 已有同样教训）。 */
   function qcStockSeries(id) {
-    var all = state.qcHistory && state.qcHistory[id];
+    /* 2026-11-16：序列名走 qcMetricOf —— PMT 卡的存量现在由 `pmt_wait` 那一列
+       （等待 PM Manager Approve 的小时快照）供数，与卡片大数字同一口径。 */
+    var all = state.qcHistory && state.qcHistory[qcMetricOf(id)];
     if (!all || !all.length) return null;
     var pts = all.filter(function (p) {
       /* ⚠️ 必须先挡 null / '' 再 Number()：Number(null) === 0 是**有限数**，
@@ -839,7 +848,7 @@
     if (!s) {
       /* 有数据但点不够：给一句说明，别让卡片空着像坏了；
          完全没有数据：不占位（此时卡片本来就没有这一行，挂说明反而是噪音）。 */
-      var raw = state.qcHistory && state.qcHistory[id];
+      var raw = state.qcHistory && state.qcHistory[qcMetricOf(id)];
       if (raw && raw.length) {
         return '<span class="qc-spark-empty">' + esc(t('qc.stock.starving')) + '</span>';
       }
@@ -939,6 +948,8 @@
        v1 摘掉阈值行的理由是「等级分档整个不显示了，再把阈值挂在悬浮里，
        等于让用户按一个屏幕上不存在的规则去读数字」—— 前提已经不成立了。 */
     var tips = [def];
+    /* PMT 卡（v3）：数字口径与其余五张不同，hover 时说清它到底是什么 */
+    if (d.id === 'pmt') tips.push(t('qc.pmtWait.tip'));
     /* 阈值提示挂的是**统一刻度**（5 / 20），不是各指标自己的 QC_TARGETS：
        屏幕上数字与柱子就是按这把尺子染的色，提示也必须是同一把，
        否则 hover 看到 10/30、屏幕上却是按 5/20 上的色 —— 那就又成了黑盒。 */
@@ -3124,8 +3135,10 @@
                          只显示 Site map 地图卡，筛选条 / KPI 数字卡 / 右侧站点清单
                          由剥离样式隐藏（见 olbr-data.js 的 MAP_TAB_CSS）
        · olibTopo    —— 「IP」（2026-11-16 起）：物理拓扑原图，不注入剥离样式；maponly 时搜索框浮在图上
-       · packet_loss —— 「PL」（2026-11-11 加）：只显示 Packet Loss Map 地图卡，
-                         横幅 / KPI 卡 / 图表 / 右侧指标列由 PL_MAP_ONLY_CSS 隐藏
+       · packet_loss —— 「PL」（2026-11-11 加；2026-11-16 按要求改成与其它页签
+                         一样的纯地图形态）：横幅 / KPI / 图表 / Top10、卡片头、
+                         图层开关与地图控制行全部去掉，只留铺满的 Leaflet 画布；
+                         窄 iframe 下落下的 zoom 6 由 schedulePlZoom 补到 8 / 7.5
                          （直开 /myapp/ 仍是完整业务页）
      概念上分两层，读代码时别搞混：
        · 屏幕上方那行标题叫 **GIS Map** —— 那是**栏标题**，来自 map.title
@@ -7384,7 +7397,10 @@
     var d = state.drill; if (!d.metric) return;
     var seq = ++drillSeq;
     d.loading = true; d.err = ''; renderDrill();
-    api('/api/portal-qc/detail?metric=' + encodeURIComponent(d.metric) +
+    /* 2026-11-16：下钻走 qcMetricOf —— PMT 卡的明细是「等待 PM Manager Approve」
+       那一批（后端 metric=pmt_wait），与卡片大数字同一口径，行数必然相等。
+       标题 / 「打开完整看板」仍用卡片 id（state.drill.metric）去查，故不改那两处。 */
+    api('/api/portal-qc/detail?metric=' + encodeURIComponent(qcMetricOf(d.metric)) +
         '&page=' + d.page + '&size=' + d.size +
         (d.q ? '&q=' + encodeURIComponent(d.q) : '') +
         /* 排序下发到服务端（不是只排当前页）。后端会拿 sort 去撞该 metric 的
@@ -7517,6 +7533,8 @@
     var btn = $('#qcExport'); if (btn) btn.disabled = true;
 
     var metric = d.metric;
+    /* 导出的取数口径必须与屏幕上那张明细表一致（PMT 卡 = pmt_wait） */
+    var apiMetric = qcMetricOf(metric);
     var keyword = d.q || '';
     var label = qcMetricLabel(metric);
 
@@ -7528,7 +7546,7 @@
        而不是整单作废 —— 导出一半也好过什么都拿不到（失败原因最后一起 toast）。 */
     var page = 1, total = null, failed = null;
     function nextPage() {
-      return api('/api/portal-qc/detail?metric=' + encodeURIComponent(metric) +
+      return api('/api/portal-qc/detail?metric=' + encodeURIComponent(apiMetric) +
                  '&page=' + page + '&size=' + DRILL_EXPORT_SIZE +
                  (keyword ? '&q=' + encodeURIComponent(keyword) : ''))
         .then(function (data) {
@@ -7705,22 +7723,52 @@
     if (map) return map;
     try {
       var fk = Object.keys(lc).filter(function (k) { return k.indexOf('__reactFiber') === 0; })[0];
-      if (!fk) return null;
-      var seen = new Set(), stack = [lc[fk]], guard = 0;
-      while (stack.length && guard++ < 4000) {
-        var n = stack.pop();
-        if (!n || seen.has(n)) continue;
-        seen.add(n);
-        if (n.stateNode && typeof n.stateNode.invalidateSize === 'function') return n.stateNode;
-        var mp = n.memoizedProps || n.pendingProps;
-        if (mp) {
-          for (var key in mp) {
-            var v = mp[key];
-            if (v && typeof v === 'object' && typeof v.invalidateSize === 'function') return v;
+      /* ⚠️ 这里**不能**在 fk 为空时直接 return null：自研 LeafletMap 的
+         .leaflet-container 是它自己 createElement 出来的，身上根本没有 fiber，
+         但它的宿主 div 有 —— 下面那段「从宿主 div 往上爬 hook」正是为它准备的。
+         2026-11-16 第一版就是在这里提前返回，导致 tunePlZoom 永远找不到实例。 */
+      if (fk) {
+        var seen = new Set(), stack = [lc[fk]], guard = 0;
+        while (stack.length && guard++ < 4000) {
+          var n = stack.pop();
+          if (!n || seen.has(n)) continue;
+          seen.add(n);
+          if (n.stateNode && typeof n.stateNode.invalidateSize === 'function') return n.stateNode;
+          var mp = n.memoizedProps || n.pendingProps;
+          if (mp) {
+            for (var key in mp) {
+              var v = mp[key];
+              if (v && typeof v === 'object' && typeof v.invalidateSize === 'function') return v;
+            }
           }
+          if (n.child) stack.push(n.child);
+          if (n.sibling) stack.push(n.sibling);
         }
-        if (n.child) stack.push(n.child);
-        if (n.sibling) stack.push(n.sibling);
+      }
+      /* ⚠️ 2026-11-16：my_app 的 LeafletMap 组件**不把 map 实例挂在 DOM 上** ——
+         它每次挂载都 new 一个内层 div 交给 L.map()（见 LeafletMap.tsx 的
+         MapContainer effect），所以 .leaflet-container 上只有 _leaflet_id、
+         没有 React fiber，上面两条路（lc 的挂载点、lc fiber）对 packet_loss /
+         person 这类自研 LeafletMap 页面**全部落空**。地图实例只存在于
+         MapContainer 的 useState / useRef 里。
+         这里从 **宿主 div**（lc.parentElement，React 渲染出来的那个 node）的 fiber
+         沿 return 往上爬，逐个查 hook 链表里的 memoizedState（useState 的 map）
+         与 .current（useRef 的 map），并用 `_container === lc` 认准是这一张图 ——
+         不能用"找到任意一个 map"：StrictMode 卸载过一次的旧实例也在 fiber 里，
+         它对可见画布没有任何影响，调它的 setZoom 会表现成"改了但没反应"。
+         这一步让 invalidateLeaflet / applyMapWheelLock 对自研地图页也生效。 */
+      var host = lc.parentElement;
+      var hk = host ? Object.keys(host).filter(function (k) { return k.indexOf('__reactFiber') === 0; })[0] : null;
+      var fib = hk ? host[hk] : null, hop = 0;
+      while (fib && hop++ < 80) {
+        var h = fib.memoizedState, hi = 0;
+        while (h && hi++ < 40) {
+          var cand = h.memoizedState;
+          if (cand && typeof cand === 'object' && cand.current) cand = cand.current;
+          if (cand && typeof cand.getCenter === 'function' && cand._container === lc) return cand;
+          h = h.next;
+        }
+        fib = fib.return;
       }
     } catch (e) { /* ignore */ }
     return null;
@@ -7876,6 +7924,62 @@
     var m = DATA.MAP_TAB_CSS;
     if (pg && m && Object.prototype.hasOwnProperty.call(m, pg)) return m[pg];
     return DATA.MAP_STRIP_CSS;
+  }
+
+  /* 2026-11-16（PL 页签切纯地图时发现）：packet_loss 页按 `window.innerWidth` 选
+     取景档 —— 门户里 iframe 宽 730，落在「<900 → zoom 6」那一档。摘掉图表只留
+     地图后，730×858 的画布里国土只剩 188×192（实测），周围一大片空白，看起来
+     像"地图没加载"。故门户侧把这一页补到 zoom 8（与 Alarm / MW 同档，实测国土
+     754×766 正好铺满、底图与县色都在）。
+     ---- 为什么在门户侧补，而不改 my_app 的 zoomForWidth ----
+       · 那是预编译产物；为一个门户页签改它要带出一批与本次无关的构建/发布，
+         而且当前源码目录还有在途改动（不适合顺手重建）。
+       · 门户本来就有 findLeafletMap 这条同源通道，取一次实例即可。
+     ---- 边界 ----
+       · 只对 packet_loss 生效，且每个 document 只补一次（用户之后手动缩放不被覆盖；
+         点 Reload 会重建 iframe，自然重新补一次）。
+       · 页面若自己已经 ≥7.5（更宽的窗口），不动它 —— 宁可不改，也不要压掉页面
+         自己的取景决定。
+       · 补完再 invalidateSize 一次：Leaflet 在 setZoom 动画结束后要重新量容器，
+         否则瓦片网格可能停在旧档。 */
+  function tunePlZoom(doc) {
+    if (doc.__olbrPlZoomTuned) return true;
+    var map = findLeafletMap(doc);
+    if (!map) return false;
+    doc.__olbrPlZoomTuned = true;
+    try {
+      /* 取景档按 iframe 实宽分两档：617px 那种窄栏用 8 会把国土左右各裁掉
+         约 9%（实测 754 > 617），7.5 的 533px 正好装下；730px 起用 8
+         （与 Alarm / MW 同档，754px 只压掉极窄一条边，视觉上是"铺满"）。 */
+      var w = doc.documentElement ? doc.documentElement.clientWidth : 0;
+      var target = w >= 700 ? 8 : 7.5;
+      if (map.getZoom() < target) {
+        map.setZoom(target);
+        window.setTimeout(function () { invalidateLeaflet(doc); }, 600);
+      }
+      /* 页面自己的「地图控制」行（缩放 / 复位）随剥离样式一起藏掉了，而
+         MapControlsBridge 又把 Leaflet 默认的 +/- 控件 remove 了 —— 不补回来，
+         纯地图形态就没有任何可见的缩放入口（滚轮默认还被缩放锁拦着）。
+         这里把默认控件重新挂上，与 Alarm / MW 两页左上角那颗一模一样。
+         ⚠️ 只在门户内嵌的纯地图形态里补；直开页面仍有自己的一行控制按钮。 */
+      if (map.zoomControl && map.zoomControl._map !== map) {
+        try { map.zoomControl.addTo(map); } catch (e2) { /* ignore */ }
+      }
+    } catch (e) { /* 拿不到实例就保持页面自己的取景 */ }
+    return true;
+  }
+  /* 地图是数据到位后才挂载的（页面先取数再渲染），stripFrame 的 0/1.4/3.4s 可能
+     都赶在挂载之前。故补一个带重试的调度：每秒试一次，最多 10 次；成功或超时即停。 */
+  function schedulePlZoom(doc) {
+    if (doc.__olbrPlZoomSchedule) return;
+    doc.__olbrPlZoomSchedule = true;
+    var tries = 0;
+    var tick = function () {
+      tries++;
+      if (doc.__olbrPlZoomTuned || tries > 10) return;
+      if (!tunePlZoom(doc)) window.setTimeout(tick, 1000);
+    };
+    tick();
   }
 
   /* 默认比内层页自己的取景再近一级（2026-09-22 用户：「跟手动点一次加号一个效果」）。
@@ -8338,6 +8442,11 @@
       /* 缩放锁：只要拿到 document 就先挂一次拦截路（不依赖地图有没有挂载），
          下面拿到实例再补①那条路。见 applyMapWheelLock 上方的说明。 */
       applyMapWheelLock(f);
+      /* PL 页签：把页面按窄窗口落下的 zoom 6 补成整幅画布的 8（见 schedulePlZoom）。
+         ⚠️ 必须放在「有没有 .leaflet-container」的判断**之外**：Reload 之后页面要
+         重新取数才挂地图，stripFrame 的 0/1.4/3.4s 可能都赶在挂载之前；调度器自己
+         会每秒重试 10 次。2026-11-16 第一版放在里面，点 Reload 后地图又退回 zoom 6。 */
+      if (framePage(f) === 'packet_loss') schedulePlZoom(d);
 
       if (d.querySelector('.leaflet-container')) {
         if (depth > 0) keepOnlyMap(d);
