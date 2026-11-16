@@ -8,7 +8,7 @@
 
 | 项目 | 组件位置 | 数量 | 技术 |
 | --- | --- | --- | --- |
-| 统一门户 | `apps\portal\src\components\` | 27 个 `.tsx` | React 19 + Tailwind v4 + lucide-react |
+| 统一门户 | `apps\portal\src\components\` | 32 个 `.tsx` | React 19 + Tailwind v4 + lucide-react |
 | 门户页面级 | `...\src\App.tsx` | 状态中枢 | 非组件化，状态与持久化都在这 |
 | my_app 前端 | `apps\my_app\frontend\src\` | 见 my_app 索引 | React + Vite |
 | 门户静态页 | `...\MsPortal\` | `index.html` / `viewer.html` | 原生 HTML（复刻参考与查看器） |
@@ -70,6 +70,17 @@
 | `agent\AgentTasksView.tsx` | 任务视图：状态/进度/认领关系 + 执行日志流（SSE 实时追加） |
 | `agent\ApprovalsView.tsx` | 异常（blocked / qa-failed 常驻可见）+ 审批队列（可批准/驳回并记事件） |
 | `agent\hooks\useAgentEvents.ts` | 数据层 hook（非组件）：快照 + SSE 增量订阅，接口走 `PORTAL_API/agent-console/*` |
+
+### 网络拓扑（`components\topology\`，2026-11-16）
+
+| 组件 | 职责 |
+| --- | --- |
+| `topology\NetworkTopologyView.tsx` | 网络拓扑视图（FilterBar「网络拓扑」入口，ViewMode `topology`）：OLIB 光纤拓扑四视图（原图物理/原图逻辑/骨干示意/站点分布）+ 站点搜索与详情 |
+| `topology\PhysicalMap.tsx` | 原图查看器：平移/缩放 + 全部站点点位叠加层（按类型着色、半径随缩放补偿、可点击选中、可开关）+ 屏幕坐标十字线高亮 + 全图缩略导航；站点坐标为原图千分比（0-1000） |
+| `topology\ScatterMap.tsx` | 站点分布：全部站点按原图版面位置绘制、按区域着色，点击点查看详情 |
+| `topology\CoreMap.tsx` | 骨干示意：按逻辑图人工梳理的核心 IPRAN/DWDM 节点与链路类型 |
+| `topology\ZoomStage.tsx` | 通用平移/缩放舞台（骨干示意/站点分布共用） |
+| `topology\topologyData.ts` | 拓扑静态数据与纯计算（非组件）：站点名单来自 `src\data\orangeTopologySites.json`（拓扑 PDF 文字层提取 553 条），原图两张在 `src\assets\topology-*.jpg` |
 
 ### 工具组件
 
