@@ -18,7 +18,7 @@ ref 名全局唯一，后到的请求拿到 422，天然互斥。
 **来源为什么用逻辑值**：`pull_request closed` 与 auto-merge 的
 `workflow_dispatch` 是同一个逻辑事件（PR 合入 main）的两条投递路径。把
 “来源”记成 workflow 事件名会让两条路径算出不同 dispatch_id，同一合并被
-分派两次。这里统一记逻辑来源 `pr-merged` / `qa-trigger`，重复投递自然
+分派两次。这里统一记逻辑来源 `pr-merged` / `qa-trigger` / `cron-sweep`，重复投递自然
 命中同一个 ref。
 
 **残余风险**（已写进交接报告）：并发双投递若在“选择目标任务”之后才错开，
@@ -38,6 +38,8 @@ from .github_client import GitHubAPIError, GitHubClient
 # 逻辑触发来源（不是 workflow 事件名，见模块注释）。
 SOURCE_AUTO_DISPATCH = "pr-merged"
 SOURCE_QA = "qa-trigger"
+#: 每小时 :17 的定时巡检（没有 PR 合入时的兜底分派）。
+SOURCE_CRON_SWEEP = "cron-sweep"
 
 REF_ROOT = "dispatch"
 _SLUG_RE = re.compile(r"[^a-z0-9]+")

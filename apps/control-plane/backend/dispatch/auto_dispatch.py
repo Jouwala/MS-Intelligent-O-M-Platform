@@ -1,29 +1,37 @@
-"""PR 合入后自动分派下一个就绪任务（原 `auto-dispatch.yml` 内嵌脚本）。
+"""PR 合入后 / 每小时定时巡检自动分派下一个就绪任务（原 `auto-dispatch.yml` 内嵌脚本）。
 
 行为与安全阀沿用原工作流（见 `docs/workspace/github-automation.md` 第二节）：
 
-- 只处理 merged == true 且 base 为 main 的 PR（workflow_dispatch 路径也再校验一次）；
-- 就绪 = `state:todo` + 无其他 state 标签 + `agent:muse-2/3` + `depends on #N`
-  依赖全关闭 + 无认领评论 + 无 TASK_ASSIGNED 分派评论；
+- 合入路径：只处理 merged == true 且 base 为 main 的 PR（workflow_dispatch 路径也再校验一次）；
+- 定时路径：每小时 :17 巡检一次，不看 PR，直接按 main HEAD 分派——兜住
+  「任务早就绪、但没有新 PR 合入」的空窗（`event=schedule`）；
+- 就绪 = `state:todo` + 无其他 state 标签 + 命中**注册表白名单**的 agent 标签
+  （来源 `docs/workspace/agent-registry.md`，见 `builder_registry.py`）+
+  `depends on #N` 依赖全关闭 + 无未过期的认领 / 分派记录；
+- auto-fix 修复 Issue 对原 Issue 的 `depends on` 是自依赖（原 Issue 要等本修复
+  合入才关闭），分派时忽略，避免互相等待（2026-11-16 #108 死锁）；
 - 优先派给本次合并空闲出来的 builder，其次编号最小的就绪任务；每次只派一个；
 - 没有就绪任务只记日志，不报错。
 
-修复的三处缺陷：
+修复的缺陷：
 
 1. **全量分页**：候选 Issue（`state:todo`）与每个 Issue 的评论都走
    `client.paginate`，不再只读第一页。评论 >100 条时第 2 页的认领 / 分派
    记录能读到；Issue >100 条时第 2 页之后的任务能发现。
 2. **并发幂等（TASK-07）**：任务选定后先 `POST /git/refs` 登记
-   `dispatch/pr-merged/issue-<N>-<sha>-<digest>`（原子 CAS，见
+   `dispatch/<source>/issue-<N>-<sha>-<digest>`（原子 CAS，见
    `dispatch_registry.py`），登记成功才发 TASK_ASSIGNED 评论；评论头带
    `dispatch_id`。并发运行只有一个赢家；重复投递 / workflow 重试命中已存在
    的 ref，只做对账，不再分派第二个任务。
 3. **失败显式**：查询 / 分页失败不再 `except` 成“没记录”，直接抛错让
    workflow 变红，避免用不完整数据做分派决定。
+4. **分派超时**：TASK_ASSIGNED 发出 24 小时仍无人认领（协议规定）时不再永久
+   卡住该任务，允许重新分派；认领后的 4 小时租约过期由 `claim_expiry.py`
+   处理（lease-reaper 每 5 分钟巡检）。
 
 调用方式（workflow 里就是这一行）：`python apps/control-plane/backend/dispatch/auto_dispatch.py`
 环境变量：`REPO` / `GH_TOKEN` / `EVENT` / `PR_NUMBER_EVENT` / `PR_NUMBER_INPUT`
-/ `MERGE_SHA_EVENT`。
+/ `MERGE_SHA_EVENT`。`EVENT=schedule` 走定时巡检路径。
 """
 
 from __future__ import annotations
@@ -31,6 +39,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -40,8 +49,13 @@ _BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
+from dispatch.builder_registry import load_builders  # noqa: E402
 from dispatch.comment_ledger import ensure_comment_once  # noqa: E402
-from dispatch.dispatch_registry import SOURCE_AUTO_DISPATCH, DispatchRegistry  # noqa: E402
+from dispatch.dispatch_registry import (  # noqa: E402
+    SOURCE_AUTO_DISPATCH,
+    SOURCE_CRON_SWEEP,
+    DispatchRegistry,
+)
 from dispatch.github_client import GitHubAPIError, GitHubClient, client_from_env  # noqa: E402
 from dispatch.protocol import (  # noqa: E402
     ASSIGNED_MARKER,
@@ -49,7 +63,9 @@ from dispatch.protocol import (  # noqa: E402
     agent_of,
     build_agent_header,
     comment_has_dispatch_id,
+    effective_dependencies,
     parse_dependencies,
+    parse_marker_time,
     resolve_issue_number,
     utc_now_iso,
 )
@@ -58,6 +74,9 @@ from dispatch.protocol import (  # noqa: E402
 # 写完；超时仍未出现才补发（覆盖“登记后进程崩溃 / 评论超时”）。
 DEFAULT_RECONCILE_TIMEOUT = 2.0
 POLL_INTERVAL = 0.05
+
+#: 分派 24 小时无人认领即视为超时（docs/workspace/agent-protocol.md 第三节）。
+DEFAULT_ASSIGN_TTL = timedelta(hours=24)
 
 
 def _labels_of(issue: dict[str, Any]) -> list[str]:
@@ -120,7 +139,14 @@ def ensure_todo_state(client: GitHubClient, number: int) -> None:
     client.remove_issue_label(number, "state:blocked")
 
 
-def is_ready(client: GitHubClient, issue: dict[str, Any]) -> tuple[bool, str]:
+def is_ready(
+    client: GitHubClient,
+    issue: dict[str, Any],
+    *,
+    builders: tuple[str, ...] | None = None,
+    now: datetime | None = None,
+    assign_ttl: timedelta = DEFAULT_ASSIGN_TTL,
+) -> tuple[bool, str]:
     """四条就绪条件（见模块注释），返回 (是否就绪, 不就绪原因)。"""
     number = int(issue["number"])
     labels = _labels_of(issue)
@@ -132,26 +158,54 @@ def is_ready(client: GitHubClient, issue: dict[str, Any]) -> tuple[bool, str]:
     ]
     if other_states:
         return False, f"已有其他状态标签 {other_states}"
-    if not agent_of(labels):
-        return False, "无 agent:muse-2/3 标签"
-    for dep in parse_dependencies(issue.get("body") or ""):
+    allowed = tuple(builders) if builders is not None else load_builders()
+    if not agent_of(labels, allowed):
+        return False, f"无白名单内的 agent 标签（白名单：{', '.join(allowed)}）"
+
+    body = issue.get("body") or ""
+    raw_deps = parse_dependencies(body)
+    deps = effective_dependencies(body)
+    dropped = sorted(set(raw_deps) - set(deps))
+    if dropped:
+        print(
+            f"[dispatch] #{number} 忽略自依赖 {dropped}：auto-fix 修复任务对其原 Issue "
+            "的 depends on 会互相等待（死锁），按无依赖处理",
+            flush=True,
+        )
+    for dep in deps:
         dep_issue = client.get_issue(dep)  # 查询失败直接抛错，不当成“未完成”或“已完成”
         if dep_issue.get("state") != "closed":
             return False, f"依赖 #{dep} 未完成"
+
     bodies = _comment_bodies(client, number)  # 全量分页
     if any(marker in body for body in bodies for marker in CLAIM_MARKERS):
         return False, "已有认领评论"
-    if any(ASSIGNED_MARKER in body for body in bodies):
-        return False, "已有 TASK_ASSIGNED 分派评论"
+    assigned_times = [
+        parse_marker_time(body) for body in bodies if ASSIGNED_MARKER in body
+    ]
+    if assigned_times:
+        latest = max((moment for moment in assigned_times if moment), default=None)
+        current = now or datetime.now(timezone.utc)
+        # 没有时间戳的老评论按“刚分派”保守处理，不为省一次查询放过重复分派。
+        if latest is None or current - latest < assign_ttl:
+            return False, "已有 TASK_ASSIGNED 分派评论"
+        print(
+            f"[dispatch] #{number} 上次分派于 {latest:%Y-%m-%dT%H:%M:%SZ}，"
+            f"已超过 {int(assign_ttl.total_seconds() // 3600)}h 无人认领，允许重新分派",
+            flush=True,
+        )
     return True, ""
 
 
-def freed_builder(client: GitHubClient, pr: dict[str, Any]) -> str:
+def freed_builder(
+    client: GitHubClient, pr: dict[str, Any], builders: tuple[str, ...] | None = None
+) -> str:
     """判定本次合并空闲出来的 builder：PR 标签 → 关联 Issue 标签。
 
     这个结果只影响“优先派给谁”的排序，查询失败只记警告、不阻断分派。
     """
-    agent = agent_of(_labels_of(pr))
+    allowed = tuple(builders) if builders is not None else load_builders()
+    agent = agent_of(_labels_of(pr), allowed)
     if agent:
         return agent
     issue_no = resolve_issue_number(
@@ -164,21 +218,25 @@ def freed_builder(client: GitHubClient, pr: dict[str, Any]) -> str:
     except GitHubAPIError as exc:
         print(f"[dispatch] 关联 Issue #{issue_no} 查询失败（仅影响优先级排序）：{exc}", flush=True)
         return ""
-    return agent_of(_labels_of(issue))
+    return agent_of(_labels_of(issue), allowed)
 
 
 def collect_ready(
     client: GitHubClient,
+    *,
+    builders: tuple[str, ...] | None = None,
+    now: datetime | None = None,
 ) -> list[tuple[dict[str, Any], str]]:
     """分页读取全部 state:todo Issue，筛出就绪任务。"""
+    allowed = tuple(builders) if builders is not None else load_builders()
     ready: list[tuple[dict[str, Any], str]] = []
     for issue in client.list_open_issues("state:todo"):
         number = issue.get("number")
         if number is None or "pull_request" in issue:
             continue
-        ok, reason = is_ready(client, issue)
+        ok, reason = is_ready(client, issue, builders=allowed, now=now)
         if ok:
-            agent = agent_of(_labels_of(issue))
+            agent = agent_of(_labels_of(issue), allowed)
             ready.append((issue, agent))
             print(f"[dispatch] #{number} 就绪（{agent}）", flush=True)
         else:
@@ -193,6 +251,7 @@ def build_assignment_comment(
     dispatch_id: str,
     *,
     at: str | None = None,
+    reason: str = "pr-merged",
 ) -> str:
     """TASK_ASSIGNED 评论：协议机器可读头（带 dispatch_id）+ 人可读正文。"""
     header = build_agent_header(
@@ -203,10 +262,19 @@ def build_assignment_comment(
         at=at or utc_now_iso(),
         dispatch_id=dispatch_id,
     )
+    if reason == "schedule":
+        intro = (
+            f"任务已自动分派：定时巡检（每小时 :17）发现就绪任务，"
+            f"{agent_name} 当前空闲，本任务自动派给 {agent_name}。\n\n"
+        )
+    else:
+        intro = (
+            f"任务已自动分派：PR #{pr_number} 合并后，{agent_name} 空闲，"
+            f"本任务自动派给 {agent_name}。\n\n"
+        )
     return (
         f"{header}\n"
-        f"任务已自动分派：PR #{pr_number} 合并后，{agent_name} 空闲，"
-        f"本任务自动派给 {agent_name}。\n\n"
+        f"{intro}"
         f"请按协议认领：发认领评论并打 `state:claimed` 标签。"
         f"任务说明与验收标准见本 Issue 正文；依赖已全部满足，可以认领。\n"
     )
@@ -232,7 +300,7 @@ def reconcile_task(
         print(f"[dispatch] #{number} 的登记 ref 不存在，本次不做对账", flush=True)
         return False
     print(f"[dispatch] #{number} 已登记（dispatch_id={dispatch_id}），只做对账", flush=True)
-    agent = agent_of(_labels_of(client.get_issue(number)))
+    agent = agent_of(_labels_of(client.get_issue(number)), load_builders())
     agent_name = agent.split(":", 1)[1] if agent else "未知"
     ensure_dispatch_comment(
         client,
@@ -316,9 +384,11 @@ def dispatch_next(
         }
 
     # ② 正常路径：选一个就绪任务。
-    freed = freed_builder(client, pr)
+    builders = load_builders()
+    print(f"[dispatch] 分派白名单：{', '.join(builders)}", flush=True)
+    freed = freed_builder(client, pr, builders)
     print(f"[dispatch] PR #{pr_number} 已合入（{sha[:12]}），空闲 builder：{freed or '未知'}", flush=True)
-    ready = collect_ready(client)
+    ready = collect_ready(client, builders=builders)
     if not ready:
         # 竞态兜底：本次扫描期间可能有并发运行刚好完成分派——它发完评论后
         # 任务就不再“就绪”，直接报 no-ready 会掩盖“已经派过一次”。再查一次
@@ -369,6 +439,63 @@ def dispatch_next(
     }
 
 
+def dispatch_scheduled(
+    client: GitHubClient,
+    repo: str,
+    *,
+    at: str | None = None,
+    builders: tuple[str, ...] | None = None,
+    reconcile_timeout: float = DEFAULT_RECONCILE_TIMEOUT,
+) -> dict[str, Any]:
+    """定时巡检路径（每小时 :17）：不看 PR，按 main HEAD 分派一个就绪任务。
+
+    与合入路径共用就绪判定与 CAS 登记，区别只在“触发键”：来源记
+    `cron-sweep`、sha 取 main HEAD，ref 落到 `dispatch/cron-sweep/...`。
+    这样即使一整天没有 PR 合入，就绪任务也不会一直干等；同日重复运行命中
+    已登记的 ref，只对账不再发第二条评论。
+    """
+    sha = client.get_branch_sha("main")
+    print(f"[dispatch] 定时巡检：main HEAD {sha[:12]}", flush=True)
+    allowed = tuple(builders) if builders is not None else load_builders()
+    print(f"[dispatch] 分派白名单：{', '.join(allowed)}", flush=True)
+    ready = collect_ready(client, builders=allowed)
+    if not ready:
+        return {
+            "status": "no-ready",
+            "event": "schedule",
+            "merge_sha": sha,
+            "reason": "没有可分派的就绪任务",
+        }
+    ready.sort(key=lambda item: int(item[0]["number"]))
+    issue, agent = ready[0]
+    number = int(issue["number"])
+    agent_name = agent.split(":", 1)[1]
+    registry = DispatchRegistry(client, repo)
+    registration = registry.register(
+        "issue", number, sha, SOURCE_CRON_SWEEP, anchor_sha=sha
+    )
+    body = build_assignment_comment(
+        number, agent_name, 0, registration.dispatch_id, at=at, reason="schedule"
+    )
+    outcome = ensure_dispatch_comment(
+        client,
+        number,
+        registration.dispatch_id,
+        body,
+        wait_timeout=0.0 if registration.created else reconcile_timeout,
+    )
+    ensure_todo_state(client, number)
+    return {
+        "status": "dispatched" if registration.created else "reconciled",
+        "event": "schedule",
+        "merge_sha": sha,
+        "issue": number,
+        "agent": agent,
+        "dispatch_id": registration.dispatch_id,
+        "comment": outcome,
+    }
+
+
 def run_from_env(env: dict[str, str], client: GitHubClient | None = None) -> dict[str, Any]:
     """workflow 入口的纯逻辑部分（可注入客户端单测）。"""
     repo = env.get("REPO") or env.get("GITHUB_REPOSITORY") or ""
@@ -379,6 +506,8 @@ def run_from_env(env: dict[str, str], client: GitHubClient | None = None) -> dic
     merge_sha = env.get("MERGE_SHA_EVENT") or ""
     print(f"[dispatch] event={event or '未知'} pr={pr_number}", flush=True)
     client = client or client_from_env(env)
+    if event == "schedule":
+        return dispatch_scheduled(client, repo)
     return dispatch_next(client, repo, pr_number, merge_sha=merge_sha)
 
 

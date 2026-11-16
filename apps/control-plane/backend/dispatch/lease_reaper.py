@@ -8,13 +8,15 @@ ADR-7 §零 要求「Reaper 抢过期租约也必须用 ref-CAS」：过期判�
 2. 调 `ref_scope.cleanup_orphans(...)` 清理「所属任务无存活租约」的孤儿 scope ref；
 3. 可选 `--fix-labels`：租约已过期且无完成审计标记时，把残留 `state:claimed` 收敛成
    `state:todo`（展示层对账，失败只告警，不影响权威互斥）；
-4. 幂等、可重复执行；失败显式：缺 `REPO`/`GH_TOKEN`、ref_reap 未就绪、refs API 报错
+4. 可选 `--claim-expiry`：认领后 4 小时无进展的任务发 `CLAIM_EXPIRED` 评论并把标签
+   收敛回 `state:todo`（`claim_expiry.py`，lease-reaper workflow 每 5 分钟跑一次）；
+5. 幂等、可重复执行；失败显式：缺 `REPO`/`GH_TOKEN`、ref_reap 未就绪、refs API 报错
    → stderr 打印原因 + 退出码非 0。
 
 用法：
 ```bash
 REPO=owner/name GH_TOKEN=... python apps/control-plane/backend/dispatch/lease_reaper.py
-# 可选：--dry-run / --fix-labels / --ttl-seconds N / --reaper-instance <hex>
+# 可选：--dry-run / --fix-labels / --claim-expiry / --ttl-seconds N / --reaper-instance <hex>
 ```
 """
 
@@ -37,6 +39,12 @@ if str(_BACKEND) not in sys.path:
 
 from scheduler import ref_api  # noqa: E402
 from scheduler.api import utcnow  # noqa: E402
+
+from dispatch.claim_expiry import (  # noqa: E402
+    DEFAULT_CLAIM_TTL,
+    ENV_CLAIM_TTL_HOURS,
+    expire_stale_claims,
+)
 
 try:  # 作为包导入（pytest: dispatch.lease_reaper）
     from .github_client import UrllibGitHubClient
@@ -309,10 +317,32 @@ def _default_reaper_instance(values: dict) -> str:
     return raw or uuid.uuid4().hex[:12]
 
 
+def _build_client(repo: str, token: str, api_base: str) -> UrllibGitHubClient:
+    return UrllibGitHubClient(repo=repo, token=token, base_url=api_base)
+
+
 def _build_label_adapter(repo: str, token: str, api_base: str) -> LabelAdapter:
-    return DispatchLabelAdapter(
-        UrllibGitHubClient(repo=repo, token=token, base_url=api_base)
-    )
+    return DispatchLabelAdapter(_build_client(repo, token, api_base))
+
+
+def _claim_ttl(arg_value: Optional[float], values: dict) -> timedelta:
+    """认领租约时长：命令行 > 环境变量 > 协议默认 4 小时；非正数即配置错误。"""
+    raw = str(arg_value) if arg_value is not None else str(
+        values.get(ENV_CLAIM_TTL_HOURS) or ""
+    ).strip()
+    if not raw:
+        return DEFAULT_CLAIM_TTL
+    try:
+        hours = float(raw)
+    except ValueError as exc:
+        raise ReaperError(
+            f"{ENV_CLAIM_TTL_HOURS} / --claim-ttl-hours 必须是正数，实际 {raw!r}"
+        ) from exc
+    if hours <= 0:
+        raise ReaperError(
+            f"{ENV_CLAIM_TTL_HOURS} / --claim-ttl-hours 必须是正数，实际 {raw!r}"
+        )
+    return timedelta(hours=hours)
 
 
 def main(
@@ -322,12 +352,24 @@ def main(
     ref_store=None,
     label_adapter: Optional[LabelAdapter] = None,
     ref_reap=None,
+    github_client: Optional[UrllibGitHubClient] = None,
     log=print,
 ) -> int:
     parser = argparse.ArgumentParser(description="GitHub ref 权威层租约回收（ADR-7）")
     parser.add_argument("--dry-run", action="store_true", help="只打印，不实际删除")
     parser.add_argument(
         "--fix-labels", action="store_true", help="按过期租约修正 state 标签（失败只告警）"
+    )
+    parser.add_argument(
+        "--claim-expiry",
+        action="store_true",
+        help="认领超时过期：state:claimed 超过租约无进展 → 发 CLAIM_EXPIRED、标签回 state:todo",
+    )
+    parser.add_argument(
+        "--claim-ttl-hours",
+        type=float,
+        default=None,
+        help=f"认领租约小时数（默认环境变量 {ENV_CLAIM_TTL_HOURS} 或 4）",
     )
     parser.add_argument(
         "--ttl-seconds",
@@ -385,6 +427,12 @@ def main(
             ref_reap=ref_reap,
             log=log,
         )
+        if args.claim_expiry:
+            claim_ttl = _claim_ttl(args.claim_ttl_hours, values)
+            client = github_client or _build_client(repo, token, api_base)
+            expire_stale_claims(
+                client, claim_ttl=claim_ttl, dry_run=args.dry_run, log=log
+            )
     except (ReaperError, ValueError) as exc:
         print(f"[reaper] 配置错误：{exc}", file=sys.stderr)
         return 2

@@ -13,6 +13,11 @@
 | Muse 5 | 只读审查 Worker：ZIP 交付生产部署与发布 QA 审查（Phase 0，Issue #100） | 待确认 | 现与 Muse 2/3 共用 jouwalamiaoyin@gmail.com 身份 | 已注册（2026-11-16） | 机器身份标记：认领评论头写 `agent-claim: muse-5`，提交信息写 `muse-5:` 前缀，PR 描述注明负责人 |
 | Grok Bot | QA Worker：冒烟测试、功能验证、测试报告、失败反馈；不写代码（第一阶段） | Routine webhook 触发，D:\02 执行（已停用） | 机器人身份（待确认是否支持独立身份） | **已退役（2026-11-14，PR #46）** | QA 职责已转 D:\02 本机 smoke-watcher（本机脚本，非跨 VM Agent）；本行保留为历史登记，不再接任务 |
 
+> **本表是自动分派白名单的机器可读来源**：`apps/control-plane/backend/dispatch/builder_registry.py`
+> 取本表「角色含 `Worker` 且状态未标记已退役」的行，把 Agent 名归一化成标签
+> （`Muse 4` → `agent:muse-4`）。新增 / 退役 Worker 只改本表，不用改分派代码；
+> 表格格式被改坏时 CI 的 `test_builder_registry.py` 会先红，不会静默变成“谁都不派”。
+
 ## 能力标签
 
 | Agent | 能力 |

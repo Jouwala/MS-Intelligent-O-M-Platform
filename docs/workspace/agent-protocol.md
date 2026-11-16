@@ -44,6 +44,7 @@
 补充规则：
 
 - **认领评论**（TASK_ACCEPTED 的一种固定写法）：`<!-- agent-claim: muse-2, 2026-11-13T19:30:00Z -->`，认领后 4 小时无进展（无 push、无评论）即租约过期，Muse 1 摘 `state:claimed` 标签重派。
+- **CLAIM_EXPIRED（自动化补充，不属于上表 12 类）**：`lease-reaper.yml` 每 5 分钟巡检，认领后 4 小时无进展时自动发 `<!-- agent-msg: CLAIM_EXPIRED, task: #N, from: lease-reaper, at: ... -->`，随即摘 `state:claimed`、补 `state:todo`；同一次认领只发一条（评论里的 `claim-expiry: issue-N claimed-at-<ts>` 标记用于去重）。它替代了「Muse 1 人工摘标签」这一步，脚本判定不了的例外仍由 Muse 1 处理。
 - **测试结果必须与 Commit 一致（可实现判据，#48 落地口径）**：冒烟结果以**绑定标记**而不是标签本身承载 SHA——watcher 贴到 PR 的冒烟报告评论首行是 `<!-- smoke-result: pr-<N> sha-<40 位 SHA> result=passed|failed -->`（`ops/deploy/smoke-watcher.ps1:560`），`smoke-passed` 标签只是指针。`auto-merge.yml` 合并前独立复核（不依赖 watcher 在场）：取 PR 评论里**最后一条** `result=passed` 标记的 SHA（`:160`），与 PR 当前 head SHA（`:143`）比对——无标记（`:161`）或对不上（`:162`）一律跳过合并；之后再验该 head 上的 quality 运行（`:168`）与全部 check-runs（`:180`）为成功，最后合并请求自身也带 `sha` 锁定（`:189`）。反向地，watcher 发现 PR 上的 `smoke-passed` 绑定的是旧 head 时，先摘标签再对新 head 重跑（`smoke-watcher.ps1:471-491`），不让过期标签长期挂着。
 - **QA 不写代码**（第一阶段，用户决定）：QA 只发 QA_STARTED / QA_FAILED / QA_PASSED，不发 TASK_COMPLETED / FIX_COMPLETED，不提交修复代码。2026-11-14 起 QA 由 D:\02 本机 smoke-watcher 承担，Grok Bot 已退役。
 - **QA/FIX 消息的消费方**：QA_FAILED 是 auto-fix 的输入信号（见上）；QA_STARTED / QA_PASSED 目前**没有自动消费方**，是给人与其他 Agent 看的回写（信息性），不要假设有工作流在等它们。FIX_REQUESTED 由 auto-fix 自己发出，不需要谁再转发。
