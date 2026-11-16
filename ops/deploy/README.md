@@ -11,6 +11,14 @@
   绝对路径改成本机副本根目录（由 `.githooks/post-checkout`、`post-merge` 调用）
 - `local_authority_tools.py`：迁移时校验 / 复制 SQLite 本地权威三表
   （`credentials`、`task_schedule_config`、`email_recipients`）
+- `sync-ui-config-from-01.ps1`：把生产（`D:\01_olbr_portal`）的三份「全局 UI 配置」
+  （`ui_tool_visibility.json` / `ui_tool_order.json` / `ui_menu_layout.json`）同步到本副本。
+  默认试运行，`-Apply` 才写；**写之前先校验**：从本副本自己的代码取真相源
+  （`ui_tool_order.py` 的 `VALID_TOOL_KEYS`、`App.tsx` 的 `VALID_PAGES`），未知 key
+  整批拒绝（前端对未知页面键是静默丢弃，坏了不报错，只会让页面从侧栏消失）；覆盖走
+  `.tmp` + `Move-Item` 原子替换（直接 `Copy-Item` 覆盖时，读方可能读到半截）；旧文件留
+  `*.bak_<时间>_from01`（每份只留最近 3 份），运行记录写 `TMP\sync-ui-config.log`；
+  目标推导出落在生产目录下时直接拒绝执行。
 - `ensure_portal.ps1`：门户保活（计划任务调用）
 - `ops/smoke/smoke.ps1`：真正的检查引擎（§8.1–§8.4 + 离线 pytest，PR #26–#43
   已反复使用）。`smoke-local.ps1` 只是薄壳：UTF-8 BOM 让 PS 5.1 能解析、
@@ -41,6 +49,12 @@
   `D:\01_RPA`，**禁止对这个新目录跑从 RPA 来的同步**。
 - 本仓库不再从 `D:\01_RPA` 同步；根 `sync-now.bat` 已随批 C 删除。
   如需取数 / 取码，改走主仓库的正常开发流程，不要在这里恢复同步入口。
+
+## 已停用：生产目录里的初版同步脚本
+
+- `D:\01_olbr_portal\scripts\sync-runtime-config-to-02.ps1`（2026-11-16 初版）**已被本目录的
+  `sync-ui-config-from-01.ps1` 取代**：初版只有 `Copy-Item`，没有校验、没有备份、覆盖非原子。
+  生产机上那份留在原处容易跑错，**请删除**；以后只用本目录这份。
 
 ## 路径约定
 
