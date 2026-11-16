@@ -63,3 +63,53 @@
   `runtime\`（python312 / node / postgresql16）与 `ISOLATED_COPY.flag`。
 - 不要把 `apps/my_app/start_hidden.ps1` 之类的生产启动脚本搬到这里；
   隔离启动只走 `ops/deploy/start_all.ps1`。
+
+## 从生产（01）同步代码改动 —— 三方合并，不是拷贝（2026-11-16 落地）
+
+生产运行副本 `D:\01_olbr_portal` 的工作区改动要进本仓库时，**不能整目录拷**：
+本仓库已完成两轮重构（`apps\` 归位 + `services\` 按域重组），与生产的目录
+结构不再一一对应 —— 实测 67 个映射目标文件里 **43 个已分叉**，直接拷贝会
+静默覆盖掉重构成果。
+
+正确做法是**三方合并**：base = 生产仓库 `HEAD` 的 blob，ours = 本仓库工作区，
+theirs = 生产工作区，逐文件用 `git merge-file --diff3` 合。
+
+> 合并器**必须按字节处理**（Python）。用 PowerShell 会踩坑：PS 5.1 的控制台
+> 编解码把 UTF-8 中文按 ANSI 解一遍，base 一侧全变乱码，**合并结果静默损坏**。
+
+### 工具位置
+
+- `TMP/sync-01-to-02/merge3.py` —— 三方合并器（字节精确；含路径映射表生成）
+- `TMP/sync-01-to-02/resolve.py` —— 冲突解决（逐条判定，注释写明依据）
+- `TMP/sync-01-to-02/pathmap.csv` —— 路径映射表（01 路径 → 02 路径）
+
+`TMP\` 已 gitignore，不入库 —— 脚本是**可复用诊断工具**，按 AGENTS.md 第四节
+第 7 条留在 `TMP\` 里，需要时按本节说明重新生成。
+
+### 路径映射（01 → 02）
+
+| 01 | 02 |
+| --- | --- |
+| `Task/my_app/` | `apps/my_app/` |
+| `liberia-noc_soc-数据看板统一门户/` | `apps/portal/` |
+| 根级长文档 | `docs/workspace/` |
+| `backend/services/<模块>.py`（平铺） | `backend/services/<域>/<模块>.py`（域子包） |
+
+### 同步后必做的三件事
+
+1. **新文件的 import 改成域子包路径** —— 否则在 02 上 `ImportError`：
+   `backend.services.ipran_ume_kpi_service` → `backend.services.ipran.ipran_ume_kpi_service`。
+2. **运行时 JSON 不入库** —— `backend/data/ui_tool_*.json` 用
+   `sync-ui-config-from-01.ps1 -Apply` 同步（带 key 校验 + 原子替换 + 备份），
+   不要手工拷贝。
+3. **跑 `agent-done-check --full` + 冒烟**（`smoke-local.ps1 -PrNumber <N> -HeadSha <sha>`）。
+
+### 冒烟的坑
+
+手动起过 PG（`pg_ctl -D runtime\pgdata -o "-p 55432"`）再跑冒烟，脚本预检会
+发现 02 端口 55432 被占用 → `RESULT: REFUSED`（「可能有别的冒烟在跑」）。
+**冒烟脚本自己会起 PG**（`start_all.ps1`），跑完 pytest 若手动起过，先停掉。
+
+完整的执行记录（2026-11-16 那次，含冲突判定表与踩坑清单）见
+`.agent-work/tasks/active/task-sync-01-to-02-20261116.md`。
+
