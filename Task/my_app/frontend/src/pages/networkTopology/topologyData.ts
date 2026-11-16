@@ -28,7 +28,7 @@ export interface TopoSite {
   core: boolean
 }
 
-export type TopoView = 'physical' | 'logical' | 'core' | 'scatter'
+export type TopoView = 'physical' | 'logical' | 'core'
 export type SiteFilter = 'all' | '5g' | 'isp' | 'core'
 
 /** 按站名（忽略大小写与空格）判定骨干核心；Sanniquellie 在原始名单里有两种拼写 */
@@ -612,19 +612,6 @@ export const SITE_COLORS = {
   fiveG: '#ef4444',
   normal: '#263238',
 } as const
-
-/** 区域散点色 —— 与 SITE_COLORS 同理，是数据分类色 */
-export const SECTOR_COLORS: Record<string, string> = {
-  '北部 · Lofa一带': '#7b2d8b',
-  '西北 · Bomi/Cape Mount一带': '#b7791f',
-  '西部 · Caldwell/Brewerville一带': '#2563eb',
-  '蒙罗维亚市区': '#d33',
-  '中部 · Kakata/Bong一带': '#1a9e6b',
-  '东北/东南 · Nimba–Grand Gedeh一带': '#0e7490',
-  '中南部 · RIA/Buchanan一带': '#ff7900',
-  '东南部 · Sinoe/Maryland一带': '#9333ea',
-  '中部走廊一带': '#666',
-}
 
 /** 骨干示意节点（坐标是示意画布 1040×540 的像素） */
 export interface CoreNode {

@@ -386,10 +386,10 @@ export const PAGE_DOCS: Record<Locale, Record<string, PageDoc>> = {
     olibTopo: {
       desc: 'OLIB FO 全国光纤网络拓扑（静态参考页）：把 Orange Liberia 网络拓扑 PDF 的第 1 页物理图、第 2 页逻辑图原样嵌入，并在物理图上叠加 553 个提取站点。支持缩放 / 平移 / 站点搜索 / 骨干核心与 5G·ISP 筛选，点站点可看区域、原图相对位置和类型，并可全图定位或放大看周边链路。',
       usage: [
-        '四个视图：「原图 · 物理拓扑」（叠加站点点位）/「原图 · 逻辑拓扑」/「骨干示意」（按第 2 页逻辑图梳理的 9 个核心节点与链路）/「站点分布」（散点，按区域着色）',
+        '三个视图：「原图 · 物理拓扑」（叠加站点点位）/「原图 · 逻辑拓扑」/「骨干示意」（按第 2 页逻辑图梳理的 9 个核心节点与链路）',
         '物理图点位：灰=普通、红=5G、蓝=ISP、紫=骨干核心；半径随缩放反向补偿，放大后仍是细小圆点。滚轮缩放、拖动平移，右下角缩略图可点击跳转，工具条可重置 / 全屏 / 隐藏点位',
         '右侧站点查询是模糊搜索：忽略大小写和标点，可以按站名或区域里的词匹配，打错一个字母或少写一两个字母也能找到；另有区域下拉与「全部 / 5G / ISP / 骨干核心」快捷筛选。结果超过 300 条时只渲染前 300 条并明确提示，不会静默截断。点一条结果会放大到该站',
-        '点站点后详情卡显示区域、原图相对位置（近似值，不是 GPS）与类型；「全图定位」「放大看周边链路」「在分布图上查看」三个按钮与参考页一致',
+        '点站点后详情卡显示区域、原图相对位置（近似值，不是 GPS）与类型；「全图定位」「放大看周边链路」两个按钮与参考页一致',
         '数据口径与来源（PDF 出处、坐标换算、骨干核心与链路、已知限制）在**页面最下面**：右下角只有一个问号，点开才展开，不占首屏也没有常驻说明条',
         '本页是**纯静态参考页**：数据来自 PDF 一次性提取，存于 networkTopology/topologyData.ts，原图在 public/topology/；不连后端、不写库，自动刷新建议 1800 秒且内容不会变化',
       ],
@@ -1081,10 +1081,10 @@ export const PAGE_DOCS: Record<Locale, Record<string, PageDoc>> = {
     olibTopo: {
       desc: 'OLIB FO nationwide fiber topology (static reference page): pages 1-2 of the Orange Liberia network topology PDF are embedded as-is, with 553 extracted sites overlaid on the physical map. It supports zoom / pan / site search / backbone-core and 5G·ISP filters; click a site to see its region, approximate page position and type, then locate it or zoom into the nearby links.',
       usage: [
-        'Four views: "Original · Physical" (site dots overlaid) / "Original · Logical" / "Backbone schematic" (9 core nodes and links traced from the page-2 drawing) / "Site distribution" (scatter, colored by region)',
+        'Three views: "Original · Physical" (site dots overlaid) / "Original · Logical" / "Backbone schematic" (9 core nodes and links traced from the page-2 drawing)',
         'Physical-map dots: grey = regular, red = 5G, blue = ISP, purple = backbone core. The radius is compensated against zoom so dots stay small when zoomed in. Wheel to zoom, drag to pan; the bottom-right mini map jumps on click, and the toolbar resets / goes fullscreen / hides dots',
         'The site search on the right is fuzzy: it ignores case and punctuation, matches words in the site name or region, and still hits when one letter is wrong or a couple are missing. A region dropdown and the All / 5G / ISP / Backbone core chips sit beside it. When more than 300 rows match only the first 300 are rendered, with an explicit notice (never silently truncated). Picking a row zooms to that site',
-        'After selecting a site the detail card shows its region, approximate page position (not GPS) and type; "Locate on map", "Zoom to nearby links" and "Show on distribution" match the reference page',
+        'After selecting a site the detail card shows its region, approximate page position (not GPS) and type; "Locate on map" and "Zoom to nearby links" match the reference page',
         'Data scope & sources (PDF origin, coordinate conversion, backbone cores and links, known limits) sits at the **bottom of the page**: a single question mark in the bottom-right corner that expands on click — no banner eating the first screen',
         'This page is a **static reference**: the data is a one-off PDF extraction kept in networkTopology/topologyData.ts and the originals live in public/topology/. It reads no backend and writes no database, so auto-refresh defaults to 1800s and its content does not change',
       ],

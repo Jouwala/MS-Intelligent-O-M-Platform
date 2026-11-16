@@ -1,12 +1,15 @@
 /* ============================================================================
- * OLIB FO 网络拓扑 —— 画布（矢量图 / 骨干示意 / 站点分布）
+ * OLIB FO 网络拓扑 —— 画布（矢量图 / 骨干示意）
  * ============================================================================
  * 交互与参考页一致：
  *   · 物理 / 逻辑图：滚轮缩放（以光标为中心）、拖动平移、重置适应窗口、全屏；
  *   · 物理图上叠加 553 个站点点位（灰=普通 / 红=5G / 蓝=ISP / 紫=骨干核心），
  *     点位半径按 1/scale 反向补偿，放大后仍保持约 3px，不会糊成一团；
  *   · 选中站点画十字虚线 + 橙色脉冲光圈 + 名称标签；右下角缩略图显示当前视野；
- *   · 骨干示意图 / 站点分布图共用同一套平移缩放。
+ *   · 骨干示意图与原图共用同一套平移缩放。
+ *
+ * 2026-11-16：按用户要求去掉「站点分布」视图（散点图），只保留原图两页 + 骨干示意；
+ *   ScatterView.tsx 与配套的 SECTOR_COLORS / i18n 键一并删除，不留死代码。
  *
  * 清晰度：原图是 PDF 矢量导出的 SVG，缩放时改的是**布局宽高**（内容尺寸 × scale），
  * 让浏览器按新尺寸重绘矢量，而不是用 CSS transform 把小图放大 —— 后者在放大后一定糊。
@@ -29,7 +32,6 @@ import {
   type TopoSite, type TopoView,
 } from './topologyData'
 import CoreSchematic from './CoreSchematic'
-import ScatterView from './ScatterView'
 
 export interface TopologyViewerHandle {
   fit: () => void
@@ -92,7 +94,6 @@ const VIEW_OPTIONS: { value: TopoView; key: string }[] = [
   { value: 'physical', key: 'olibTopo.view.physical' },
   { value: 'logical', key: 'olibTopo.view.logical' },
   { value: 'core', key: 'olibTopo.view.core' },
-  { value: 'scatter', key: 'olibTopo.view.scatter' },
 ]
 
 const CSS = `
@@ -156,14 +157,15 @@ const TopologyViewer = forwardRef<TopologyViewerHandle, Props>(function Topology
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [pending, setPending] = useState<{ site: TopoSite; mode: 'fit' | 'zoom' } | null>(null)
 
-  /* 画布内容尺寸：原图用 natural size，示意 / 散点用固定 viewBox */
+  /* 画布内容尺寸：原图用 natural size，骨干示意用固定 viewBox
+   * （2026-11-16 去掉站点分布视图后，非原图的只剩 core 一种） */
   const content = useMemo(() => {
     if (view === 'physical' || view === 'logical') {
       return natural && natural.view === view
         ? { w: natural.w, h: natural.h }
         : TOPO_PAGE_SIZE[view]
     }
-    return view === 'core' ? { w: 1040, h: 540 } : { w: 1000, h: 863 }
+    return { w: 1040, h: 540 }
   }, [view, natural])
 
   const fit = useCallback(() => {
@@ -307,11 +309,9 @@ const TopologyViewer = forwardRef<TopologyViewerHandle, Props>(function Topology
 
   const hintKey = view === 'core'
     ? 'olibTopo.hint.core'
-    : view === 'scatter'
-      ? 'olibTopo.hint.scatter'
-      : view === 'logical'
-        ? 'olibTopo.hint.logical'
-        : 'olibTopo.hint.physical'
+    : view === 'logical'
+      ? 'olibTopo.hint.logical'
+      : 'olibTopo.hint.physical'
 
   return (
     <>
@@ -408,14 +408,6 @@ const TopologyViewer = forwardRef<TopologyViewerHandle, Props>(function Topology
               onSelect={onSelect}
               width={1040 * transform.s}
               height={540 * transform.s}
-            />
-          )}
-          {view === 'scatter' && (
-            <ScatterView
-              selectedIndex={selectedIndex}
-              onSelect={onSelect}
-              width={1000 * transform.s}
-              height={863 * transform.s}
             />
           )}
         </div>

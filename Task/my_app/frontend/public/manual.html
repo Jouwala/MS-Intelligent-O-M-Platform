@@ -5566,11 +5566,11 @@ Network 取 <code>ms_sla_kpi</code> 快照原值不重算；PS_* = 阈值达标�
 <p>Orange Liberia 全国光纤网络拓扑的<strong>静态参考页</strong>：把《Orange_network_topology_20251226.pdf》第 1 页物理图、第 2 页逻辑图原样嵌入，并在物理图上叠加 553 个提取站点。<strong>不连后端、不写库</strong>，所有数据都是源级静态文件。</p>
 <ul>
 <li><strong>数据与资源</strong>：站点名单 / 坐标 / 骨干节点与链路在 <code>frontend/src/pages/networkTopology/topologyData.ts</code>；两张图是<strong>由 PDF 矢量导出的 SVG</strong>（<code>frontend/public/topology/physical.svg</code>、<code>logical.svg</code>，构建后落到 <code>_fe_dist/topology/</code>，经 vite base <code>/myapp/</code> 加载），不是位图截图 —— 放大到任意倍率线条与文字都保持清晰。坐标口径、已知限制写在 <code>topologyData.ts</code> 文件头与本页可展开的口径说明里。</li>
-<li><strong>四个视图</strong>（<code>TopologyViewer.tsx</code>）：「原图 · 物理拓扑」叠加全部站点点位；「原图 · 逻辑拓扑」只看第 2 页原图；「骨干示意」按第 2 页逻辑图重绘 13 个节点、18 条链路（<code>CoreSchematic.tsx</code>）；「站点分布」是按区域着色的散点图（<code>ScatterView.tsx</code>）。</li>
+<li><strong>三个视图</strong>（<code>TopologyViewer.tsx</code>）：「原图 · 物理拓扑」叠加全部站点点位；「原图 · 逻辑拓扑」只看第 2 页原图；「骨干示意」按第 2 页逻辑图重绘 13 个节点、18 条链路（<code>CoreSchematic.tsx</code>）。<strong>「站点分布」散点视图已于 2026-11-16 按用户要求移除</strong>（<code>ScatterView.tsx</code>、<code>SECTOR_COLORS</code> 与 <code>view/hint/detail.scatter</code> 三个 i18n 键一并删除，不留死代码）。</li>
 <li><strong>交互</strong>：滚轮以光标为中心缩放、拖动平移、工具条缩放/重置/全屏/显示隐藏点位；右下角缩略图（仅物理图）显示当前视野并可点击跳转。画布按「原图尺寸 × 倍率」重新渲染 SVG（不是 CSS transform 拉伸），所以放大后文字、链路仍清晰；点位半径按 <code>1/scale</code> 反向补偿，放大后仍是细小圆点；选中站点画十字虚线 + 橙色脉冲光圈 + 名称标签。</li>
 <li><strong>布局与高度自适应</strong>（2026-11-16 用户要求「下面不要一大块空白」）：画布卡片不再固定 <code>62vh</code>，改为<strong>认领内容区剩余高度</strong>——embed 下 <code>#main-content</code> 是定高 <code>100vh</code>，直链下按内容高度；左画布 : 右栏 = 3 : 1。右栏（站点查询 / 详情 / 图例）内容比画布高时<strong>在自己容器里滚动</strong>，子卡片必须 <code>flex-shrink:0</code>，否则会被压扁、内容被 <code>overflow:hidden</code> 裁掉且滚不到（实测图例底部就是这样消失的）。窄屏（<code>&lt;1000px</code>）换行堆叠，回到按内容高度排布。左右两栏用普通 flex 而非 antd <code>Row/Col</code>：Row 的 flex 行高在内容高于可用高度时不参与收缩，<code>Col</code> 会被内容撑到 1010px 再溢出视野。骨架见 <code>NetworkTopology.tsx</code> 的 <code>PAGE_CSS</code>。</li>
-<li><strong>站点查询与详情</strong>：站名/区域<strong>模糊搜索</strong>（忽略大小写与标点；多词都要出现；允许打错一个字母或漏写少量字母，见 <code>networkTopology/siteMatch.ts</code>）+ 区域下拉 +「全部 / 5G / ISP / 骨干核心」快捷筛选（<code>SiteSearch.tsx</code>）；结果超过 300 条时只渲染前 300 条并显示明确提示，不静默截断。点结果会放大到该站。点位后详情卡显示区域、原图相对位置（近似值，不是 GPS）与类型，并提供「全图定位 / 放大看周边链路 / 在分布图上查看」（<code>SiteDetail.tsx</code>）。</li>
-<li><strong>门户入口</strong>（2026-11-16）：<code>/v3/olbrportal/</code> 以及勾了 IP 页签的团队门户（fo / bo / flm）的 GIS Map「IP」页签，内嵌 <code>?page=olibTopo&amp;view=physical&amp;maponly=1</code>。只留物理图，左上角搜索框做同样的模糊匹配，点一条结果放大到该站。Open Link 去掉 <code>maponly</code>，新窗口是完整页并停在物理图。直开不带 <code>maponly</code> 时四个视图都在。smc / cxo 按矩阵不显示这一页。</li>
+<li><strong>站点查询与详情</strong>：站名/区域<strong>模糊搜索</strong>（忽略大小写与标点；多词都要出现；允许打错一个字母或漏写少量字母，见 <code>networkTopology/siteMatch.ts</code>）+ 区域下拉 +「全部 / 5G / ISP / 骨干核心」快捷筛选（<code>SiteSearch.tsx</code>）；结果超过 300 条时只渲染前 300 条并显示明确提示，不静默截断。点结果会放大到该站。点位后详情卡显示区域、原图相对位置（近似值，不是 GPS）与类型，并提供「全图定位 / 放大看周边链路」两个操作（<code>SiteDetail.tsx</code>；「在分布图上查看」随散点视图一起移除）。</li>
+<li><strong>门户入口</strong>（2026-11-16）：<code>/v3/olbrportal/</code> 以及勾了 IP 页签的团队门户（fo / bo / flm）的 GIS Map「IP」页签，内嵌 <code>?page=olibTopo&amp;view=physical&amp;maponly=1</code>。只留物理图，左上角搜索框做同样的模糊匹配，点一条结果放大到该站。Open Link 去掉 <code>maponly</code>，新窗口是完整页并停在物理图。直开不带 <code>maponly</code> 时三个视图都在。smc / cxo 按矩阵不显示这一页。</li>
 <li><strong>口径与数字</strong>：顶部<strong>不再有统计卡</strong>（2026-11-16 用户要求去掉 553 站点 / 9 个骨干核心 / 40G·10G 骨干光纤 / 2 个 AML 数据中心四张卡 —— 数字都在图例与说明里，卡只占首屏）。整页口径与来源走 <code>CalcChainNote</code>，以 <strong>页面最下面一个问号</strong>（<code>trigger=&quot;icon&quot;</code>，点开气泡、不占一行）承载：数据来源、坐标口径、骨干核心与链路、已知限制四节。站点数等静态事实仍取 <code>SITES.length</code> / <code>CORE_SITE_COUNT</code> / <code>AML_DC_COUNT</code>（<code>topologyData.ts</code>），不在前端重算。</li>
 <li><strong>刷新</strong>：<code>AR_PAGE_DEFAULTS.olibTopo = 1800</code>。页面本身没有接口可重取，自动刷新只走外壳默认重挂载（会回到初始视图），不会产生新数据。</li>
 </ul>
@@ -19454,10 +19454,10 @@ shared <code>auth_cache</code> 里 admin 的 token 明明还有 14.6 小时有�
 <h5>olibTopo（<code>olibTopo</code>）</h5>
 <p>OLIB FO 全国光纤网络拓扑（静态参考页）：把 Orange Liberia 网络拓扑 PDF 的第 1 页物理图、第 2 页逻辑图原样嵌入，并在物理图上叠加 553 个提取站点。支持缩放 / 平移 / 站点搜索 / 骨干核心与 5G·ISP 筛选，点站点可看区域、原图相对位置和类型，并可全图定位或放大看周边链路。</p>
 <ul>
-<li>四个视图：「原图 · 物理拓扑」（叠加站点点位）/「原图 · 逻辑拓扑」/「骨干示意」（按第 2 页逻辑图梳理的 9 个核心节点与链路）/「站点分布」（散点，按区域着色）</li>
+<li>三个视图：「原图 · 物理拓扑」（叠加站点点位）/「原图 · 逻辑拓扑」/「骨干示意」（按第 2 页逻辑图梳理的 9 个核心节点与链路）</li>
 <li>物理图点位：灰=普通、红=5G、蓝=ISP、紫=骨干核心；半径随缩放反向补偿，放大后仍是细小圆点。滚轮缩放、拖动平移，右下角缩略图可点击跳转，工具条可重置 / 全屏 / 隐藏点位</li>
 <li>右侧站点查询是模糊搜索：忽略大小写和标点，可以按站名或区域里的词匹配，打错一个字母或少写一两个字母也能找到；另有区域下拉与「全部 / 5G / ISP / 骨干核心」快捷筛选。结果超过 300 条时只渲染前 300 条并明确提示，不会静默截断。点一条结果会放大到该站</li>
-<li>点站点后详情卡显示区域、原图相对位置（近似值，不是 GPS）与类型；「全图定位」「放大看周边链路」「在分布图上查看」三个按钮与参考页一致</li>
+<li>点站点后详情卡显示区域、原图相对位置（近似值，不是 GPS）与类型；「全图定位」「放大看周边链路」两个按钮与参考页一致</li>
 <li>数据口径与来源（PDF 出处、坐标换算、骨干核心与链路、已知限制）在<strong>页面最下面</strong>：右下角只有一个问号，点开才展开，不占首屏也没有常驻说明条</li>
 <li>本页是<strong>纯静态参考页</strong>：数据来自 PDF 一次性提取，存于 networkTopology/topologyData.ts，原图在 public/topology/；不连后端、不写库，自动刷新建议 1800 秒且内容不会变化</li>
 </ul>

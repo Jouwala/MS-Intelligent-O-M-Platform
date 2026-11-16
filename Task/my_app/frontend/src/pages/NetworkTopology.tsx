@@ -6,14 +6,14 @@
  * 不取接口、不写库，所以 AR_PAGE_DEFAULTS 取最松的 1800 秒（见 App.tsx）。
  *
  * 组成：
- *   · 左：画布（物理图 + 站点点位 / 逻辑图 / 骨干示意 / 站点分布）；
+ *   · 左：画布（物理图 + 站点点位 / 逻辑图 / 骨干示意）；
  *   · 右：站点模糊查询、选中站点详情、图例；
  *   · 页面最下面只留一个问号（`CalcChainNote trigger="icon"`），点开看数据口径与来源。
  *   · ?maponly=1（门户 IP 页签）：只留物理图，搜索框浮在画布左上角。
  *
  * 2026-11-16 用户要求：去掉顶部「提取站点 / 骨干核心 / 骨干光纤 / AML 数据中心」四张
  * 统计卡（数字都在图例与说明里，卡只占首屏），口径说明也从一行收起条改成页面底部
- * 一个问号 —— 首屏全部让给画布，说明按需点开。
+ * 一个问号 —— 首屏全部让给画布，说明按需点开；同日去掉「站点分布」视图。
  *
  * 数据与坐标口径见 networkTopology/topologyData.ts 文件头。
  * ========================================================================== */
@@ -43,7 +43,7 @@ function readMapOnlyMode(): boolean {
 
 function readInitialView(): TopoView {
   const v = new URLSearchParams(window.location.search).get('view')
-  if (v === 'physical' || v === 'logical' || v === 'core' || v === 'scatter') return v
+  if (v === 'physical' || v === 'logical' || v === 'core') return v
   return 'physical'
 }
 
@@ -108,7 +108,6 @@ export default function NetworkTopology() {
   const pick = useCallback((s: TopoSite) => { viewer.current?.zoomTo(s) }, [])
   const locate = useCallback((s: TopoSite) => { viewer.current?.locate(s) }, [])
   const zoomTo = useCallback((s: TopoSite) => { viewer.current?.zoomTo(s) }, [])
-  const showScatter = useCallback(() => setView('scatter'), [])
 
   if (mapOnly) {
     return (
@@ -177,7 +176,7 @@ export default function NetworkTopology() {
               selected={selected}
               onPick={pick}
             />
-            <SiteDetail site={selected} onLocate={locate} onZoom={zoomTo} onScatter={showScatter} />
+            <SiteDetail site={selected} onLocate={locate} onZoom={zoomTo} />
             <TopologyLegend />
           </div>
         </div>
