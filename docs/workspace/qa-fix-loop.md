@@ -46,6 +46,7 @@
 3. **`do-not-merge` 在场**（打标签的人 / 用户）：auto-merge 一票否决跳过，冒烟与 QA 回写照常；要合必须先由人摘掉该标签，没有任何自动化会摘它。
 4. **`risk:high` 任务**（用户）：标签与状态并存，合并前须用户明确批准；auto-merge 不区分 risk 等级，批准动作本身在 GitHub 之外（用户口头/评论确认后由 Muse 1 把关放行或摘除阻挡标签）。
 5. **冒烟因环境原因无效**（D:\02 操作者 / Muse 1）：D:\02 被其他任务占用、工作树有他人在途改动、MSNOC1 掉线等导致冒烟中断或被跳过时，该次不算通过也不算失败，不触发 auto-fix；需要人确认环境恢复后等 watcher 下一轮，或人工 `workflow_dispatch` 重放相关环节。
+   其中 **smoke-local 退出码 2（预检拒绝）** 是机器判定的「环境原因」：02 端口被别的栈占住、HEAD 与 `-HeadSha` 不符、冒烟锁冲突时，脚本什么都没验证就退出。watcher 对此不贴 PR 评论、不打 `smoke-passed`、不写 `failed` 状态、不回写 `state:qa-failed`，下一轮自动重试同一 head（`ops/deploy/smoke-watcher.ps1` 的 `$smokeExit -eq 2` 分支）；`smoke-local.ps1` 的报告也写「未执行（预检拒绝）」并附原因，不再把 §8.1–§8.3 填成「通过」（2026-11-16 修，实测事故见 #100/#104：占用端口把 docs-only PR 误判成 qa-failed）。
 6. **QA 回写失败**（看 watcher 日志的人）：watcher 发 QA_STARTED / QA 结果评论失败时只记本机日志、不挡冒烟主流程，于是可能出现「PR 已打 smoke-passed 但 Issue 没有 QA_PASSED」的半截状态——合并门禁不受影响（只认 PR 侧绑定标记），但 Issue 状态会停在 `state:qa-ready`，需要人发现后手工补标签/评论。
 7. **FIX_COMPLETED 缺失**（Muse 1 评审时）：修复者没在原 Issue 发 FIX_COMPLETED 没有任何机器校验拦截，只能在评审/巡逻时人工核对（见第四节待实现）。
 
