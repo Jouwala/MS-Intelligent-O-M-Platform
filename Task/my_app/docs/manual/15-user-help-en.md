@@ -1,6 +1,6 @@
 # my_app User Help & Guide
 
-> User-facing platform features & operations guide. Generated from the same source as the in-app Help page (frontend/src/helpMarkdown.ts), compiled from docs/manual/ and backend/task_registry.py. Generated on 2026-11-13.
+> User-facing platform features & operations guide. Generated from the same source as the in-app Help page (frontend/src/helpMarkdown.ts), compiled from docs/manual/ and backend/task_registry.py. Generated on 2026-11-16.
 
 > In-app entry: the "Help" sidebar item, or `http://<host>/myapp/?page=help` directly.
 
@@ -634,19 +634,19 @@ Workflow & maintenance notes per task:
 - Default cron: `*/15 * * * *`　|　worker group: **n**
 - Workflow script: `services/cnn_ume_kpi_5mins_service.py → run_cnn_kpi_sync_5mins`
 
-**What it does**: Same source and account as "CNN UME KPI Sync", but at fine granularity (5-minute for 5 templates, 15-minute for 3) with a yesterday-00:00-to-now window; writes into new 5mins_* tables in DB CNN for the Day0/Day1/Day7 overlay on the CN KPI 5-minute board. Daily/monthly tables are untouched
+**What it does**: Same source and account as "CNN UME KPI Sync", but at fine granularity (5-minute for 5 templates, 15-minute for 3) with an incremental window of the last 120 minutes by default (falls back to the full yesterday-00:00-to-now window after a failed run); writes into new 5mins_* tables in DB CNN for the Day0/Day1/Day7 overlay on the CN KPI 5-minute board. Daily/monthly tables are untouched
 
 **Workflow & data flow**:
 
 1. Log into CNN UME (shares the session cache with cnn_kpi_sync)
-1. Query all 8 templates in parallel at 5-minute granularity (yesterday 00:00 to now)
+1. Query all 8 templates in parallel at 5-minute granularity (incremental window: last 120 minutes)
 1. Upsert into db_ps_cs_cn tables named 5mins_<original table>
 
 **Maintenance**:
 
 - WARNING: mixed granularity — Voice / VLR / Data / 4G FDD / Free Rating use the 5-minute tier (gr=300); xGW License, xGW CPU and 3G FDD had no 5-minute tier and now use the upstream 15-minute templates created 2026-10-19 (gr=900, see FIFTEEN_MIN_TEMPLATES)
 - WARNING: the task keeps a "0 rows → skip this table and do not fail" fallback (the original cnn_kpi_sync raises on 0 rows — this task deliberately differs) so an upstream tier change cannot make it fail every 15 minutes
-- WARNING: one run takes about 105 s (Free Rating alone has 14k rows/day); if it approaches 15 minutes, lower the concurrency or widen the schedule
+- WARNING: one run used to take about 105 s with the full 1.5-day window (Free Rating alone has 14k rows/day); since 2026-11-15 the default window is incremental (last 120 minutes), so writes per round are a few hundred rows — this also unblocks the page reads that the remote SQLite write lock used to stall
 - Runs in group n alongside cnn_kpi_sync so the two never log into the same account and kick each other off
 - The only consumer is ?page=cn_kpi_5mins (services/cn_kpi_5mins_service.py reads the 5mins_* tables)
 
@@ -2058,6 +2058,16 @@ UME topology in four layers (IP RAN Fiber / IP Core / Metro Ring / DWDM): all fo
 - The backend merges each layer's 8 UME calls into one response cached **per layer** for 120 seconds; "Refetch" bypasses only the current layer cache. Header auto-refresh is off by default and suggests 300s here; when on it refreshes in place (canvas not rebuilt, focus kept). On upstream failure the last successful snapshot is shown with a persistent banner
 - "Export Excel" writes two sheets (NEs and links) including alarm counts, coordinate source and port names
 
+#### olibTopo（`olibTopo`）
+
+OLIB FO nationwide fiber topology (static reference page): pages 1-2 of the Orange Liberia network topology PDF are embedded as-is, with 553 extracted sites overlaid on the physical map. It supports zoom / pan / site search / backbone-core and 5G·ISP filters; click a site to see its region, approximate page position and type, then locate it or zoom into the nearby links.
+
+- Four views: "Original · Physical" (site dots overlaid) / "Original · Logical" / "Backbone schematic" (9 core nodes and links traced from the page-2 drawing) / "Site distribution" (scatter, colored by region)
+- Physical-map dots: grey = regular, red = 5G, blue = ISP, purple = backbone core. The radius is compensated against zoom so dots stay small when zoomed in. Wheel to zoom, drag to pan; the bottom-right mini map jumps on click, and the toolbar resets / goes fullscreen / hides dots
+- The site search on the right is fuzzy: it ignores case and punctuation, matches words in the site name or region, and still hits when one letter is wrong or a couple are missing. A region dropdown and the All / 5G / ISP / Backbone core chips sit beside it. When more than 300 rows match only the first 300 are rendered, with an explicit notice (never silently truncated). Picking a row zooms to that site
+- After selecting a site the detail card shows its region, approximate page position (not GPS) and type; "Locate on map", "Zoom to nearby links" and "Show on distribution" match the reference page
+- This page is a **static reference**: the data is a one-off PDF extraction kept in networkTopology/topologyData.ts and the originals live in public/topology/. It reads no backend and writes no database, so auto-refresh defaults to 1800s and its content does not change
+
 #### MW Realtime（`mwRealTime`, iframe page）
 
 15-minute realtime variant of the microwave topology board (same skeleton, risk ranking, drawer and trends).
@@ -2163,9 +2173,9 @@ Speedtest Benchmark Report: puts the two operators (Orange and MTN) side by side
 
 #### bm_meta（`bm_meta`）
 
-Meta Benchmark Report: based on meta_data (imported from Meta_20260923.xlsx, 612 rows, 2025-01-18 ~ 2026-09-23) it answers two questions — (1) "between Orange and MTN, who has the higher speed, by how much, and is the gap widening or narrowing"; (2) "what level are the network-side KPIs (BP / FDD DL IP throughput / DL and UL PRB utilization / traffic volume / RRC users) at over the same period". These two are **deliberately kept apart**: only "speed" is a head-to-head between the two operators, while the other six are network-side KPIs belonging to neither. The page has two layers: a head-to-head layer (composite score -> speed cards -> dual-line trend -> daily win/loss -> monthly and daily tables) and a network-KPI layer (summary cards + single-line trend).
+Meta Benchmark Report: based on meta_data (imported from meta_data.xlsx, 661 rows, 2025-01-18 ~ 2026-11-11) it answers two questions — (1) "between Orange and MTN, who has the higher speed, by how much, and is the gap widening or narrowing"; (2) "what level are the network-side KPIs (BP / FDD DL IP throughput / DL and UL PRB utilization / traffic volume / RRC users) at over the same period". These two are **deliberately kept apart**: only "speed" is a head-to-head between the two operators, while the other six are network-side KPIs belonging to neither. The page has two layers: a head-to-head layer (composite score -> speed cards -> dual-line trend -> daily win/loss -> monthly and daily tables) and a network-KPI layer (summary cards + single-line trend).
 
-- Quick ranges at the top (90 / 180 / 365 days / all time) plus date pickers; the window is **half-open** internally while the UI shows a closed range. The default is 365 days rather than 90 because this table spans 612 days and a short window would cut off the long-term trend
+- Quick ranges at the top (30 / 90 / 180 / 365 days / all time) plus date pickers; the window is **half-open** internally while the UI shows a closed range. The page opens on the **last 30 days**, with the right edge anchored to the latest day that actually has data (identical to what clicking "last 30 days" gives; narrowed from 365 days on 2026-11-16); switch to 90 / 180 / 365 days or all time when you need the seasonal or long-term picture
 - The competitiveness score is **relative between the two operators**: the leader scores 100 and the other scales proportionally. It answers "who is stronger and by how much", not whether the absolute level is good
 - **Why the network KPIs are excluded from scoring**: mixing "how much faster Orange is than MTN" with "how high network-wide PRB utilization is" into one score would treat two different things as two contestants in the same contest, producing a false conclusion. So the six network KPIs only get trends and averages — no wins, no score
 - "Speed" is the download-speed comparison between the two operators (the fixed columns orange_liberia / mtn_liberia in the database), one row per day; when the two are equal it counts as a "tie" and is **not credited as a win to either side** (a note at the top states how many such days there are)
@@ -2362,6 +2372,7 @@ UME iMonitor screen (guard-imonitor-iui, screen_id=1): embeds the original UME m
 Site map: alarm/ticket distribution, topology lines, region polygons and multi-dimension filters (history/ticket view).
 
 - Region dropdown + layer tags to filter; click a legend item to hide that layer; time supports segments and custom range
+- The top-left "Layers" panel has three checkboxes — Place labels / Roads / Personnel — all **off by default**: place labels (17k names in the tiles) would bury the sites, and personnel are registered positions (not live GPS), so turn them on only when needed
 - The first cell of the "Advanced Filter" panel is a "Site Name" input: fuzzy match on a name fragment (case-insensitive); the rest are dropdowns for region/grade/form/FME etc.
 - Statistics follow the filter: site total and the ERA/COOL/NORMAL grades, the map legend, the county block colors and county labels, and the "MAINTENANCE ALERTS" county ranking panel are all recomputed from the filtered sites instead of showing the full-set numbers;
 - Click a site to open the right drawer: four tabs, searchable, exportable to Excel
@@ -2380,7 +2391,7 @@ Realtime mode of the GIS map: current active-alarm sites on the map (red "realti
 - Interactions are identical to the GIS Map page
 - Data comes from eFlow active alarms (eflow_active_alarm) synced every minute
 - The "Root Cause Aggregation" card clusters the down sites within your current advanced-filter scope — topology roots (an upstream site is down, so the sites hanging off its link path go down with it) and same-cause clusters (sites without a link path grouped by alarm problem + a 10-minute time window), each with cause type, affected-site count and a confidence score; click an entry to see member details and evidence (link paths, time window, eFlow impact list); member site names open the site drill-down drawer
-- The "attributed/total" counter in the title uses the same **site** unit as Site Stats: attributed = sites that share a root cause with peers; the rest are isolated failures (upstream healthy, no same-window peers — the site itself is its own cause) — click the footnote to open the unattributed **alarm details**, the same project-standard detail table as clicking an entry in Alarm Stats (site / TT / priority / alarm time / duration / overdue), and verify against the map
+- The "attributed/total" counter in the title uses the same **site** unit as Site Stats: attributed = sites that share a root cause with peers; the rest are isolated failures (upstream healthy, no same-window peers — the site itself is its own cause) — click the footnote to open the unattributed **alarm details**, the same project-standard detail table as clicking an entry in Site Stats (site / TT / priority / alarm time / duration / overdue), and verify against the map
 - A root site may fall outside your filter scope (flagged "Out of scope") — outage causes often sit outside your current view; this is expected and is exactly the value of the analysis
 - The "AI Insights" button generates a natural-language conclusion using your own LLM key (stored only in your browser); when AI is unavailable it degrades to a local rule-based summary and is clearly marked — the cluster list itself is unaffected
 

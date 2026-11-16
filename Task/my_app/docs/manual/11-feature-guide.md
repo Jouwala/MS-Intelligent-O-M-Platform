@@ -51,6 +51,7 @@
 | 36 | 事件总览 | `incident_overview` | **iframe** |
 | 37 | MW 微波拓扑 | `mwUmeTopology` | **iframe** |
 | 37b | IP RAN 光纤拓扑 | `ipranTopo` | React |
+| 37c | OLIB 光纤拓扑 | `olibTopo` | React |
 | 38 | MW 微波实时 | `mwRealTime` | **iframe** |
 | 39 | GIS 地图 | `gis` | React |
 | 40 | 实时告警地图 | `realtime_alarm` | React（同组件另一模式） |
@@ -566,7 +567,19 @@ IP RAN 光纤层的网元—链路关系图（React + 自绘 SVG 画布），数
 - **口径说明与数字悬浮**：页内「数据源与口径」用 `CalcChainNote` 默认收起，和缺坐标 / 近似匹配 / 告警饱和的说明一起放在页面底部；KPI 卡与列头的 ⓘ 走 `MetricExplain`，气泡内容取接口既有字段，不在前端重算。
 - **刷新**：已登记 `AR_PAGE_DEFAULTS`（建议 300 秒，后端缓存 120 秒）与 `AR_INPLACE_REFRESH_PAGES` —— 顶栏开启自动刷新后监听 `myapp-refresh` **静默重取**（`IpranTopo.tsx:94`），画布不重建、聚焦状态不丢。页面上的「重新取数」走 `refresh=1` 绕缓存。
 - **导出**：`exportReport` 两个 sheet（网元 / 链路），文件名 `IPRAN_Topo_YYYYMMDD_HHmmss.xlsx`。
-- **门户入口**（2026-11-10）：`/v3/olbrportal/` 的 GIS Map 有页签「IP」，内嵌 `?page=ipranTopo&layer=ipran&maponly=1`，只留网络拓扑画布（与 Person 页的 `maponly` 同一约定）。Open Link 去掉 `maponly`，新窗口是完整页。直开不带该参数时仍是四层可切换的完整页。五个团队门户的可见性矩阵没有这一页，不显示。
+- **门户入口**（2026-11-10 起挂在 GIS Map 的「IP」页签；**2026-11-16 起该页签不再内嵌本页**，改挂 OLIB 物理图，见 8c）。直开 `?page=ipranTopo` 仍是四层可切换的完整页。
+
+## 8c. OLIB 光纤拓扑（`?page=olibTopo`，2026-11-16 新增）
+
+Orange Liberia 全国光纤网络拓扑的**静态参考页**：把《Orange_network_topology_20251226.pdf》第 1 页物理图、第 2 页逻辑图原样嵌入，并在物理图上叠加 553 个提取站点。**不连后端、不写库**，所有数据都是源级静态文件。
+
+- **数据与资源**：站点名单 / 坐标 / 骨干节点与链路在 `frontend/src/pages/networkTopology/topologyData.ts`；两张图是**由 PDF 矢量导出的 SVG**（`frontend/public/topology/physical.svg`、`logical.svg`，构建后落到 `_fe_dist/topology/`，经 vite base `/myapp/` 加载），不是位图截图 —— 放大到任意倍率线条与文字都保持清晰。坐标口径、已知限制写在 `topologyData.ts` 文件头与本页可展开的口径说明里。
+- **四个视图**（`TopologyViewer.tsx`）：「原图 · 物理拓扑」叠加全部站点点位；「原图 · 逻辑拓扑」只看第 2 页原图；「骨干示意」按第 2 页逻辑图重绘 13 个节点、18 条链路（`CoreSchematic.tsx`）；「站点分布」是按区域着色的散点图（`ScatterView.tsx`）。
+- **交互**：滚轮以光标为中心缩放、拖动平移、工具条缩放/重置/全屏/显示隐藏点位；右下角缩略图（仅物理图）显示当前视野并可点击跳转。画布按「原图尺寸 × 倍率」重新渲染 SVG（不是 CSS transform 拉伸），所以放大后文字、链路仍清晰；点位半径按 `1/scale` 反向补偿，放大后仍是细小圆点；选中站点画十字虚线 + 橙色脉冲光圈 + 名称标签。
+- **站点查询与详情**：站名/区域**模糊搜索**（忽略大小写与标点；多词都要出现；允许打错一个字母或漏写少量字母，见 `networkTopology/siteMatch.ts`）+ 区域下拉 +「全部 / 5G / ISP / 骨干核心」快捷筛选（`SiteSearch.tsx`）；结果超过 300 条时只渲染前 300 条并显示明确提示，不静默截断。点结果会放大到该站。点位后详情卡显示区域、原图相对位置（近似值，不是 GPS）与类型，并提供「全图定位 / 放大看周边链路 / 在分布图上查看」（`SiteDetail.tsx`）。
+- **门户入口**（2026-11-16）：`/v3/olbrportal/` 以及勾了 IP 页签的团队门户（fo / bo / flm）的 GIS Map「IP」页签，内嵌 `?page=olibTopo&view=physical&maponly=1`。只留物理图，左上角搜索框做同样的模糊匹配，点一条结果放大到该站。Open Link 去掉 `maponly`，新窗口是完整页并停在物理图。直开不带 `maponly` 时四个视图都在。smc / cxo 按矩阵不显示这一页。
+- **口径与数字**：4 张统计卡（553 站点 / 9 个骨干核心 / 40G·10G 骨干光纤 / 2 个 AML 数据中心）的数字悬浮说明取本页静态事实（`SITES.length`、`CORE_SITE_COUNT`、`AML_DC_COUNT`），不在前端重算；整页口径走 `CalcChainNote` 默认收起。
+- **刷新**：`AR_PAGE_DEFAULTS.olibTopo = 1800`。页面本身没有接口可重取，自动刷新只走外壳默认重挂载（会回到初始视图），不会产生新数据。
 
 ## 9. MW 微波实时（`?page=mwRealTime`）— iframe
 
@@ -576,6 +589,7 @@ IP RAN 光纤层的网元—链路关系图（React + 自绘 SVG 画布），数
 - 数据来自 `GET /api/mw-ume/realtime`，底层表 `mw_ume_bw_ultilazation_rt` 由 `mw_ume_kpi_sync_rt` **每 15 分钟**（`*/15 * * * *`）写入：取最近 2 小时、`gr=900` 的 FINBI 数据，看板默认只展示**最新一个 15 分钟槽位**，滑杆可回看窗口内的历史槽位。
 - 与日粒度页的区别仅此而已：拓扑骨架、风险榜、抽屉、趋势图逻辑完全一致。
 - **门户 GIS Map 的 MW 页签**（2026-11-10）：外层带 `mwembed=1`，`LegacyToolFrame` 把它和 `theme` 传进内层 `mw_real_time.html`。内层因此藏掉标题栏、KPI、右栏和底栏，地图铺满，跟 Alarm / Person / IP 一样只留地图；点链路的抽屉仍在。直开不带 `mwembed` 时仍是完整看板。
+- **默认取景与图例**（2026-11-16）：`/v3/olbrportal/` 的 MW 页签打开后由门户自动再放大一级（内层 `fitAllSites()` 落 zoom 7 → 8，见门户 `MAP_ZOOM_IN_BY_PAGE.mwRealTime`）；地图左下角新增健康度图例（Healthy / Minor / Major / Critical / Unknown + 县界，颜色取同一套 `--vmax-lvl-*` 令牌，Unknown 与县界为虚线）。图例做在 `mw_real_time.html` 的 Leaflet 控件里，所以直开本页也能看到；地图容器窄于 560px 时隐藏，避免遮挡链路。门户自动放大只发生在 v3 的 MW 页签，直开本页不套门户逻辑。
 
 ## 10 / 11. GIS 地图 与 实时告警地图（`?page=gis` / `?page=realtime_alarm`）
 

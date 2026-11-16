@@ -221,3 +221,10 @@ _probe_file.txt
 # AGENTS.md 四.2「绝不写敏感值」禁止入库；它们是取数方法的留档（哪个接口、什么参数），
 # 留在磁盘上供复刻，不上版本库。忽略跟踪 ≠ 可以删除。
 /backend/services/ipran_topo/url_*.txt
+
+
+# 拓扑图是**源级静态参考数据**（与 backend/data/gis/*.geojson 同理），不是运行时产物：
+# 根 .gitignore 的 `*.svg` 会把 frontend/public/topology/ 下的矢量图一起挡掉，
+# 新克隆的机器构建后页面就没有图（表现为空白画布），所以这里显式取反。
+!frontend/public/topology/
+!frontend/public/topology/*.svg

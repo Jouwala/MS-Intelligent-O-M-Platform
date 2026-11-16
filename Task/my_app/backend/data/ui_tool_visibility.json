@@ -1,0 +1,8 @@
+{
+  "v": 1,
+  "hidden": [
+    "tt-batch-check",
+    "knowledge-search",
+    "tt-postmortem"
+  ]
+}
