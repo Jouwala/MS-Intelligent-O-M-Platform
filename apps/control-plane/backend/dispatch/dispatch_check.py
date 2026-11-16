@@ -31,7 +31,7 @@ if str(_BACKEND_DIR) not in sys.path:
 
 from dispatch.comment_ledger import ensure_comment_once  # noqa: E402
 from dispatch.github_client import GitHubAPIError, GitHubClient, client_from_env  # noqa: E402
-from dispatch.protocol import parse_dependencies, strip_html_comments  # noqa: E402
+from dispatch.protocol import effective_dependencies, strip_html_comments  # noqa: E402
 
 # 必填字段：与 .github/ISSUE_TEMPLATE/agent-task.md 的小节一一对应。
 REQUIRED_SECTIONS = [
@@ -93,9 +93,10 @@ def missing_sections(body: str | None) -> list[str]:
         content = (rest[: nxt.start()] if nxt else rest).strip()
         if not content:
             missing.append(name)
-    # 负责人一栏必须明确写成 agent:*（模板注释不算数）。
-    if "负责人" not in missing and not re.search(r"agent:(muse-1|muse-2|muse-3|grok)", plain):
-        missing.append("负责人（未写明 agent:muse-2/3/grok）")
+    # 负责人一栏必须明确写成 agent:*（模板注释不算数）；具体 agent 名单以
+    # docs/workspace/agent-registry.md 为准，这里只校验“写了 agent 标签”。
+    if "负责人" not in missing and not re.search(r"agent:[a-z0-9][a-z0-9-]*", plain):
+        missing.append("负责人（未写明 agent:<worker> 标签）")
     return missing
 
 
@@ -139,7 +140,10 @@ def check_issue(client: GitHubClient, number: int) -> dict[str, Any]:
             result["actions"].append(f"缺字段提醒:{outcome}")
 
     # 2) 依赖阻塞 / 3) 依赖解除。
-    deps = parse_dependencies(body)
+    #    auto-fix 修复 Issue 对原 Issue 的 depends on 是自依赖（原 Issue 要等本修复
+    #    合入才关闭），必须按实际依赖判断，否则每轮巡检都会把修复任务重新锁死
+    #    （2026-11-16 #108 实测）。
+    deps = effective_dependencies(body)
     if not deps:
         return result
     open_deps = [

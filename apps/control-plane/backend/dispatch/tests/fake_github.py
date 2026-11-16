@@ -139,15 +139,28 @@ class FakeGitHub(GitHubClient):
                 self.known_shas.add(merge_sha)
             return pull
 
-    def seed_comment(self, number: int, body: str) -> None:
+    def seed_comment(
+        self,
+        number: int,
+        body: str,
+        *,
+        author: str = "github-actions",
+        created_at: str | None = None,
+    ) -> None:
         with self.lock:
             if number not in self.issues:
                 # 便利默认：只造评论时自动补一个空 Issue，避免每处都先 seed_issue。
                 self.seed_issue(number)
             self._next_id += 1
-            self.comments.setdefault(number, []).append(
-                {"id": self._next_id, "body": body, "user": {"login": "github-actions"}}
-            )
+            comment: dict[str, Any] = {
+                "id": self._next_id,
+                "body": body,
+                "user": {"login": author},
+            }
+            if created_at:
+                # 认领超时判定要用评论时间；不传则模拟“老评论没有 created_at”。
+                comment["created_at"] = created_at
+            self.comments.setdefault(number, []).append(comment)
 
     def seed_comments(self, number: int, bodies: list[str]) -> None:
         for body in bodies:

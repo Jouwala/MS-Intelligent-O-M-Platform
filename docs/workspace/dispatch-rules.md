@@ -110,10 +110,14 @@ Grok Bot 已于 2026-11-14 退役（PR #46），已从能力表移除、不再�
 
 - 认领评论首行：`<!-- agent-claim: muse-2, <ISO 8601 UTC 时间> -->`，
   同时打 `state:claimed` 标签。
-- 认领后 **4 小时无进展**（无 push、无评论）即租约过期，Muse 1 摘
-  `state:claimed` 标签重派。
-- TASK_ASSIGNED **24 小时无人认领**：Muse 1 在 Issue 下追问；**48 小时无回应**：
-  升级给用户，由用户决定换人或改派。
+- 认领后 **4 小时无进展**（无 push、无评论）即租约过期。**自动化**：`lease-reaper.yml`
+  每 5 分钟巡检，发 `CLAIM_EXPIRED` 评论、摘 `state:claimed`、补 `state:todo`；
+  Muse 1 只需处理脚本判定不了的例外（例如读不到认领时间的老评论）。
+- TASK_ASSIGNED **24 小时无人认领**：`auto-dispatch` 不再把这类分派当作阻塞，
+  可重新分派；Muse 1 仍需在 Issue 下追问，**48 小时无回应**升级给用户。
+- **自依赖例外**：auto-fix 自动建的修复 Issue 正文写着 `depends on #<原 Issue>`，
+  但原 Issue 要等本修复合入才关闭，两者互相等待。分派与阻塞检查（`auto_dispatch.py`、
+  `dispatch_check.py`）会识别 `<!-- auto-fix: for-issue-N ... -->` 标记并忽略这条依赖。
 
 ## 四、最终汇总格式
 

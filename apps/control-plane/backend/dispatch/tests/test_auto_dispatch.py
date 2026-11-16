@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import threading
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from dispatch.auto_dispatch import (
     dispatch_next,
+    dispatch_scheduled,
     ensure_dispatch_comment,
     find_dispatch_comment,
     is_ready,
@@ -20,6 +22,8 @@ from dispatch.tests.fake_github import HEAD_SHA, MAIN_SHA, MERGE_SHA, FakeGitHub
 
 ASSIGNED = "agent-msg: TASK_ASSIGNED"
 DISPATCH_REF_PREFIX = "refs/heads/dispatch/pr-merged/"
+CRON_REF_PREFIX = "refs/heads/dispatch/cron-sweep/"
+NOW = datetime(2026, 11, 16, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def _dispatch(fake: FakeGitHub, *, pr_number: int = 31, timeout: float = 0.3):
@@ -262,3 +266,105 @@ def test_closed_dependency_allows_readiness(fake: FakeGitHub) -> None:
 def test_main_sha_constant_used_by_fixture(fake: FakeGitHub) -> None:
     """锚点解析：事件没给 merge sha 时从 PR 取（这里校验测试常量确实对上）。"""
     assert fake.get_branch_sha("main") == MAIN_SHA
+
+
+# --------------------------------------------------------------------- 白名单 / 依赖死锁
+def test_registry_whitelist_makes_muse4_dispatchable(fake: FakeGitHub, merged_pr) -> None:
+    """白名单来自注册表：新增的 Muse 4 不再因为代码里写死 muse-2/3 而派不出去。"""
+    fake.seed_ready_issue(7, agent="agent:muse-4")
+    result = _dispatch(fake)
+    assert result["status"] == "dispatched"
+    assert result["agent"] == "agent:muse-4"
+
+
+def test_unknown_agent_label_is_not_ready(fake: FakeGitHub) -> None:
+    fake.seed_issue(7, labels=("state:todo", "agent:nobody"))
+    ok, reason = is_ready(fake, fake.get_issue(7))
+    assert ok is False
+    assert "白名单" in reason
+
+
+AUTO_FIX_BODY = (
+    "<!-- auto-fix: for-issue-99 root-issue-99 round-1 sha-abc123 -->\n"
+    "## 任务说明\n修复 #99 的 QA 失败项。\n\n"
+    "## 依赖任务\n\n依赖：depends on #99\n"
+)
+
+
+def test_auto_fix_parent_dependency_is_ignored(fake: FakeGitHub) -> None:
+    """修复任务对原 Issue 的 depends on 是自依赖：原 Issue 未关闭不再阻塞。"""
+    fake.seed_issue(99, state="open")
+    fake.seed_issue(7, labels=("state:todo", "agent:muse-2"), body=AUTO_FIX_BODY)
+    ok, _reason = is_ready(fake, fake.get_issue(7))
+    assert ok is True
+
+
+def test_auto_fix_task_other_dependencies_still_block(fake: FakeGitHub) -> None:
+    fake.seed_issue(99, state="open")
+    fake.seed_issue(98, state="open")
+    body = AUTO_FIX_BODY + "\ndepends on #98\n"
+    fake.seed_issue(7, labels=("state:todo", "agent:muse-2"), body=body)
+    ok, reason = is_ready(fake, fake.get_issue(7))
+    assert ok is False
+    assert "#98" in reason
+
+
+# --------------------------------------------------------------------- 分派超时
+def test_stale_assignment_allows_redispatch(fake: FakeGitHub) -> None:
+    fake.seed_issue(7, labels=("state:todo", "agent:muse-2"))
+    old = (NOW - timedelta(hours=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    fake.seed_comment(
+        7,
+        "<!-- agent-msg: TASK_ASSIGNED, task: #7, from: github-actions, "
+        f"to: muse-2, at: {old} -->",
+    )
+    ok, _reason = is_ready(fake, fake.get_issue(7), now=NOW)
+    assert ok is True
+
+
+def test_fresh_assignment_still_blocks(fake: FakeGitHub) -> None:
+    fake.seed_issue(7, labels=("state:todo", "agent:muse-2"))
+    recent = (NOW - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    fake.seed_comment(
+        7,
+        "<!-- agent-msg: TASK_ASSIGNED, task: #7, from: github-actions, "
+        f"to: muse-2, at: {recent} -->",
+    )
+    ok, reason = is_ready(fake, fake.get_issue(7), now=NOW)
+    assert ok is False
+    assert "分派" in reason
+
+
+# --------------------------------------------------------------------- 定时巡检（每小时 :17）
+def test_schedule_dispatches_without_pr(fake: FakeGitHub) -> None:
+    fake.seed_ready_issue(7)
+    result = dispatch_scheduled(fake, fake.repo)
+    assert result["status"] == "dispatched"
+    assert result["event"] == "schedule"
+    assert result["issue"] == 7
+    assert len(fake.refs_with_prefix(CRON_REF_PREFIX)) == 1
+    comments = fake.comments_for(7)
+    assert len(comments) == 1
+    assert "定时巡检" in comments[0]
+    assert "TASK_ASSIGNED" in comments[0]
+
+
+def test_schedule_without_ready_issue_only_logs(fake: FakeGitHub) -> None:
+    result = dispatch_scheduled(fake, fake.repo)
+    assert result["status"] == "no-ready"
+    assert fake.refs_with_prefix(CRON_REF_PREFIX) == []
+
+
+def test_schedule_second_round_does_not_dispatch_again(fake: FakeGitHub) -> None:
+    fake.seed_ready_issue(7)
+    assert dispatch_scheduled(fake, fake.repo)["status"] == "dispatched"
+    # 任务已被分派（24h 内）→ 第二轮不再就绪，也不会发第二条评论。
+    assert dispatch_scheduled(fake, fake.repo)["status"] == "no-ready"
+    assert len(fake.markers(7, ASSIGNED)) == 1
+
+
+def test_run_from_env_schedule_event(fake: FakeGitHub) -> None:
+    fake.seed_ready_issue(7)
+    result = run_from_env({"REPO": fake.repo, "EVENT": "schedule"}, client=fake)
+    assert result["status"] == "dispatched"
+    assert result["event"] == "schedule"
