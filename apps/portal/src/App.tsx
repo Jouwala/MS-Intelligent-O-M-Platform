@@ -35,6 +35,7 @@ import type { GroupOpFeedback } from './components/GroupManagerModal';
 // 调用处须配合条件渲染（打开/切到该视图时才挂载），否则 lazy 组件在首屏首次
 // 渲染即触发 import，达不到延迟加载的效果。命名导出用 .then 包一层 default。
 const WhatsAppTasksView = lazy(() => import('./components/WhatsAppTasksView'));
+const NetworkTopologyView = lazy(() => import('./components/topology/NetworkTopologyView'));
 const DashboardListView = lazy(() =>
   import('./components/DashboardListView').then((m) => ({ default: m.DashboardListView }))
 );
@@ -333,7 +334,8 @@ export default function App() {
   // 处于「WhatsApp @Me Tasks」视图时，看板过滤条件（平台/分类）并不作用于任务列表；
   // 用户点击 All Dashboards 等过滤入口却看不到任何变化，仿佛“失效”。
   // 因此：任何看板过滤操作都自动退出任务视图，切回卡片网格视图。
-  const leaveTasksView = () => setViewMode((mode) => (mode === 'tasks' ? 'grid' : mode));
+  const leaveTasksView = () =>
+    setViewMode((mode) => (mode === 'tasks' || mode === 'topology' ? 'grid' : mode));
   const handleQuickFilterPlatform = (p: 'all' | PlatformType) => {
     setSelectedPlatform(p);
     leaveTasksView();
@@ -947,8 +949,12 @@ export default function App() {
           totalFilteredCount={translatedDashboards.length}
         />
 
-        {/* Main Content Body: Grid, List, Matrix or WhatsApp Tasks */}
-        {viewMode === 'tasks' ? (
+        {/* Main Content Body: Grid, List, Matrix, WhatsApp Tasks or Network Topology */}
+        {viewMode === 'topology' ? (
+          <Suspense fallback={<ViewLoadingFallback />}>
+            <NetworkTopologyView />
+          </Suspense>
+        ) : viewMode === 'tasks' ? (
           <Suspense fallback={<ViewLoadingFallback />}>
             <WhatsAppTasksView />
           </Suspense>
