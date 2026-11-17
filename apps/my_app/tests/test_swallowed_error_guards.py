@@ -116,15 +116,27 @@ class TestSiteAvailabilityFailureVisibility:
             svc._load_errors.clear()
 
     def test_warning_text_distinguishes_failure_from_empty(self):
-        """空月 + 登记失败 → 文案必须与纯空态不同，否则运维无法判断是故障还是没数据。"""
+        """空月 + 登记失败 → 文案必须与纯空态不同，否则运维无法判断是故障还是没数据。
+
+        确定性口径（#111）：build_overview 内部会调用三个 loader，其中
+        load_master_sites 成功时 _clear_load_error("master")、失败时
+        _mark_load_error("master")——本用例手动登记的错误会被真实 loader
+        在两次构建之间的成败顺带清掉或覆盖，结果取决于库是否可达、缓存
+        是否预热等环境状态（D:\02 冒烟曾因此时过时不过，属状态依赖）。
+        这里把三个 loader 全部 stub 成中性空结果，只验证「登记表 → 文案」
+        这一段契约本身；loader 的登记/清错行为由上一条用例单独守护。
+        """
         from backend.services.site import site_availability_service as svc
         month = "1990-01"  # 必然无数据
         try:
-            svc._load_errors.clear()
-            plain = set(svc.build_overview(month)["meta"].get("warnings", []))
-            svc._load_errors.clear()
-            svc._mark_load_error("master", "读取 master_site_db 失败: 连接池耗尽")
-            with_err = set(svc.build_overview(month)["meta"].get("warnings", []))
+            with mk.patch.object(svc, "load_master_sites", lambda: []), \
+                    mk.patch.object(svc, "load_month_availability", lambda m: {}), \
+                    mk.patch.object(svc, "_load_month_tt", lambda m: []):
+                svc._load_errors.clear()
+                plain = set(svc.build_overview(month)["meta"].get("warnings", []))
+                svc._load_errors.clear()
+                svc._mark_load_error("master", "读取 master_site_db 失败: 连接池耗尽")
+                with_err = set(svc.build_overview(month)["meta"].get("warnings", []))
             assert with_err - plain, "失败态与空态文案无差别"
             assert any("读取失败" in w for w in with_err), "未出现'读取失败'字样"
         finally:
