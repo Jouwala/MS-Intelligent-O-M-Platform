@@ -7,12 +7,7 @@ localStorage 里回灌的 csrftoken 还是旧的。
 
 本文件不连网管、不读真实会话文件。
 """
-import os
-import sys
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend", "services"))
-
-import site_outage_session as s  # noqa: E402
+from backend.services.site import site_outage_session as s  # noqa: E402
 
 
 def test_cookie_header_prefers_ported_name():
