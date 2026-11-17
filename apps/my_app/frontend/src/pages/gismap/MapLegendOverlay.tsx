@@ -52,7 +52,10 @@ export interface MapLegendRow {
   id: string
   color: string
   label: string
-  count: number
+  /** 数量。2026-11-16 起可选：IPT 电源页只要「颜色 → 含义」这一层，
+      站点数已经在上方的 KPI 卡里，图例再报一遍会与「Online 含告警站点」
+      这种口径差打架。不传时只显示标签。 */
+  count?: number
   shape?: 'dot' | 'line' | 'dashed'
   /** 被点击隐藏（仅站点类别行会传）：置灰 + 删除线 */
   hidden?: boolean
@@ -191,6 +194,8 @@ function Swatch({ row }: { row: MapLegendRow }) {
 
 function Row({ row }: { row: MapLegendRow }) {
   const clickable = typeof row.onClick === 'function'
+  /** 有数量时显示「标签 (n)」；IPT 电源页这类只要颜色含义的图例不传数量 */
+  const labelText = row.count == null ? row.label : `${row.label} (${row.count})`
   const style: CSSProperties = {
     display: 'flex',
     alignItems: 'center',
@@ -208,7 +213,7 @@ function Row({ row }: { row: MapLegendRow }) {
         <Swatch row={row} />
       </span>
       <span style={{ flex: '1 1 auto', textDecoration: row.hidden ? 'line-through' : 'none' }}>
-        {row.label} ({row.count})
+        {labelText}
       </span>
       {row.hidden && row.hiddenNote && (
         <span style={{ fontSize: '0.625rem', color: WH.textDim, flex: '0 0 auto' }}>{row.hiddenNote}</span>
@@ -222,7 +227,7 @@ function Row({ row }: { row: MapLegendRow }) {
     <span
       role="switch"
       aria-checked={!row.hidden}
-      aria-label={`${row.label} (${row.count})`}
+      aria-label={labelText}
       title={hintText}
       tabIndex={0}
       onClick={row.onClick}

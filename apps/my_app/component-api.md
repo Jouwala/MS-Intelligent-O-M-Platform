@@ -8,7 +8,7 @@
 
 | 端 | 位置 | 规模 |
 | --- | --- | --- |
-| **前端页面** | `frontend\src\pages\` | 76 个 `.tsx`（不含 `_` 前缀的模板与 `*_bak_*` 备份） |
+| **前端页面** | `frontend\src\pages\` | 77 个 `.tsx`（不含 `_` 前缀的模板与 `*_bak_*` 备份） |
 | **前端通用组件** | `frontend\src\components\` | 29 个 `.tsx` + `cards\` 子目录（卡片统一入口） |
 | **前端基础设施** | `frontend\src\*.ts(x)` | `api.ts`、`theme.ts`、`i18n.tsx`、`TaskStatusContext.tsx`、`cache.ts`、`datetime.ts`、`useDataTimestamps.ts`、`helpMarkdown.ts` |
 | **后端服务** | `backend\services\` | 业务服务层（各数据源采集与计算） |
@@ -67,7 +67,7 @@ import { CardBase, StatCard } from '../components/cards'
 
 | 组件 | 职责 |
 | --- | --- |
-| `CalcChainNote.tsx` | **口径说明条（默认收起，点标题展开）**。`title` + `sections[{title, lines}]` + `warning`（异常类信息常驻，不进收起区）。全站口径说明的统一载体 —— **禁止**再用常驻展开的 `Alert` 堆小字（AGENTS.md 三.3b） |
+| `CalcChainNote.tsx` | **口径说明条（默认收起，点标题展开）**。`title` + `sections[{title, lines}]` + `warning`（异常类信息常驻，不进收起区）+ `trigger`（`alert` 默认 = 一行可展开说明条；`icon` = 只留一个问号、点开气泡看说明，用于「连这一行都不占」的页面，如 `olibTopo` 页底）+ `placement`（`icon` 形态气泡方向）。全站口径说明的统一载体 —— **禁止**再用常驻展开的 `Alert` 堆小字（AGENTS.md 三.3b） |
 | `DraggableClickModal.tsx` | 可拖拽的点击弹窗（7KB）。**注意**：门户也有同名问题的 QC 弹窗拖拽需求，两端可互相参照 |
 | `ECharts.tsx` | **全站统一 ECharts 包装（2026-11-12 新增）**：`echarts-for-react/esm/core` + `utils/echarts` 的按需实例，props 与默认入口一致（option / notMerge / opts / onEvents / onChartReady / ref 全部透传）。页面一律从这里 import，**不要**直接 `from 'echarts-for-react'`（默认入口整包引入 echarts）。⚠ 必须用 `esm/` 入口：`lib/` 是 CommonJS，rolldown 的互操作会把默认导入解析成 module 对象，渲染即抛 React #130 → 全站用图的页面白屏（2026-11-16 事故，详见文件内注释）。新增图/组件去 `utils/echarts.ts` 登记 |
 | `PageErrorBoundary.tsx` | **页面级错误边界（2026-11-16 新增）**：包住 `App.tsx` 里 `renderPage()` 的输出，把「一次渲染异常 → 整棵树卸载 → 纯白屏」换成「标题 + 说明 + 原始报错 + 刷新按钮」，并对构建产物更新导致的 chunk 加载失败自动刷新一次（20 秒窗口去重）。新增页面无需接入，外壳统一包好 |

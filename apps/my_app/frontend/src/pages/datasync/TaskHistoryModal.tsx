@@ -4,6 +4,7 @@ import { Button, Collapse, List, Modal, Space, Tag, Typography, message } from '
 import {
   CheckCircleFilled,
   CloseCircleFilled,
+  ExclamationCircleFilled,
   HistoryOutlined,
   DownloadOutlined,
 } from '@ant-design/icons'
@@ -15,6 +16,21 @@ import type { TaskDetail, RunRecord } from './types'
 import { useI18n } from '../../i18n'
 
 const { Text } = Typography
+
+// 解析 result_json（任务函数返回的原始 dict 字符串）。解析失败按「没有附加信息」处理，
+// 不影响原有的成功/失败判断。
+// 用途：Run History 要区分「真失败」与「cmdb 站点缺档」——后者后端记
+// status=pending_cmdb、success=true，属配置待补而不是任务出错（2026-11-17 如意要求），
+// 不能显示成红色 ❌ Error。
+function parseRunResult(resultJson?: string | null): Record<string, unknown> | null {
+  if (!resultJson) return null
+  try {
+    const v: unknown = JSON.parse(resultJson)
+    return v && typeof v === 'object' ? (v as Record<string, unknown>) : null
+  } catch {
+    return null
+  }
+}
 
 export function TaskHistoryModal({
   open, task, locale, onClose,
@@ -142,23 +158,38 @@ export function TaskHistoryModal({
         <List
           size="small"
           dataSource={runs.slice(0, visible)}
-          renderItem={(run: RunRecord) => (
+          renderItem={(run: RunRecord) => {
+            const rj = parseRunResult(run.result_json)
+            // cmdb 站点缺档：任务本身没出错（success=true），只是 cmdb 里没有对应站点。
+            // 后端 status=pending_cmdb 专门标这类（fiber_assign_service.apply_outcome），
+            // 这里按橙色「提示」渲染（2026-11-17 如意要求：提示照旧，但不报错）。
+            const pendingCmdb = rj?.status === 'pending_cmdb'
+            const cmdbNotice = pendingCmdb ? String(rj?.message || '') : ''
+            return (
             <List.Item style={{
-              background: run.success ? 'rgba(82, 196, 26, 0.05)' : 'rgba(255, 77, 79, 0.05)',
+              background: pendingCmdb
+                ? 'rgba(250, 173, 20, 0.05)'
+                : (run.success ? 'rgba(82, 196, 26, 0.05)' : 'rgba(255, 77, 79, 0.05)'),
               borderRadius: 'var(--wh-radius-md)',
               padding: 'var(--wh-space-sm) var(--wh-space-md)',
               marginBottom: 'var(--wh-space-xs)',
-              border: `1px solid ${run.success ? 'rgba(82, 196, 26, 0.2)' : 'rgba(255, 77, 79, 0.2)'}`,
+              border: `1px solid ${pendingCmdb
+                ? 'rgba(250, 173, 20, 0.25)'
+                : (run.success ? 'rgba(82, 196, 26, 0.2)' : 'rgba(255, 77, 79, 0.2)')}`,
             }}>
               <List.Item.Meta
-                avatar={run.success
-                  ? <CheckCircleFilled style={{ color: '#52c41a', fontSize: '1.125rem' }} />
-                  : <CloseCircleFilled style={{ color: '#ff4d4f', fontSize: '1.125rem' }} />
+                avatar={pendingCmdb
+                  ? <ExclamationCircleFilled style={{ color: '#faad14', fontSize: '1.125rem' }} />
+                  : (run.success
+                    ? <CheckCircleFilled style={{ color: '#52c41a', fontSize: '1.125rem' }} />
+                    : <CloseCircleFilled style={{ color: '#ff4d4f', fontSize: '1.125rem' }} />)
                 }
                 title={
                   <Space>
-                    <Tag color={run.success ? 'green' : 'red'}>
-                      {run.success ? (locale === 'zh' ? '成功' : 'Success') : (locale === 'zh' ? '失败' : 'Failed')}
+                    <Tag color={pendingCmdb ? 'orange' : (run.success ? 'green' : 'red')}>
+                      {pendingCmdb
+                        ? t('sync.runStatus.pendingCmdb')
+                        : (run.success ? (locale === 'zh' ? '成功' : 'Success') : (locale === 'zh' ? '失败' : 'Failed'))}
                     </Tag>
                     <Text style={{ fontSize: '0.75rem', color: WH.textMuted }}>
                       {run.trigger === 'manual' ? '🔧' : '⏰'} {formatDateTime(run.started_at, { zone: true })}
@@ -168,6 +199,21 @@ export function TaskHistoryModal({
                 description={
                   <div>
                     <Text style={{ fontSize: '0.75rem', color: WH.textDim }}>⏱ {(run.elapsed_seconds ?? 0).toFixed(2)}s</Text>
+                    {cmdbNotice && (
+                      <div style={{ marginTop: 'var(--wh-space-sm)' }}>
+                        <Text style={{ fontSize: '0.75rem', color: '#faad14', fontWeight: 600 }}>
+                          ⚠ {t('sync.runNotice.pendingCmdb')}
+                        </Text>
+                        <pre style={{
+                          margin: 'var(--wh-space-xs) 0 0', padding: 'var(--wh-space-sm)', fontSize: '0.6875rem', lineHeight: 1.5,
+                          color: '#ffe58f', background: 'rgba(250,173,20,0.08)', borderRadius: 'var(--wh-radius-md)',
+                          border: '1px solid rgba(250,173,20,0.25)', whiteSpace: 'pre-wrap',
+                          wordBreak: 'break-word', maxHeight: '10rem', overflow: 'auto',
+                        }}>
+                          {cmdbNotice}
+                        </pre>
+                      </div>
+                    )}
                     {run.error && (
                       <div style={{ marginTop: 'var(--wh-space-sm)' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -222,7 +268,8 @@ export function TaskHistoryModal({
                 }
               />
             </List.Item>
-          )}
+            )
+          }}
         />
         {runs.length > visible && (
           <div style={{ textAlign: 'center', marginTop: 'var(--wh-space-sm)' }}>

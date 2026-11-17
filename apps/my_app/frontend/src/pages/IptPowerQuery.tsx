@@ -11,6 +11,15 @@
  *        覆盖全站）→ ipt_power_snapshots 明细列 + ipt_power_site_detail 每站最新明细。
  *   2. 页面布局（2026-11-04）：左侧 3/5 为站点地图（Leaflet + 自托管 PMTiles 底图，
  *      与 GISMap 同一套组件）；右侧 2/5 为站点清单表。
+ *      2026-11-16 按用户要求再调三处（仅宽屏 + 单模块嵌入时生效）：
+ *        · 卡片标题只写「Site map」/「站点地图」，不再带「（点击圆点下钻）」；
+ *        · 三色图例从卡片头移到**地图左下角**（复用 gismap/MapLegendOverlay，
+ *          与 GIS / 人员页同一套浮层），卡片头只留县底色下拉；
+ *        · 地图与右侧「Sites & latest power snapshot」**等高、铺满剩余高度**，
+ *          页面不再出现「地图封顶 820px 以下的空白」与两卡高度差
+ *          （左侧 875 / 右侧 787 实测差 88px）。高度链全部走 flex 传递，
+ *          表体按量出来的剩余高度决定一页行数（见 iptPower/useTableFit.ts）。
+ *          窄屏（<xl）两列上下堆叠、直开应用外壳时，仍走原定高 clamp，不做铺满。
  *      2026-11-09 起地图**默认按县上色**（用户：「按照州添加颜色，参考 ?page=person」）：
  *      15 个县各一种类别色 + 县名标签，色表与人员页共用 gismap/countyPalette.ts。
  *      地图卡标题右侧的下拉可切三档：按县分色（默认）/ 平均 SOC 分档 / 不填充。
@@ -29,7 +38,8 @@
  * ========================================================================== */
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Alert, Button, Col, Drawer, Empty, Input, Row, Select, Space, Spin, Table, Tag, Typography } from 'antd'
+import type { CSSProperties } from 'react'
+import { Alert, Button, Col, Drawer, Empty, Grid, Input, Row, Select, Space, Spin, Table, Tag, Typography } from 'antd'
 import { DownloadOutlined, ReloadOutlined, ThunderboltOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import ReactECharts from '../components/ECharts'
@@ -42,12 +52,17 @@ import {
 import { CardBase, StatCard } from '../components/cards'
 import CalcChainNote from '../components/CalcChainNote'
 import { IptCountyLayer, type IptCountyMode } from './iptPower/IptCountyLayer'
+import { IptMapFit } from './iptPower/IptMapFit'
 import { IptMapFocusGuard } from './iptPower/IptMapFocusGuard'
+import { useTableFit } from './iptPower/useTableFit'
+import MapLegendOverlay from './gismap/MapLegendOverlay'
+import type { MapLegendRow } from './gismap/MapLegendOverlay'
 import {
   SOC_BAND_COLOR, SOC_BAND_ORDER, aggregateCountySoc, bandLabelKey,
 } from './iptPower/countySoc'
 import { exportAoaReport } from '../utils/excelReport'
 import { readParam, writeParams } from '../urlState'
+import { isEmbedMode } from '../embedMode'
 import {
   iptPowerRefresh, iptPowerSiteDetail, iptPowerSites, iptPowerStatus,
 } from '../api'
@@ -280,6 +295,38 @@ export default function IptPowerQuery() {
 
   const mapSites = useMemo(() => rows.filter(r => r.lat != null && r.lon != null), [rows])
 
+  /* ---- 宽屏「地图 / 清单卡等高 + 铺满剩余高度」（2026-11-16） ----
+   * 断点与下方 Row 的 xl={14/10} 同档（1200px）：窄屏两列上下堆叠，
+   * 把视口剩余高度全给地图行没有意义，那种情况下仍用固定 clamp 高。
+   * first render 时 useBreakpoint 可能返回空对象 → 默认按宽屏算，避免先窄后宽闪一下。 */
+  const screens = Grid.useBreakpoint()
+  /* 是否单模块嵌入（门户 iframe / 大屏）：决定地图行「最小高度」怎么兜底。
+     嵌入时视口就是 iframe —— 口径说明展开要能压缩地图，最小高度给 320px 即可；
+     直开应用外壳时 #main-content 是内容高度、页面本来就能滚，若也只给 320px，
+     地图会被压成一条（那正是改版前的定高 clamp 在防的事）。 */
+  const embedLayout = useMemo(() => isEmbedMode(), [])
+  /* 「等高铺满」只在**宽屏 + 嵌入**时启用：
+     · 宽屏（≥xl，与 Row 的 xl={14/10} 同档）：窄屏两列上下堆叠，铺满视口高度没有意义；
+     · 嵌入：容器高度由 iframe 给定，flex 链一路有确定值可分配；
+       直开应用外壳时 #main-content 高度由内容决定，卡片写 flex 会量出离谱高度
+       （实测 1532px 地图），那种情况继续用原定高 clamp，页面照旧滚动。 */
+  const fillLayout = screens.xl !== false && embedLayout
+  /* 清单卡里「表头 + 表体 + 分页」要正好填满卡片：表体高度与一页行数由这块可视区量出。 */
+  const { areaRef: tableAreaRef, fit: tableFit } = useTableFit(fillLayout, rows.length)
+
+  /* 三色图例（2026-11-16 从卡片头移到地图左下角，复用 gismap/MapLegendOverlay）。
+     颜色必须与 markerColor **同源**：图例色与圆点色不一致比没有图例更糟。
+     不传 count —— 站点数已在上方 KPI 卡里，且「Online」的 KPI 含告警站点，
+     图例再报一遍数字会与圆点分类（离线 > 告警 > 正常）的口径打架。 */
+  const legendRows = useMemo<MapLegendRow[]>(() => [
+    { id: 'online', label: t('ipt.map.legend.online'),
+      color: markerColor({ connectivity: 'online', alarm_count: 0 } as SiteRow) },
+    { id: 'alarm', label: t('ipt.map.legend.alarm'),
+      color: markerColor({ connectivity: 'online', alarm_count: 1 } as SiteRow) },
+    { id: 'offline', label: t('ipt.map.legend.offline'),
+      color: markerColor({ connectivity: 'offline', alarm_count: 0 } as SiteRow) },
+  ], [markerColor, t])
+
   /* 县底色 = 该县**有 SOC 快照的站点**的算术平均，输入就是地图上这批点（mapSites），
      所以搜索词一改底色跟着改；「只看关注」只过滤表格、不动地图，因此也不动底色。
      口径全文见下方 CalcChainNote 的第 4 段。 */
@@ -402,17 +449,65 @@ export default function IptPowerQuery() {
   const rect = detailInfo?.detail?.rectifiers?.[0]
   const grid = detailInfo?.detail?.grids?.[0]
   const latestAlarms: AlarmInfo[] = (detailSite as any)?.alarm_names || []
-  /* 详情搬进浮层（2026-11-05 居中弹窗 → 2026-11-06 右侧抽屉）后，页面下半屏不再被
-     详情卡占着，地图可以吃掉这部分高度。仍是 clamp 兜底：小窗不低于 440px，大窗封顶
-     820px，避免超高屏拉出巨型地图。抽屉打开时压住的是右列表格那一列：1920 宽屏正好
-     贴边、不盖地图，1600 宽实测盖掉地图右缘约 135px（细节见 DRAWER_WIDTH 注释）。 */
+  /* 窄屏 / 直开应用外壳时用的定高：小窗不低于 440px、大窗封顶 820px。
+     铺满形态（宽屏 + 嵌入）不再用它 —— 高度由 flex 分配铺满剩余视口（2026-11-16）。 */
   const mapCardHeight = 'clamp(440px, calc(100vh - 280px), 820px)'
 
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--wh-space-md)' }}>
+  /* ---- 铺满形态的样式（2026-11-16）----
+     高度链**全部走 flex**，一处都不写 height:100%：
+     flex-basis:0% 撑出来的高度对后代是「不确定」的，百分比会塌成 0
+     （GISMap.tsx:2670 有实测记录：整块地图消失、页面一片白）。
+     地图自己用绝对定位铺满外层 wrapper，与 GISMap 的地图卡同一做法。
+     minHeight 兜底 320px：嵌入时口径说明展开要能压缩地图，整页仍是一屏。 */
+  const fillRowStyle: CSSProperties | undefined = fillLayout
+    ? { flex: '1 1 auto', minHeight: 320 }
+    : undefined
+  const fillColStyle: CSSProperties | undefined = fillLayout
+    ? { display: 'flex', flexDirection: 'column', minHeight: 0 }
+    : undefined
+  const fillCardStyle: CSSProperties | undefined = fillLayout
+    ? { flex: '1 1 0%', minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }
+    : undefined
+  /* 卡片体：铺满形态去掉 8px 内边距并成为 flex 列，让地图/表格贴到卡片边（不留白边）；
+     仍保留 position:relative —— 图例浮层与县底色图例都以它为锚点。 */
+  const mapBodyStyle: CSSProperties = fillLayout
+    ? {
+      padding: 0, position: 'relative', height: 'auto',
+      /* display:flex 不可省：wrapper 靠它拿到卡片体的高度（body 是 block 时
+         wrapper 的 flex:1 不生效 → 高度 0 → Leaflet 容器 0px，地图整块消失）。 */
+      display: 'flex', flexDirection: 'column',
+      flex: '1 1 0%', minHeight: 0,
+    }
+    : { padding: 8 }
+  const tableBodyStyle: CSSProperties = fillLayout
+    ? { padding: 8, flex: '1 1 0%', minHeight: 0, display: 'flex', flexDirection: 'column' }
+    : { padding: 8 }
+  /* 地图外层 wrapper：铺满卡片体；Leaflet 容器绝对定位铺在它里面，图例浮层也挂在它上面
+     （不放进卡片体直接下级 —— 门户注入的剥离 CSS 会把「卡片体里与地图同级的块」
+     改写成通栏贴底浮层，只有 .gis-legend-overlay 被豁免；包在 wrapper 里最稳）。 */
+  const mapWrapStyle: CSSProperties = fillLayout
+    ? { position: 'relative', flex: '1 1 0%', minHeight: 0 }
+    : { position: 'relative' }
+  const mapCanvasStyle: CSSProperties = fillLayout
+    ? { position: 'absolute', inset: 0, width: 'auto', height: 'auto', background: 'var(--wh-page-bg)' }
+    : { height: mapCardHeight, width: '100%', background: 'var(--wh-page-bg)' }
 
-      {/* ① 筛选条 */}
-      <CardBase bodyStyle={{ padding: 'var(--wh-space-sm) var(--wh-space-md)' }}>
+
+  return (
+    /* flex:1 + minHeight:0（2026-11-16）：本页根节点是 #main-content（flex 列）的子项。
+       embed 模式下 #main-content 有确定高度（100vh 链），根节点认领全部剩余高度，
+       下方的地图行才有「剩余高度」可分；不写 flex:1 时根节点只按内容高度占位，
+       地图行再怎么写 flex 也拿不到空间，超高屏就会留出那一大块空白。
+       minHeight:0 不可省 —— flex 子项默认 min-height:auto 会按内容撑开、压不下去。 */
+    <div style={{
+      display: 'flex', flexDirection: 'column', gap: 'var(--wh-space-md)',
+      flex: '1 1 auto', minHeight: 0,
+    }}>
+
+      {/* ① 筛选条。flexShrink:0 —— 根节点是 flex 列，视口不够高时浏览器默认会
+          先压这些「可收缩」的块（实测 1100px 宽时筛选条被压成 20px 高），
+          只有地图那一行该让位。 */}
+      <CardBase style={{ flexShrink: 0 }} bodyStyle={{ padding: 'var(--wh-space-sm) var(--wh-space-md)' }}>
         <Space wrap>
           <Input.Search
             allowClear
@@ -445,18 +540,19 @@ export default function IptPowerQuery() {
       </CardBase>
 
       {/* ② 采集状态：异常（任务没跑过/失败）常驻可见；正常收进口径说明 */}
-      {error && <Alert type="error" showIcon message={error} />}
+      {error && <Alert type="error" showIcon message={error} style={{ flexShrink: 0 }} />}
       {statusInfo.last_run && !statusInfo.last_run.success && (
-        <Alert type="warning" showIcon
+        <Alert type="warning" showIcon style={{ flexShrink: 0 }}
           message={t('ipt.statusFailed', { time: statusInfo.last_run.time })} />
       )}
       {!statusInfo.last_run && (
-        <Alert type="warning" showIcon message={t('ipt.statusNever')} />
+        <Alert type="warning" showIcon message={t('ipt.statusNever')} style={{ flexShrink: 0 }} />
       )}
 
       {/* ③ 全页数据口径说明：默认收起（AGENTS.md 3b）。放在页面而不是弹窗里，
           这样没打开任何站点详情时也能查口径；说「这次采集失败」的异常横幅仍常驻。 */}
       <CalcChainNote
+        style={{ flexShrink: 0 }}
         title={t('ipt.note.title')}
         sections={[
           { title: t('ipt.note.source'), lines: [t('ipt.note.sourceBody')] },
@@ -467,7 +563,7 @@ export default function IptPowerQuery() {
       />
 
       {/* ④ 数字卡 */}
-      <Row gutter={[12, 12]}>
+      <Row gutter={[12, 12]} style={{ flexShrink: 0 }}>
         <Col xs={24} sm={12} lg={6}>
           <StatCard title={t('ipt.kpi.total')} value={stats.total} />
         </Col>
@@ -490,33 +586,24 @@ export default function IptPowerQuery() {
         </Col>
       </Row>
 
-      {/* ⑤ 左 3/5 站点地图（点击圆点开右侧详情抽屉） + 右 2/5 站点清单表 */}
-      <Row gutter={[12, 12]}>
-        <Col xs={24} xl={14} style={{ minWidth: 0 }}>
+      {/* ⑤ 左 3/5 站点地图（点击圆点开右侧详情抽屉） + 右 2/5 站点清单表
+          铺满形态下这一行吃满剩余高度，两张卡等高（2026-11-16，见上方 fill*Style 注释）。 */}
+      <Row gutter={[12, 12]} align="stretch" wrap={fillLayout ? false : undefined} style={fillRowStyle}>
+        <Col xs={24} xl={14} style={{ minWidth: 0, ...fillColStyle }}>
           <CardBase
             title={t('ipt.map.title')}
-            bodyStyle={{ padding: 8 }}
+            style={fillCardStyle}
+            bodyStyle={mapBodyStyle}
             extra={
               <Space size={10} wrap style={{ fontSize: 12 }}>
-                <Space size={4}><span style={{ width: 8, height: 8, borderRadius: '50%',
-                  background: markerColor({ connectivity: 'online', alarm_count: 0 } as SiteRow),
-                  display: 'inline-block' }} /><Text type="secondary">{t('ipt.map.legend.online')}</Text></Space>
-                <Space size={4}><span style={{ width: 8, height: 8, borderRadius: '50%',
-                  background: markerColor({ connectivity: 'online', alarm_count: 1 } as SiteRow),
-                  display: 'inline-block' }} /><Text type="secondary">{t('ipt.map.legend.alarm')}</Text></Space>
-                <Space size={4}><span style={{ width: 8, height: 8, borderRadius: '50%',
-                  background: markerColor({ connectivity: 'offline', alarm_count: 0 } as SiteRow),
-                  display: 'inline-block' }} /><Text type="secondary">{t('ipt.map.legend.offline')}</Text></Space>
-                {/* 县底色三档下拉。⚠ 选项文案必须写成**字面量键**：
-                    `t('ipt.county.mode.' + v)` 会被 check:i18n 读成键名
-                    `ipt.county.mode.` 而报字典缺失（同 AGENTS.md 三.1b）。
-                    SOC 分档图例刻意**不放在这里**：四档色块一进卡片头就把标题挤到
-                    4px 宽（实测 extra 898px / title 4px），改到地图右上角浮层，
-                    与 GIS / 人员页「图例在地图上」的惯例一致。 */}
+                {/* 三色图例已移到地图左下角（2026-11-16 用户要求）：
+                    卡片头只留县底色下拉，不再与标题争横向空间。 */}
                 <Space size={6} wrap>
                   {/* 不再放「县底色」静态标签：下拉当前值本身就是「按县分色 / 平均 SOC /
                       不填充」，再挂一行标签会把卡片头挤到截断（实测 SOC 档只显示
-                      「County fil」）。可访问性由 Select 的 aria-label 承担。 */}
+                      「County fil」）。可访问性由 Select 的 aria-label 承担。
+                      ⚠ 选项文案必须写成**字面量键**：`t('ipt.county.mode.' + v)` 会被
+                      check:i18n 读成键名 `ipt.county.mode.` 而报字典缺失（同 AGENTS.md 三.1b）。 */}
                   <Select<CountyMode>
                     size="small"
                     value={countyMode}
@@ -533,18 +620,21 @@ export default function IptPowerQuery() {
               </Space>
             }
           >
-            {/* 包一层 relative：SOC 分档图例要浮在地图右上角，而不是塞进卡片头。
-                它只是说明性浮层，pointerEvents:'none' 保证不拦圆点点击。 */}
-            <div style={{ position: 'relative' }}>
+            {/* 包一层 relative：图例浮层（左下三色 + 右上 SOC 分档）都以它定位，
+                而不是塞进卡片头。SOC 图例 pointerEvents:'none'，保证不拦圆点点击。 */}
+            <div style={mapWrapStyle}>
             <MapContainer
               center={LB_CENTER}
               zoom={IPT_MAP_ZOOM}
-              style={{ height: mapCardHeight, width: '100%', background: 'var(--wh-page-bg)' }}
+              style={mapCanvasStyle}
             >
               <PmtilesLayer url={BASEMAP_PMTILES_URL} isDark={isDark} maxZoom={BASEMAP_MAX_ZOOM} />
               {/* 摘掉地图容器的 tabindex：否则首次点圆点会被 focus 滚动带跑、抽屉打不开。
                   不是县底色引入的（不填充模式同样复现），细节见 IptMapFocusGuard.tsx。 */}
               <IptMapFocusGuard />
+              {/* 容器尺寸随窗口/卡片变化（铺满剩余高度后是常态），让 Leaflet 重新量一次；
+                  否则缩放窗口后地图右下角会露出没画瓦片的灰底。 */}
+              <IptMapFit />
               {/* 站点圆点专用 pane（照 GISMap.tsx:2808 同一做法）：县底色是**可 hover 的
                   整面多边形**，和圆点同在默认 overlayPane(400) 时，命中只靠「谁后加入谁在上」
                   —— 那是 DOM 顺序，不保证。抬到 650 后，圆点在县块之上是层级决定的，
@@ -582,6 +672,9 @@ export default function IptPowerQuery() {
                 />
               ))}
             </MapContainer>
+            {/* 圆点颜色图例：地图左下角（复用 GIS / 人员页同一份浮层组件）。
+                颜色直接取 markerColor，与圆点同源；不传 count（站点数在 KPI 卡里）。 */}
+            <MapLegendOverlay title={t('gis.legendTitle')} rows={legendRows} />
             {countyMode === 'soc' && (
               <div style={{
                 position: 'absolute', right: 10, top: 10, zIndex: 1000,
@@ -607,17 +700,43 @@ export default function IptPowerQuery() {
             </div>
           </CardBase>
         </Col>
-        <Col xs={24} xl={10} style={{ minWidth: 0 }}>
-          <CardBase title={t('ipt.table.title')} interactive={false} bodyStyle={{ padding: 8 }}>
-            <Table
-              rowKey="site_id"
-              columns={columns}
-              dataSource={watchOnly ? rows.filter(r => r.watched) : rows}
-              loading={loading}
-              pagination={{ pageSize: 15, showSizeChanger: true, size: 'small' }}
-              scroll={{ x: 860, y: `calc(${mapCardHeight} - 96px)` }}
-              size="small"
-            />
+        <Col xs={24} xl={10} style={{ minWidth: 0, ...fillColStyle }}>
+          <CardBase
+            title={t('ipt.table.title')}
+            interactive={false}
+            style={fillCardStyle}
+            bodyStyle={tableBodyStyle}
+          >
+            {/* 量可视区的那层：铺满形态下它 flex 吃满卡片体、内部不溢出，
+                useTableFit 按它算出表体高度与一页行数（见 iptPower/useTableFit.ts）。 */}
+            <div
+              ref={tableAreaRef}
+              style={fillLayout
+                ? { flex: '1 1 0%', minHeight: 0, overflow: 'hidden' }
+                : undefined}
+            >
+              <Table
+                rowKey="site_id"
+                columns={columns}
+                dataSource={watchOnly ? rows.filter(r => r.watched) : rows}
+                loading={loading}
+                pagination={{
+                  /* 铺满形态：一页行数按卡片可视高度算，避免 15 行以下留一大片空白。
+                     这种形态下不给「每页行数」下拉 —— 行数由卡片高度决定，能改的话
+                     改了就会重新留白，与「等高铺满」自相矛盾；其它形态保持原样。 */
+                  pageSize: fillLayout ? tableFit.rows : 15,
+                  showSizeChanger: !fillLayout,
+                  size: 'small',
+                }}
+                scroll={{
+                  x: 860,
+                  /* 铺满形态：表体高度 = 可视区 − 表头 − 分页（量出来的 px，见钩子注释）；
+                     其它形态沿用原来的表达式高度。 */
+                  y: fillLayout ? (tableFit.scrollY || undefined) : `calc(${mapCardHeight} - 96px)`,
+                }}
+                size="small"
+              />
+            </div>
           </CardBase>
         </Col>
       </Row>

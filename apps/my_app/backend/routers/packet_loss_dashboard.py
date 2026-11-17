@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from fastapi import APIRouter, Query
-from backend.database import get_raw_connection
+from backend.database import DB_PATH as APP_DB_PATH, get_raw_connection
 from backend.dialect_helpers import list_table_names
 
 logger = logging.getLogger("packet_loss_dashboard")
@@ -30,6 +30,23 @@ router = APIRouter(prefix="/api/packet-loss-dashboard", tags=["packet-loss-dashb
 PL_DB_PATH = Path(r"d:\01_RPA\Task\my_app\data\packet_lost\lte_pl.sqlite3")
 
 STATUS_ORDER = ["Critical[>5]", "Major[1-5]", "Minor[0.5-1]", "Warning[0.1-0.5]", "No Packet loss[<0.1]"]
+
+# ========== 站点类型（eflow_site.site_type：ERA / COOL / NORMAL） ==========
+# 「站点类型」= 主数据 `eflow_site`.`site_type` 列，与 GIS / 人员页的「站点等级
+# ERA/COOL/NORMAL」是**同一列同一口径**（不是 Indoor/Outdoor 那个「站型」）。
+# 用户口述的 `COOLI` 在库里就是 `COOL`（docs/manual/11-feature-guide.md「要求原话」
+# 一节已同样记载），界面一律显示库里的真值，不做同义词替换。
+#: 主数据里查不到站点类型的行（实测 721 个丢包站点中有 4 个主数据缺档）归到这一档，
+#: 免得「ERA + NORMAL 之和 ≠ 全部」被当成统计错误。
+SITE_TYPE_UNKNOWN = "(unmapped)"
+#: 下拉里的档位顺序（与 GIS 页的 ERA/COOL/NORMAL 固定顺序一致，不按字母序）
+SITE_TYPE_ORDER = ["ERA", "COOL", "NORMAL"]
+#: 站点类型索引缓存：eflow_site 每小时刷新一次，10 分钟足够新
+_SITE_TYPE_TTL = 600
+
+# `Managed Element` 形如 'Aureus Mining(4255)'，末尾括号里是站点 ID
+_ME_CODE_RE = re.compile(r"\((\d+)\)\s*$")
+
 
 # ========== 简易 TTL 缓存 ==========
 _cache: dict = {}
@@ -76,7 +93,151 @@ def _median(xs) -> float:
     return round(med, 2)
 
 
+def _norm_site_type(value) -> str:
+    """站点类型归一：去空格 + 大写；空值统一成 `SITE_TYPE_UNKNOWN`。
+
+    只统一**同一档的写法**（`era` / ` ERA ` → `ERA`），**不做语义映射**
+    （不把 `REGULAR` 当 `NORMAL`）：`eflow_site.site_type` 的值域实测只有
+    ERA / COOL / NORMAL 三个值，多做映射反而会让页面档位与主数据对不上。
+    真出现没见过的取值时，它会作为一个新档位自动出现在下拉里 —— 这是有意的，
+    与 GIS 页 `gis.py::_site_type_stats()`「未知档按数量追加、不静默吞掉」同一取舍。
+    """
+    text = str(value or "").strip()
+    if not text:
+        return SITE_TYPE_UNKNOWN
+    # 哨兵档本身不大写：`SITE_TYPE_UNKNOWN` 是小写写法，转大写后会与
+    # `_attach_site_type` 写进行里的值对不上，筛「未匹配」会永远筛出 0 行。
+    if text.lower() == SITE_TYPE_UNKNOWN.lower():
+        return SITE_TYPE_UNKNOWN
+    return text.upper()
+
+
+def _site_type_index() -> dict:
+    """站点类型索引：`Site_Code` / 站点名（小写）→ ERA / COOL / NORMAL（TTL 600s）。
+
+    **为什么读主库实时表而不是 `site_pl_summary`**：那张表由 `packet_loss_sync`
+    每天 06:30 整表重写，本列若只靠同步落库，改完代码要等到次日早上才有值 ——
+    当天打开页面下拉是空的，看起来像功能没上线。改读 `eflow_site`（每小时刷新）
+    后站点属性变更也能立刻反映；丢了主数据关联的站点归 `SITE_TYPE_UNKNOWN`。
+
+    取数走 `get_raw_connection(APP_DB_PATH)`，SQLite / PG 双模都可用（PG 模式按
+    路径映射到 `app` schema），与 `packet_loss_service._load_site_info()` 同源。
+    """
+    cached = _cache_get("site_type_index", _SITE_TYPE_TTL)
+    if cached is not None:
+        return cached
+    index: dict = {"code": {}, "name": {}, "total": {}}
+    try:
+        conn = get_raw_connection(str(APP_DB_PATH), timeout=30)
+        try:
+            cur = conn.execute("SELECT site_id, site_name, site_type FROM eflow_site")
+            rows = cur.fetchall() if cur.description else []
+        finally:
+            conn.close()
+        for site_id, site_name, site_type in rows:
+            raw = str(site_type or "").strip()
+            st = _norm_site_type(site_type)
+            code = str(site_id or "").strip()
+            name = str(site_name or "").strip().lower()
+            if code:
+                index["code"][code] = st
+            if name:
+                index["name"][name] = st
+            # 主数据里每个档位的站点总数（下拉显示「被监控 / 主数据」用）。
+            # 空值不计入任何档位 —— 它不是一种「站点类型」，混进去会让各档之和
+            # 悄悄超过主数据总数。
+            if raw:
+                index["total"][st] = index["total"].get(st, 0) + 1
+    except Exception:  # noqa: BLE001 主数据取不到时降级为「全部未匹配」，不影响看板其它数字
+        logger.warning("[丢包看板] 站点类型读取失败（eflow_site），筛选降级为未匹配", exc_info=True)
+    return _cache_set("site_type_index", index)
+
+
+def _attach_site_type(rows: list) -> list:
+    """给汇总行补 `site_type` 字段（先按 Site_Code、再按站点名小写匹配）。"""
+    index = _site_type_index()
+    for row in rows:
+        code = str(row.get("Site_Code") or "").strip()
+        name = str(row.get("Site_Name") or "").strip().lower()
+        row["site_type"] = index["code"].get(code) or index["name"].get(name) or SITE_TYPE_UNKNOWN
+    return rows
+
+
+def _site_type_want(site_type: str):
+    """筛选参数 → 归一后的目标类型；`None` = 不筛选（全部）。
+
+    `""` 与 `all`（大小写不敏感）都表示「全部」—— 下钻弹窗与地图请求会原样
+    透传前端的当前选择，不能因为大小写差异把「全部」当成一个不存在的档位。
+    """
+    raw = str(site_type or "").strip()
+    if not raw or raw.lower() == "all":
+        return None
+    return _norm_site_type(raw)
+
+
+def _filter_site_type(rows: list, site_type: str) -> list:
+    want = _site_type_want(site_type)
+    return rows if want is None else [r for r in rows if r.get("site_type") == want]
+
+
+def _site_type_counts(rows: list) -> dict:
+    """各站点类型**被丢包监控**的站点数（下拉里的分子）。
+
+    ⚠️ 与上一版的关键差别（2026-11-17 用户提问「为什么没有 COOLI 的统计」）：
+    上一版只列出「有丢包读数」的档位，于是 COOL 直接从下拉里消失 —— 用户看到
+    站点类型里没有 COOLI，第一反应是「功能漏做了」。现在**主数据里存在的档位
+    一律列出**，没有读数就显示 0，并配合 `site_type_totals` 显示成 `0 / 64`：
+    数字本身就把「有这类站点、但没被丢包模板覆盖」讲清楚了。
+
+    实测（2026-11-17）：主数据 ERA 216 / COOL 64 / NORMAL 600，其中被丢包监控的
+    是 197 / 0 / 520 —— 64 个 COOL 站在 UME 网元清单里**都在**（moc=SDR），但
+    SDR / IPRAN 两个 IPPD 模板对它们一条读数都没有，所以不是筛选或关联的 bug。
+    """
+    monitored: dict = {}
+    for row in rows:
+        key = row.get("site_type") or SITE_TYPE_UNKNOWN
+        monitored[key] = monitored.get(key, 0) + 1
+    totals = _site_type_index().get("total", {})
+    # 顺序：ERA / COOL / NORMAL 固定在前（用户口径），其余档位按主数据/读数合并后
+    # 的集合追加，未匹配档恒排最后 —— 与 GIS 页 `_site_type_stats()` 同一取舍。
+    known = set(monitored) | set(totals)
+    order = [k for k in SITE_TYPE_ORDER if k in known]
+    order += sorted(k for k in known if k not in order and k != SITE_TYPE_UNKNOWN)
+    if SITE_TYPE_UNKNOWN in known:
+        order.append(SITE_TYPE_UNKNOWN)
+    return {k: monitored.get(k, 0) for k in order}
+
+
+def _site_type_totals(counts: dict) -> dict:
+    """各站点类型在主数据里的站点总数（下拉里的分母）。
+
+    未匹配档没有主数据分母，用它的读数站点数顶上，保证前端「分子/分母」恒有值、
+    不用在前端写 `?? 0` 这类会让缺数看起来像 0 的兜底。
+    """
+    totals = dict(_site_type_index().get("total", {}))
+    out = {}
+    for key, n in counts.items():
+        out[key] = totals.get(key, n) if key != SITE_TYPE_UNKNOWN else n
+    return out
+
+
+def _me_in_site_type(me, codes: set, names: set) -> bool:
+    """`Managed Element`（'Name(CODE)'）是否属于选定的站点集合。
+
+    与 overview 里 Top 站点的关联口径一致：优先取末尾 (CODE)，没有 code 或 code
+    不在集合里时退回按站点名（小写比较）。
+    """
+    text = str(me or "").strip()
+    m = _ME_CODE_RE.search(text)
+    if m:
+        if m.group(1) in codes:
+            return True
+        return text[:m.start()].strip().lower() in names
+    return text.lower() in names
+
+
 def _load_summary_rows():
+    """站点级汇总行（TTL 60s），每行补上 `site_type`（见 `_attach_site_type`）。"""
     cached = _cache_get("summary_rows")
     if cached is not None:
         return cached
@@ -90,7 +251,7 @@ def _load_summary_rows():
             'SELECT * FROM site_pl_summary ORDER BY "LastDayMaxPL" DESC'))
     finally:
         conn.close()
-    return _cache_set("summary_rows", rows)
+    return _cache_set("summary_rows", _attach_site_type(rows))
 
 
 def _load_meta():
@@ -110,15 +271,24 @@ def _load_meta():
 
 
 @router.get("/overview")
-def pl_overview():
-    """丢包看板总览：状态分布 / Top站点 / 区域分布 / 每日趋势"""
-    # 整页结果缓存：daily_trend 与 top_sites 要扫 packet_loss_data 最近 7 天 +
-    # 24 小时的全部读数，实测即便 site_pl_summary 已缓存，单次仍要 1.8s。
-    cached = _cache_get("overview", _OVERVIEW_TTL)
+def pl_overview(site_type: str = Query(
+        "", description="站点类型（eflow_site.site_type）：ERA / COOL / NORMAL；空或 all = 全部")):
+    """丢包看板总览：状态分布 / Top站点 / 区域分布 / 每日趋势
+
+    `site_type` 一参到底：状态卡、饼图、区域分布、每日趋势、Top 站点**同时**按它
+    过滤。刻意不做「只过滤状态卡」——同一页上一半数字筛过、一半没筛，用户对不上账
+    只会当成 bug（与「下钻 WHERE 必须与概览一致」同一条纪律）。
+    """
+    want = _site_type_want(site_type)
+    # 缓存按档位分开：不同 site_type 的整页聚合结果互相不能复用
+    cached = _cache_get(f"overview:{want or 'ALL'}", _OVERVIEW_TTL)
     if cached is not None:
         return cached
-    rows = _load_summary_rows()
+    rows_all = _load_summary_rows()
+    rows = _filter_site_type(rows_all, site_type)
     meta = _load_meta()
+    # 下拉的分子/分母只跟主数据走，与当前选中档位无关（切档后数字不变）
+    _st_counts = _site_type_counts(rows_all)
 
     status_counts = {s: 0 for s in STATUS_ORDER}
     region_counts: dict = {}
@@ -137,6 +307,11 @@ def pl_overview():
     status_pie = [{"status": s, "count": status_counts.get(s, 0),
                    "pct": round(status_counts.get(s, 0) / total_sites * 100, 2) if total_sites else 0}
                   for s in STATUS_ORDER]
+
+    # 按站点类型筛过的原始读数只算「选中的站点」：每日趋势与 Top 站点都要跟着筛，
+    # 否则图上写着「受影响 300 站」、而页面顶部说选中档位只有 200 站。
+    sel_codes = {str(r.get("Site_Code") or "").strip() for r in rows} if want else set()
+    sel_names = {str(r.get("Site_Name") or "").strip().lower() for r in rows} if want else set()
 
     # 中位数口径说明（避免两类陷阱）：
     # 1) 对所有读数取中位会被 0 拉成 0（逐小时 pl 约 59% 为 0，零膨胀）→ 失去意义。
@@ -171,6 +346,8 @@ def pl_overview():
                         'FROM packet_loss_data '
                         f'WHERE "Begin Time" >= \'{cutoff7}\' '
                         f'AND substr("Begin Time",1,10) < \'{today_str}\'')):
+                        if want is not None and not _me_in_site_type(r["me"], sel_codes, sel_names):
+                            continue
                         try:
                             pl_val = float(r["pl"] or 0)
                         except (TypeError, ValueError):
@@ -201,6 +378,8 @@ def pl_overview():
                         'SELECT "Managed Element" AS me, "Packet Loss Rate(%)" AS pl '
                         f'FROM packet_loss_data WHERE "Begin Time" >= \'{cutoff}\' AND "Begin Time" < \'{today_str}\'')):
                         me = r["me"]
+                        if want is not None and not _me_in_site_type(me, sel_codes, sel_names):
+                            continue
                         try:
                             pl_val = float(r["pl"] or 0)
                         except (TypeError, ValueError):
@@ -239,9 +418,16 @@ def pl_overview():
 
     # 要求3：Affected Sites = Critical + Major（严格按此定义，不含 Minor/Warning）
     affected_total = status_counts.get("Critical[>5]", 0) + status_counts.get("Major[1-5]", 0)
-    return _cache_set("overview", {
+    return _cache_set(f"overview:{want or 'ALL'}", {
         "generated_at": meta.get("last_sync_time"),
         "report_path": meta.get("report_path"),
+        # 当前生效的站点类型（"all" = 全部），前端据此回显下拉；
+        # site_type_counts / site_type_totals 恒为**不过滤**的分布，供下拉展示
+        # 「被丢包监控的站点数 / 主数据站点总数」—— COOL 档分子为 0 但有分母，
+        # 用户一眼能看到「这类站点存在、只是没有丢包读数」。
+        "site_type": want or "all",
+        "site_type_counts": _st_counts,
+        "site_type_totals": _site_type_totals(_st_counts),
         "total_sites": total_sites,
         "affected_sites": affected_total,
         "status_counts": status_counts,
@@ -257,7 +443,10 @@ def warmup() -> None:
     def _job() -> None:
         try:
             t0 = time.time()
-            pl_overview()
+            # ⚠ 必须显式传参：直接调用时省略参数拿到的是 FastAPI 的 `Query` 默认对象，
+            # 会被 `_site_type_want()` 当成一个真实的（不存在的）档位，预热就落到
+            # 「0 站点」的缓存键上 —— 白热一遍，用户首屏照样等冷算。
+            pl_overview(site_type="")
             logger.info("[丢包看板] 启动预热完成 %.0fms", (time.time() - t0) * 1000)
         except Exception:  # noqa: BLE001  预热失败不能影响启动
             logger.warning("[丢包看板] 启动预热失败（不影响启动）", exc_info=True)
@@ -266,9 +455,10 @@ def warmup() -> None:
 
 
 @router.get("/map-sites")
-def pl_map_sites(include_ok: bool = Query(False)):
+def pl_map_sites(include_ok: bool = Query(False),
+                 site_type: str = Query("", description="站点类型过滤：ERA / COOL / NORMAL；空或 all = 全部")):
     """地图点位：有经纬度的站点 + 丢包状态（仅返回有丢包的站点 + 可选全部）"""
-    rows = _load_summary_rows()
+    rows = _filter_site_type(_load_summary_rows(), site_type)
     sites = []
     for r in rows:
         st = r.get("FinalStatus") or "No Packet loss[<0.1]"
@@ -281,6 +471,7 @@ def pl_map_sites(include_ok: bool = Query(False)):
             "lat": r["latitude"], "lng": r["longitude"],
             "region": r.get("region") or "", "province_county": r.get("province_county") or "",
             "gateway": r.get("gateway") or "", "network_type": r.get("network_type") or "",
+            "site_type": r.get("site_type") or SITE_TYPE_UNKNOWN,
             "status": st, "last_day_max_pl": round(r.get("LastDayMaxPL") or 0, 2),
             "total_pl": round(r.get("TotalPL") or 0, 2),
             "affected_hours": r.get("AffectedHours") or 0,
@@ -289,9 +480,15 @@ def pl_map_sites(include_ok: bool = Query(False)):
 
 
 @router.get("/drilldown")
-def pl_drilldown(status: str = Query(""), search: str = Query(""), limit: int = Query(500)):
-    """下钻明细：按状态/关键字过滤站点汇总"""
-    rows = _load_summary_rows()
+def pl_drilldown(status: str = Query(""), search: str = Query(""),
+                 site_type: str = Query("", description="站点类型过滤：ERA / COOL / NORMAL；空或 all = 全部"),
+                 limit: int = Query(500)):
+    """下钻明细：按状态/关键字/站点类型过滤站点汇总
+
+    站点类型必须与 overview 的 `site_type` 同一口径（同一个 `_filter_site_type`），
+    否则「状态卡上的数字」与「点下去的行数」对不上。
+    """
+    rows = _filter_site_type(_load_summary_rows(), site_type)
     if status and status != "all":
         rows = [r for r in rows if r.get("FinalStatus") == status]
     if search:
@@ -402,6 +599,7 @@ def pl_site_detail(site_code: str = Query(""), site_name: str = Query("")):
         "status": summary.get("FinalStatus") or "No Packet loss[<0.1]",
         "region": summary.get("region") or "", "province_county": summary.get("province_county") or "",
         "gateway": summary.get("gateway") or "", "network_type": summary.get("network_type") or "",
+        "site_type": summary.get("site_type") or SITE_TYPE_UNKNOWN,
         "last_day_max_pl": round(summary.get("LastDayMaxPL") or 0, 2),
         "total_pl": round(summary.get("TotalPL") or 0, 2),
         "affected_hours": summary.get("AffectedHours") or 0,

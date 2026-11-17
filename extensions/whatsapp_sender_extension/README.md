@@ -120,12 +120,12 @@ my_app 的第二种 WhatsApp 发送通道：直接运行在**用户已登录的 
    分 时 日 月 周**（如 `0 8 * * *` = 每天 8 点、`0 */4 * * *` = 每 4 小时、
    `30 7 * * 1-5` = 工作日 7:30），侧栏提供快捷预设与人性化预览。
    扩展每 1 分钟检查一次，命中时刻直接从 `GET /api/whatsapp/outbox` 拉图发送；
-   若该时刻后端恰有待发作业则改为认领作业（避免双发）。默认 `0 3 * * *`，
-   与后端任务 `whatsapp_send_ext` 的 default_cron 一致。
-2. **后端任务触发（拉取/工人模型）**
-   后端任务 `whatsapp_send_ext`（WhatsApp 消息发送（扩展））运行时投递一个「待发作业」；
-   扩展每分钟检查并认领 `GET /api/whatsapp/ext/job`，发送完成后把结果回报给后端，
-   使任务在 `/myapp/?page=sync` 页面正常显示成功/失败/耗时。
+   若该时刻后端恰有待发作业则改为认领作业（避免双发）。默认 `0 3 * * *`。
+2. **后端作业触发（拉取/工人模型）**
+   **2026-11-16 起后端定时任务 `whatsapp_send_ext` 已下线**，后端不再投递发图作业；
+   但作业通道本身仍在（`GET /api/whatsapp/ext/job`），eFlow P1 告警的文本作业仍走它：
+   扩展每分钟检查并认领，发送完成后把结果回报给后端。人工投递发图作业可用
+   `python -m backend.services.whatsapp_ext_service`。
 3. **侧栏「立即发送」（手动）**
    不经过作业队列，直接从 `GET /api/whatsapp/outbox` 拉取最新图片清单并发送，便于测试。
 
@@ -145,7 +145,7 @@ my_app 的第二种 WhatsApp 发送通道：直接运行在**用户已登录的 
 
 | `kind` | 载荷 | 来源 | 发送路径 |
 | --- | --- | --- | --- |
-| `image` | `items`（图片清单 + 备注） | 定时发图任务 `whatsapp_send_ext` | `performSend` → 剪贴板粘图 |
+| `image` | `items`（图片清单 + 备注） | 人工投递的发图作业（原定时任务 `whatsapp_send_ext`，2026-11-16 下线） | `performSend` → 剪贴板粘图 |
 | `text` | `messages`（`[{tt_no, text}]`） | TT 告警推送任务 `tt_alarm_whatsapp_alert` | `simpleSendTextViaDebugger` |
 
 两条路径**共用同一套 CDP 可信事件与进群定序**（`simpleOpenChat`），差别只在载荷：
@@ -254,5 +254,6 @@ my_app 的第二种 WhatsApp 发送通道：直接运行在**用户已登录的 
 4. 残留清理验证：若输入框中曾出现残留备注，点「清空输入框」，确认输入框被清空、面板提示「已清空」。
 5. 定时验证：侧栏把调度设为最近的未来时刻（如每小时的第 22 分 `22 * * * *`），
    观察到点自动发送、`最近一次执行` 显示「定时发送」；
-   后端手动运行任务 `whatsapp_send_ext`，观察扩展自动认领并回报结果。
+   后端手动投递作业（`python -m backend.services.whatsapp_ext_service`，原任务 `whatsapp_send_ext`
+   已于 2026-11-16 下线），观察扩展自动认领并回报结果。
 6. 降级验证：停掉后端再发送 → 提示「后端不可达」；关闭 WhatsApp 标签页 → 提示「未找到打开的 WhatsApp Web 标签页」。

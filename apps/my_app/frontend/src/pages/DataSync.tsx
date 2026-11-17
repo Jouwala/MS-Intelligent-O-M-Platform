@@ -485,7 +485,7 @@ export default function DataSync() {
   // pendingAllToggle 记录「待确认的目标状态」：Switch 点击时只记录意图，
   // 由 Popconfirm 确认后真正提交；取消则丢弃（Switch 受控于 allEnabled，自动回弹）
   const [pendingAllToggle, setPendingAllToggle] = useState<boolean | null>(null)
-  // 主开关只统计**非豁免**任务：被豁免的任务按业务决定长期关闭（如 whatsapp_send_ext），
+  // 主开关只统计**非豁免**任务：被豁免的任务按业务决定长期关闭（如 whatsapp_send_baileys），
   // 若把它算进 every() 判定，开关会永远显示关闭——用户点开→后端写入→重新拉取后它依旧关闭
   // →当场弹回，表现为「怎么点都关着」（2026-10-05 排查）。豁免名单在后端单一真相源。
   const switchTasks = allTasks.filter(t => !t.master_switch_exempt)

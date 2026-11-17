@@ -267,7 +267,11 @@
      2026-11-11 起六个页签全部登记：gis / person / mwRealTime / ipt_power /
      olibTopo（IP，物理图）/ packet_loss（PL），后两个只勾 fo / bo / flm。
      ⚠️ 子键就是 page 值 —— 改上游 MAP_TABS 的 page 必须同步改矩阵子键，
-        否则 mapItems() 的过滤钩子拿不到匹配项，页签会静默消失。 */
+        否则 mapItems() 的过滤钩子拿不到匹配项，页签会静默消失。
+     ⚠️ 2026-11-17：上游把 olibTopo（IP 页签）从 MAP_TABS 移除、搬进 Knowledge Q&A
+        当第四页签「Topology」—— map-filter 钩子不再消费 olibTopo，但**不要删
+        这个子键**：qa-filter 钩子改按 ok('map','olibTopo') 放行 QA 的 topology
+        页签，本域仍是它的可见性真源。 */
   function mapPages() {
     return subs('map');
   }
@@ -279,6 +283,10 @@
        · rag    = 「Knowledge O&A」（本地知识问答）
        · assistant = 「Quick Q&A」（右下角悬浮问答助手，**不是页签**）
        · master_site = 「Master Site」（站点主数据，2026-11-11 起勾 fo / bo / flm）
+       · topology = 「Topology」（2026-11-17 起）＝ 原 GIS Map 的 IP 页签（olibTopo）
+          搬来的。⚠️ 它**不在本域**登记 —— qa-filter 钩子按 map 域的
+          ok('map','olibTopo') 放行（页签搬了家，可见性不换域），
+          所以 subs('qa') 里永远不会出现 topology，属预期。
      ⚠️ 服务端库矩阵里可能还残留旧的 qa/vmax 键（合并逻辑只补不删），
         qaItems() 已不再消费它，多返回一项也无副作用。 */
   function qaTabs() {

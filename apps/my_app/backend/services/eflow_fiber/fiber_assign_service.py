@@ -309,13 +309,26 @@ def apply_outcome(out: Dict[str, Any]) -> Dict[str, Any]:
     任务在 Task Manager 里全绿，实际 92.6% 的光纤告警没派出去，
     只有微信群在响 —— 典型的「显性失败改成了静默失败」。
 
-    三态规则（依次判定）：
+    四态规则（依次判定）：
       errors 非空                       → failed（有硬异常，如拉不到数据）
+      失败全部是 cmdb 站点缺档          → pending_cmdb（success 仍 True，见下段）
+        （且 cmdb 索引本身拉到了）
       due>0 且 handled==0 且 failed>0   → failed（本轮该派的全都派不出去）
       failed/due >= FAIL_RATIO_FAIL     → failed（大面积失败，如现场 92.6%）
       failed>0 但未达阈值               → partial（success 仍 True，靠 warnings
                                           走 task_runner 的「降级告警」通道）
       其余                              → ok
+
+    **pending_cmdb（2026-11-17 如意要求）**：站点解析失败是 **cmdb 数据缺档**
+    （ME / 站名在 cmdb 里找不到站点），不是任务出错。线上每 5 分钟把同一批告警
+    记成一条红色「Error」既误导人、也让真正的失败淹没在里面。所以当「本轮所有
+    失败都是站点解析失败」且「cmdb 索引本身拉到了（站点数 > 0）」时判
+    `pending_cmdb`：`success=True`、不写 `error`，提示文案留在 `message` 里，
+    Run History 按橙色「待补 cmdb」展示（前端读 `result_json.status`）。
+    两条护栏缺一不可：
+      * 混有建单失败（eFlow 侧真失败）→ 仍按下面的规则判 failed / partial；
+      * cmdb 索引为空（cmdb 没拉到）→ 仍判 failed：那是系统故障而不是站点缺档，
+        否则 cmdb 一挂整个任务就全绿了。
 
     handled 只算真正产生了结果的：assigned（建出 TT）+ merged（并入组长 TT）。
     skipped / waiting / expired / pending_manual 是**有意不派**，不算失败、
@@ -336,6 +349,15 @@ def apply_outcome(out: Dict[str, Any]) -> Dict[str, Any]:
         out["success"] = False
         if not out.get("error"):
             out["error"] = "；".join(str(e) for e in out["errors"] if e)
+        return out
+    # cmdb 站点缺档：本轮所有失败都是「ME/站名在 cmdb 里找不到站点」，且 cmdb 索引
+    # 本身是健康拉到的（条数 > 0）→ 这不是任务错误，是 cmdb 配置待补
+    # （2026-11-17 如意要求：提示要保留，但不能报错）。明细已进 message / fail_reasons。
+    if (out["failed"] > 0
+            and out["failed"] == out.get("failed_site_unresolved", 0)
+            and (out.get("cmdb_site_count") or 0) > 0):
+        out["status"] = "pending_cmdb"
+        out["success"] = True
         return out
     if due > 0 and handled == 0 and out["failed"] > 0:
         out["status"] = "failed"
@@ -409,7 +431,14 @@ def run_fiber_assign() -> Dict[str, Any]:
         # 2026-11-06 新增：原先失败原因只进 warnings（且仅 first_sight）与状态表，
         # 任务级 result 里拿不到「为什么这轮一条都没派成」，排障只能翻状态表。
         "fail_reasons": [],
-        # 三态结论：ok / partial / failed（见文末 success 判据注释）
+        # 站点解析失败（cmdb 无此站点）的失败条数 —— 与「建单失败」分开计数：
+        # 前者是 cmdb 数据缺档（配置问题），全部失败都是这一类时本轮判
+        # pending_cmdb 而不是 failed（2026-11-17 如意要求，见 apply_outcome）。
+        "failed_site_unresolved": 0,
+        # 本轮 cmdb 站点索引条数。0 = cmdb 没拉到 → 站点解析失败属系统故障，
+        # 不能归成「站点缺档」，apply_outcome 因此仍判 failed。
+        "cmdb_site_count": 0,
+        # 四态结论：ok / partial / failed / pending_cmdb（见 apply_outcome 的判据）
         "status": None,
     }
 
@@ -724,6 +753,10 @@ def run_fiber_assign() -> Dict[str, Any]:
                 reason_en = ("site resolution failed — no numeric site ID matched in cmdb"
                              f"{tried_txt}")
                 out["failed"] += 1
+                out["failed_site_unresolved"] += 1
+                # 记录 cmdb 索引规模：0 条说明 cmdb 没拉到，本轮「解析失败」是
+                # 系统故障而不是站点缺档（apply_outcome 据此决定判不判 failed）。
+                out["cmdb_site_count"] = index.loaded_count
                 if len(out["fail_reasons"]) < FAIL_REASON_CAP:
                     out["fail_reasons"].append(f"{akey}: {reason}")
                 base.update({"assign_status": "N", "last_error": reason})
@@ -904,9 +937,17 @@ def run_fiber_assign() -> Dict[str, Any]:
                     out["warnings"].append("WhatsApp 通报未在超时内获确认（不判失败，请人工核对群消息）")
 
         apply_outcome(out)
-        out["message"] = (f"演练" if CTX.dry_run else f"派单 {out['assigned']} 单") + \
-                         f"，跳过 {out['skipped']}，失败 {out['failed']}" + \
-                         (f"，缓派待人工 {out['pending_manual']}" if out["pending_manual"] else "")
+        summary = (("演练" if CTX.dry_run else f"派单 {out['assigned']} 单")
+                   + f"，跳过 {out['skipped']}，失败 {out['failed']}"
+                   + (f"，缓派待人工 {out['pending_manual']}" if out["pending_manual"] else ""))
+        if out["status"] == "pending_cmdb":
+            # 保留原有失败明细文案，但讲清「这不是任务错误」（2026-11-17 如意要求：
+            # 提示照旧可见，但不显示成 Error）。Run History 按橙色「待补 cmdb」渲染。
+            detail = "；".join((out.get("fail_reasons") or [])[:FAIL_REASON_CAP])
+            summary += ("｜cmdb 站点缺档：{n} 条待派告警未能自动派单".format(n=out["failed"])
+                        + "（不是任务错误，属 cmdb 配置待补；补齐站点/ME 映射后下一轮自动恢复）"
+                        + (f"：{detail}" if detail else ""))
+        out["message"] = summary
         return _finish()
     finally:
         try:

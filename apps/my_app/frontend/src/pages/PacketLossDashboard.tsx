@@ -4,7 +4,7 @@
 //   STATUS = 0~23 标志块（最近 3 天同整点丢包均 >0.5% 记 1）全 0 -> OK，否则 NOK
 //   FINAL_STATUS = STATUS=OK 强制 No Packet loss[<0.1]，否则按 Last 1 day Max PL 五级分类
 import { useEffect, useState, useMemo, useCallback } from 'react'
-import { Card, Row, Col, Tag, Spin, Alert, Empty, Table, Input, Button, Switch } from 'antd'
+import { Card, Row, Col, Tag, Spin, Alert, Empty, Table, Input, Button, Switch, Select } from 'antd'
 import {
   AlertOutlined, WarningOutlined, EnvironmentOutlined,
   PieChartOutlined, DashboardOutlined,
@@ -25,6 +25,12 @@ import { MapController } from './gismap/MapController'
    与人员页共用同一套组件 / 色表 / 县界缓存键，不另写一份。 */
 import { CountyLayer } from './personmap/CountyLayer'
 import { CountyLabels } from './personmap/CountyLabels'
+/* 地图图例浮层：与 GIS 地图 / 人员地图**同一份组件**（2026-11-16 用户要求
+   「图例放地图左下角，不要放在 Layers / Show OK sites 那一带」）。
+   样式、位置、置灰删除线、点击隐藏全在那一份里，本页只喂行数据 —— 不另写一份
+   图例，否则「图例怎么长的」又多出一个真相源。 */
+import MapLegendOverlay from './gismap/MapLegendOverlay'
+import type { MapLegendRow } from './gismap/MapLegendOverlay'
 import { useCountyTags } from './personmap/useCountyTags'
 import { countyOfOrg } from './iptPower/countySoc'
 import type { CountyBoundary } from './gismap/types'
@@ -60,6 +66,29 @@ const STATUS_SHORT: Record<string, string> = {
   'Warning[0.1-0.5]': 'Warning',
   'No Packet loss[<0.1]': 'OK',
 }
+/* OK 档在页面里被特殊对待两处（KPI 卡、「Show OK sites」开关/后端 include_ok），
+   图例要与开关联动，故给这个字符串一个名字，避免再手抄一遍。 */
+const OK_STATUS = 'No Packet loss[<0.1]'
+
+/* 站点类型（eflow_site.site_type）的「主数据缺档」哨兵值，与后端
+   `packet_loss_dashboard.SITE_TYPE_UNKNOWN` 逐字一致 —— 两边不一致，
+   选它就会永远筛出 0 行。真值只有 ERA / COOL / NORMAL 三档。 */
+const SITE_TYPE_UNKNOWN = '(unmapped)'
+/* 「全部」用的**非空**哨兵值（2026-11-17 修）。
+   此前用空串 `''` 当下拉的值，antd Select 把空串当成「没有值」处理 ——
+   一进页面下拉是**空白**的，用户只能看到下面的数字，分不清现在是全量还是某一档
+   （用户反馈「默认显示 Normal 站点的统计」就是这么来的：空白框 + 最大的那组数字）。
+   换成 'all' 后：后端 `_site_type_want()` 本来就认 'all' 为不过滤，
+   下拉也能正常回显「All (721/880)」。 */
+const ALL_SITE_TYPE = 'all'
+/* 默认视角 = NORMAL（2026-11-17 用户明确要求「默认要显示 Normal」）。
+   为什么固定成常量而不是从接口猜：默认值属于产品口径，跟着数据漂移会让人
+   「今天进页面是 NORMAL、明天变成 ERA」却找不到原因。
+   兜底见 `useEffect` 里的判断：若 NORMAL 档在某天真的变成 0 个被监控站点
+   （例如主数据改名/上游停采），自动退回「全部」，不让用户一进页面就是空页。 */
+const DEFAULT_SITE_TYPE = 'NORMAL'
+const siteTypeLabel = (value: string, t: (key: string) => string) =>
+  value === SITE_TYPE_UNKNOWN ? t('pl.siteType.unmapped') : value
 
 // 指标计算说明（鼠标悬停「?」查看，可复制）
 const getMetricExplain = (t: (key: string) => string): Record<string, string> => ({
@@ -71,6 +100,7 @@ const getMetricExplain = (t: (key: string) => string): Record<string, string> =>
   'No Packet loss': t('pl.explain.noPacketLoss'),
   'Affected Sites': t('pl.explain.affectedSites'),
   'Data Granularity': t('pl.explain.granularity'),
+  'Site Type': t('pl.explain.siteType'),
 })
 
 // 拓扑视图：按 backhaul/transport 类型（gateway 字段）聚合站点，
@@ -212,6 +242,8 @@ const getUniqueFilters = (data: any[], key: string) => {
 interface PlSite {
   site_name: string; site_code: string; lat: number; lng: number
   region: string; province_county: string; gateway: string; network_type: string
+  /** eflow_site.site_type：ERA / NORMAL / …（主数据缺档时为 `'(unmapped)'`） */
+  site_type?: string
   status: string; last_day_max_pl: number; total_pl: number; affected_hours: number
 }
 
@@ -235,6 +267,13 @@ export default function PacketLossDashboard() {
   const [mapSites, setMapSites] = useState<PlSite[]>([])
   // 默认显示 OK 站点（include_ok=true），地图展示全量有坐标站点
   const [includeOk, setIncludeOk] = useState(true)
+  /* 站点类型过滤（2026-11-17 用户要求「在 Packet Loss Status 添加站点类型过滤」）：
+     `ALL_SITE_TYPE`（'all'）= 全部，其余为 eflow_site.site_type 的真值（ERA / COOL / NORMAL）。
+     **一参到底** —— 状态卡 / 饼图 / 区域 / 每日趋势 / Top 站点 / 地图 / 下钻全部
+     跟着它走；只筛一半的话同一页数字互相对不上，用户会当成 bug。
+     选项来自接口的 site_type_counts + site_type_totals：主数据里有的档位全列，
+     没有丢包读数的（如 COOL 0/64）显示出来但置灰，见 `siteTypeOptions`。 */
+  const [siteType, setSiteType] = useState(DEFAULT_SITE_TYPE)
   const [hiddenStatuses, setHiddenStatuses] = useState<Set<string>>(new Set())
   // 拓扑显示开关：开启后复用 GIS Map 的真实拓扑链路（/api/gis/topology），按传输类型着色
   const [showTopology, setShowTopology] = useState(false)
@@ -280,6 +319,25 @@ export default function PacketLossDashboard() {
     })
   }, [])
 
+  /* 图例行点击（2026-11-16）：前四档就是客户端的显隐切换；OK 档特殊 ——
+     「Show OK sites」开关关着时后端**根本没返回** OK 站点（map-sites?include_ok=false），
+     此时点图例 OK 行不会有任何圆点出现，是个「点了没反应」的死按钮。
+     故这条路径改把开关重新打开（与手动勾选开关等价），并清掉图例层的隐藏标记。
+     ⚠️ 打开开关会重新取 map-sites（includeOk 是取数依赖），页面会有一次加载态 ——
+        与用户直接去点那个开关的代价完全相同，不是本改动引入的新行为。 */
+  const toggleLegendStatus = useCallback((st: string) => {
+    if (st === OK_STATUS && !includeOk) {
+      setIncludeOk(true)
+      setHiddenStatuses(prev => {
+        const next = new Set(prev)
+        next.delete(st)
+        return next
+      })
+      return
+    }
+    toggleStatusVisible(st)
+  }, [includeOk, toggleStatusVisible])
+
   // 下钻
   const [drillOpen, setDrillOpen] = useState(false)
   const [drillLoading, setDrillLoading] = useState(false)
@@ -301,18 +359,30 @@ export default function PacketLossDashboard() {
   useEffect(() => {
     setLoading(true)
     setError(null)
+    // 缓存键必须带 siteType：不带的话切「全部 → ERA」会直接命中全量缓存，
+    // 表现为「下拉变了、数字没变」。
     Promise.all([
-      cachedGet('pl:overview', () => api.get('/packet-loss-dashboard/overview')),
-      cachedGet(`pl:map:${includeOk}`, () => api.get('/packet-loss-dashboard/map-sites', { params: { include_ok: includeOk } })),
+      cachedGet(`pl:overview:${siteType}`, () => api.get('/packet-loss-dashboard/overview', { params: { site_type: siteType } })),
+      cachedGet(`pl:map:${includeOk}:${siteType}`, () => api.get('/packet-loss-dashboard/map-sites', { params: { include_ok: includeOk, site_type: siteType } })),
     ])
       .then(([ov, mp]) => {
+        /* 默认档位兜底：NORMAL 若某天变成「0 个被监控站点」（主数据改名、上游停采
+           等），直接停在这一档会让用户一进页面就是空页 + 一堆 0。此时自动退回
+           「全部」，并在控制台留一行原因 —— 静默改口径比空页更难排查。
+           只在**当前就是某一具体档位**时判断，避免和用户手动选档互相打架。 */
+        const counts = ov.data?.site_type_counts || {}
+        if (siteType !== ALL_SITE_TYPE && (counts[siteType] ?? 0) === 0) {
+          console.warn(`[packet_loss] 站点类型 ${siteType} 没有丢包读数，自动退回 All`)
+          setSiteType(ALL_SITE_TYPE)
+          return
+        }
         setData(ov.data)
         setMapSites(mp.data.sites || [])
         setError(null)
       })
       .catch(err => { console.error('Packet Loss API error:', err); setError(err.message || 'Failed to load') })
       .finally(() => setLoading(false))
-  }, [includeOk])
+  }, [includeOk, siteType])
 
   const openDrilldown = useCallback((trigger: any, status: string, title: string) => {
     let anchor: { x: number; y: number } | null = null
@@ -326,15 +396,16 @@ export default function PacketLossDashboard() {
     setDrillLoading(true)
     setDrillData([])
     setDrillSearch('')
-    setDrillTitle(title)
-    api.get('/packet-loss-dashboard/drilldown', { params: { status, limit: 800 } })
+    // 标题带上当前站点类型：弹窗里的行数必须能与刚才点的那张卡对上（同一档位）
+    setDrillTitle(`${title}${siteType !== ALL_SITE_TYPE ? ` · ${t('pl.siteType')} = ${siteTypeLabel(siteType, t)}` : ''}`)
+    api.get('/packet-loss-dashboard/drilldown', { params: { status, limit: 800, site_type: siteType } })
       .then(res => {
         setDrillData(res.data.data || [])
         setDrillTotal(res.data.total || 0)
       })
       .catch(() => setDrillTitle('Failed to load data'))
       .finally(() => setDrillLoading(false))
-  }, [])
+  }, [siteType, t])
 
   // 站点下钻：锚点取该站点在屏幕上的投影位置（CircleMarker onClick 无事件对象，
   // 用 mapInstance.latLngToContainerPoint + 容器 rect 换算成 clientX/Y），
@@ -648,8 +719,66 @@ export default function PacketLossDashboard() {
   const fmt = (n: number) => (n ?? 0).toLocaleString(numLocale(locale))
   const chartClick = (titlePrefix: string) => (p: any) => openDrilldown(p, p.name, `${titlePrefix} = ${STATUS_SHORT[p.name] || p.name}`)
 
+  /* 站点类型下拉（2026-11-17 用户提问后改版）：两个数都来自接口、且**恒为全量分布**
+     （切档后不跟着变小，否则会让人以为 TOTAL 丢了站点）：
+       · site_type_counts = 被丢包监控的站点数
+       · site_type_totals = 主数据里的站点总数
+     下拉因此显示成 `COOL (0 / 64)` —— COOLI 有自己的选项、有分母，用户一眼就知道
+     「这类站点存在、主数据里有 64 个，只是最近 7 天一条丢包读数都没有」，
+     而不是「功能漏做了」或「筛选把我筛没了」。
+     分子为 0 的档位置灰（`disabled`）：选中它必然是一页空图，点进去只会被当成 bug。
+     数据一旦有了读数，分子 > 0 自动解禁，不需要回来改代码。 */
+  const siteTypeCounts: Record<string, number> = data.site_type_counts || {}
+  const siteTypeTotals: Record<string, number> = data.site_type_totals || {}
+  const countLabel = (k: string) =>
+    `${siteTypeLabel(k, t)} (${siteTypeCounts[k] ?? 0} / ${siteTypeTotals[k] ?? siteTypeCounts[k] ?? 0})`
+  /* 「全部」的分母只加**主数据里真有类型**的档位（排除未匹配档）：
+     未匹配那 4 个站本来就不在主数据里，加进去会变成 721/884，
+     而主数据实际只有 880 站 —— 分母对不上是最容易被当成「统计错了」的细节。 */
+  const allTotal = Object.entries(siteTypeTotals)
+    .filter(([k]) => k !== SITE_TYPE_UNKNOWN)
+    .reduce((a, [, n]) => a + (n || 0), 0)
+  const siteTypeOptions = [
+    {
+      value: ALL_SITE_TYPE,
+      label: `${t('pl.siteType.all')} (${Object.values(siteTypeCounts).reduce((a, b) => a + (b || 0), 0)} / ${allTotal})`,
+    },
+    ...Object.keys(siteTypeCounts).map(k => ({
+      value: k,
+      label: countLabel(k),
+      disabled: (siteTypeCounts[k] ?? 0) === 0,
+    })),
+  ]
+
+  /* 地图图例行（2026-11-16 用户要求「图例放地图左下角，不要放在 Layers / Show OK sites」）。
+     数字取 status_counts —— 与顶部六张状态卡、Loss Distribution 饼图**同一份口径**
+     （含无坐标站点；地图圆点只画有坐标的站点，两者常差几个，口径写在 pl.legendNote 的 ⓘ）。
+     hidden 同时接 hiddenStatuses 与 includeOk：开关关掉时图例必须如实置灰 OK 行，
+     否则图例显示 438、地图上一个 OK 圆点都没有，点它还没反应 —— 比不放图例更糟。 */
+  const legendRows: MapLegendRow[] = STATUS_ORDER.map(st => {
+    const hidden = st === OK_STATUS ? !includeOk || hiddenStatuses.has(st) : hiddenStatuses.has(st)
+    return {
+      id: st,
+      color: STATUS_COLORS[st],
+      label: STATUS_SHORT[st],
+      count: Number(sc[st] || 0),
+      hidden,
+      hiddenNote: t('gis.legend.hidden'),
+      hint: hidden ? t('pl.showOnMap') : t('pl.hideOnMap'),
+      onClick: () => toggleLegendStatus(st),
+    }
+  })
+
   return (
-    <div style={{ ...pageWrap, display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+    /* ⚠️ flexShrink: 0 是修「Top Sites 只剩一行」的关键（2026-11-16 用户反馈）：
+       `?embed=1`（门户 iframe 与直开内嵌地址都是）时 App 的 Content 被钉成
+       height:100%，本页根节点是它的 flex 子项、默认 flex-shrink:1 —— 内容高于视口时
+       整页被**压进一屏**而不是溢出滚动：头部横幅被压到 5px、Top Sites 卡片只剩 31px
+       （卡片 overflow:hidden 把 380px 的画布裁掉），看起来就是「Top Sites 只有一行」。
+       固定为不可收缩后，页面按内容自然高度排版、由 main 滚动，与不带 embed 的直开完全一致
+       （实测 1600×1200：地图卡 918、Top Sites 443、main 可滚）；门户里那套
+       PL_MAP_ONLY_CSS 用 !important 把高度改回 100%，不受本行影响。 */
+    <div style={{ ...pageWrap, display: 'flex', flexDirection: 'column', gap: '0.75rem', flexShrink: 0 }}>
       {/* 1. 头部横幅（全宽） */}
       <Card size="small" style={{
         ...cardStyle,
@@ -671,12 +800,48 @@ export default function PacketLossDashboard() {
               <Tag color="cyan" style={{ borderRadius: 'var(--wh-radius-lg)', fontWeight: 600 }}>{t('pl.granularity')}</Tag>
             </ExplainPopover>
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--wh-space-md)', fontSize: '0.75rem', color: WH.textDim }}>
-            <ClockCircleOutlined />
-            <span>{t('pl.updated')}: {data.generated_at ? String(data.generated_at).replace('T', ' ').slice(0, 19) : 'N/A'}</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--wh-space-md)', flexWrap: 'wrap', fontSize: '0.75rem', color: WH.textDim }}>
+            {/* 站点类型过滤（2026-11-17 用户要求「在 Packet Loss Status 添加站点类型过滤」）：
+                放在 Packet Loss Status 这一条横幅里，让它一眼就是「整页现在的视角」，
+                而不是地图上的一个图层开关。选择即刻生效（整页重取数）。 */}
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              <span style={{ fontSize: '0.75rem', color: WH.textMuted, fontWeight: 600 }}>{t('pl.siteType')}</span>
+              <ExplainIcon text={METRIC_EXPLAIN['Site Type']} placement="bottom" />
+              <Select
+                size="small"
+                value={siteType}
+                onChange={setSiteType}
+                options={siteTypeOptions}
+                style={{ minWidth: 132 }}
+                popupMatchSelectWidth={false}
+                aria-label={t('pl.siteType')}
+              />
+            </span>
+            {/* 时钟与时间文本必须同组：拆成 flex 的两个子项时，窄屏换行会把图标单独
+                甩到上一行，看起来像「多出一个图标」。 */}
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              <ClockCircleOutlined />
+              <span>{t('pl.updated')}: {data.generated_at ? String(data.generated_at).replace('T', ' ').slice(0, 19) : 'N/A'}</span>
+            </span>
           </div>
         </div>
       </Card>
+
+      {/* 兜底：所选站点类型在窗口内一个读数都没有时，页面下半部分全是 0 和空图，
+          看起来就像坏了。这种情况通常只会通过 URL 直传参数触发（下拉里 0 读数的
+          档位已置灰），仍要明确说明「是这类站点没有丢包读数，不是筛选出错」。
+          按 AGENTS.md 三.3b，这属于「数据不全」的异常而不是「口径解释」，故常驻。 */}
+      {data.total_sites === 0 && (
+        <Alert
+          type="warning"
+          showIcon
+          message={t('pl.siteType.emptyTitle', { type: siteTypeLabel(siteType, t) })}
+          description={t('pl.siteType.emptyDesc', {
+            monitored: siteTypeCounts[siteType] ?? 0,
+            total: siteTypeTotals[siteType] ?? 0,
+          })}
+        />
+      )}
 
       {/* 2. 核心指标卡片 */}
       <Row gutter={[12, 12]}>
@@ -718,64 +883,85 @@ export default function PacketLossDashboard() {
             </span>
           }>
           {/* 2026-09-29：滚轮即缩放，不再区分是否内嵌（与 GISMap.tsx 同步改动）。
-              Leaflet 默认 scrollWheelZoom=true，故不再显式传参。
-              桌面 flex:1 填满左卡（大地图展示区）；移动端固定 55vh。 */}
-          <MapContainer center={PL_MAP_CENTER} zoom={mapZoom} style={isMobile
-            ? { height: '55vh', minHeight: '18.75rem', width: '100%', background: 'var(--wh-page-bg)', borderRadius: 'var(--wh-radius-md)' }
-            : { flex: 1, minHeight: '26rem', width: '100%', background: 'var(--wh-page-bg)', borderRadius: 'var(--wh-radius-md)' }}>
-            {/* 档位同步：MapContainer 挂载后不再吃 zoom prop，换档由它 setView。
-                不传 shift*：本页无左右浮层遮挡问题，不需要 GIS 页那套像素平移。 */}
-            <MapController center={PL_MAP_CENTER} zoom={mapZoom} />
-            {/* 递出地图实例给下方控制行的缩放/复位按钮，并移除默认左上 zoom 控件 */}
-            <MapControlsBridge onMap={setMapInstance} />
-            <PmtilesLayer
-              url={BASEMAP_PMTILES_URL}
-              isDark={isDark}
-              maxZoom={BASEMAP_MAX_ZOOM}
-              showLabels={showLabels}
-              showRoads={showRoads}
-            />
-            {/* 县类别色底图：与人员页同一组件（装饰层 interactive:false，不抢
-                站点圆点的点击）。先于拓扑线与站点圆点渲染，保证后两者压在其上。
-                2026-11-11 用户「州的颜色的透明度改成 80%」→ **不透明度 0.2**
-                （共用 COUNTY_FILL_OPACITY 的 0.8 是「不透明度 80%」，语义相反，
-                不能直接改那个常量 —— 人员页仍要 0.8）。填充变淡后县名标签的
-                深色主题对比度由下方 labelClass="pl-county-label" 配套处理。 */}
-            <CountyLayer counties={counties} countyColor={countyColor} isDark={isDark} fillOpacity={0.2} />
-            {/* 拓扑连线：复用 GIS Map 真实链路，按传输类型着色（MW / IPRAN 等）。
-                先白色描边(casing)增强对比，再画彩色线；hub 链路更粗。 */}
-            {showTopology && topology.edges.map((e, i) => (
-              <Polyline key={`topo-c-${i}`} positions={e.positions}
-                pathOptions={{ color: '#ffffff', weight: e.isHub ? 5 : 3, opacity: 0.3, interactive: false }} />
-            ))}
-            {showTopology && topology.edges.map((e, i) => (
-              <Polyline key={`topo-${i}`} positions={e.positions}
-                pathOptions={{ color: e.color, weight: e.isHub ? 3 : 1.8, opacity: 0.9, interactive: false }} />
-            ))}
-            {visibleSites.map(s => (
-              <CircleMarker key={`${s.site_name}|${s.site_code}`} center={[s.lat, s.lng]}
-                radius={Math.min(12, 5 + Math.log1p(s.last_day_max_pl) * 2)}
-                fillColor={STATUS_COLORS[s.status] || WH.teal} color="#fff" weight={1} fillOpacity={0.85}
-                onClick={() => openSiteDrilldown(s)} />
-            ))}
-            {/* 县名 + 可见站点数标签：紧凑样式（11px/10px、pointer-events:none，
-                不拦圆点 Popup 的点击），数字随图例过滤联动；避让随换档（mapZoom）
-                重算一次，手动滚轮缩放后标签跟着县走不重排 —— 与人员 / ipt 页同一取舍。
-                仅宽视口渲染（showCountyLabels）：窄画布装不下 15 个全名标签，
-                实测重叠不可读，故窄图只留县底色（见 showCountyLabels 注释）。 */}
-            {showCountyLabels && (
-              <CountyLabels
-                counties={counties}
-                typeLines={NO_COUNTY_DETAILS}
-                center={PL_MAP_CENTER}
-                zoom={mapZoom}
-                displayCount={countySiteCounts}
-                compact
-                tipKey="pl.countyTagTip"
-                labelClass="pl-county-label"
+              Leaflet 默认 scrollWheelZoom=true，故不再显式传参。 */}
+          {/* 地图画布 + 图例浮层共用一个**定位容器**（2026-11-16）：
+              图例浮层是 position:absolute，必须有 position:relative 的父级 ——
+              与 GISMap / PersonMapView 同一结构。容器桌面端 flex:1 填满左卡剩余高度、
+              移动端固定 55vh，地图本身在容器内 flex:1，画布高度与改造前
+              「MapContainer 直接当 flex 子项」完全相同，不动其它布局。 */}
+          <div style={{
+            position: 'relative',
+            display: 'flex', flexDirection: 'column',
+            width: '100%',
+            ...(isMobile
+              ? { height: '55vh', minHeight: '18.75rem' }
+              : { flex: 1, minHeight: '26rem' }),
+          }}>
+            <MapContainer center={PL_MAP_CENTER} zoom={mapZoom} style={{ flex: 1, minHeight: 0, width: '100%', background: 'var(--wh-page-bg)', borderRadius: 'var(--wh-radius-md)' }}>
+              {/* 档位同步：MapContainer 挂载后不再吃 zoom prop，换档由它 setView。
+                  不传 shift*：本页无左右浮层遮挡问题，不需要 GIS 页那套像素平移。 */}
+              <MapController center={PL_MAP_CENTER} zoom={mapZoom} />
+              {/* 递出地图实例给下方控制行的缩放/复位按钮，并移除默认左上 zoom 控件 */}
+              <MapControlsBridge onMap={setMapInstance} />
+              <PmtilesLayer
+                url={BASEMAP_PMTILES_URL}
+                isDark={isDark}
+                maxZoom={BASEMAP_MAX_ZOOM}
+                showLabels={showLabels}
+                showRoads={showRoads}
               />
-            )}
-          </MapContainer>
+              {/* 县类别色底图：与人员页同一组件（装饰层 interactive:false，不抢
+                  站点圆点的点击）。先于拓扑线与站点圆点渲染，保证后两者压在其上。
+                  2026-11-11 用户「州的颜色的透明度改成 80%」→ **不透明度 0.2**
+                  （共用 COUNTY_FILL_OPACITY 的 0.8 是「不透明度 80%」，语义相反，
+                  不能直接改那个常量 —— 人员页仍要 0.8）。填充变淡后县名标签的
+                  深色主题对比度由下方 labelClass="pl-county-label" 配套处理。 */}
+              <CountyLayer counties={counties} countyColor={countyColor} isDark={isDark} fillOpacity={0.2} />
+              {/* 拓扑连线：复用 GIS Map 真实链路，按传输类型着色（MW / IPRAN 等）。
+                  先白色描边(casing)增强对比，再画彩色线；hub 链路更粗。 */}
+              {showTopology && topology.edges.map((e, i) => (
+                <Polyline key={`topo-c-${i}`} positions={e.positions}
+                  pathOptions={{ color: '#ffffff', weight: e.isHub ? 5 : 3, opacity: 0.3, interactive: false }} />
+              ))}
+              {showTopology && topology.edges.map((e, i) => (
+                <Polyline key={`topo-${i}`} positions={e.positions}
+                  pathOptions={{ color: e.color, weight: e.isHub ? 3 : 1.8, opacity: 0.9, interactive: false }} />
+              ))}
+              {visibleSites.map(s => (
+                <CircleMarker key={`${s.site_name}|${s.site_code}`} center={[s.lat, s.lng]}
+                  radius={Math.min(12, 5 + Math.log1p(s.last_day_max_pl) * 2)}
+                  fillColor={STATUS_COLORS[s.status] || WH.teal} color="#fff" weight={1} fillOpacity={0.85}
+                  onClick={() => openSiteDrilldown(s)} />
+              ))}
+              {/* 县名 + 可见站点数标签：紧凑样式（11px/10px、pointer-events:none，
+                  不拦圆点 Popup 的点击），数字随图例过滤联动；避让随换档（mapZoom）
+                  重算一次，手动滚轮缩放后标签跟着县走不重排 —— 与人员 / ipt 页同一取舍。
+                  仅宽视口渲染（showCountyLabels）：窄画布装不下 15 个全名标签，
+                  实测重叠不可读，故窄图只留县底色（见 showCountyLabels 注释）。 */}
+              {showCountyLabels && (
+                <CountyLabels
+                  counties={counties}
+                  typeLines={NO_COUNTY_DETAILS}
+                  center={PL_MAP_CENTER}
+                  zoom={mapZoom}
+                  displayCount={countySiteCounts}
+                  compact
+                  tipKey="pl.countyTagTip"
+                  labelClass="pl-county-label"
+                />
+              )}
+            </MapContainer>
+            {/* 图例浮层（2026-11-16 用户要求「放地图左下角，不要放在 Layers / Show OK sites
+                那个地方」）：组件、位置、置灰删除线、点击隐藏全部复用 gismap/MapLegendOverlay，
+                与 GIS 地图 / 人员地图逐字同款，不另写一份。
+                放在地图容器**之后**：浮层 z-index 与 Leaflet 控件同为 1000，
+                同层时 DOM 靠后者胜，才压得住站点圆点(600)与县名标注(650)。 */}
+            <MapLegendOverlay
+              title={t('gis.legendTitle')}
+              rows={legendRows}
+              note={t('pl.legendNote')}
+            />
+          </div>
           {showTopology && topology.gateways.length > 0 && (
             <div style={{ display: 'flex', gap: 'var(--wh-space-sm)', marginTop: '0.375rem', marginBottom: '0.125rem', flexWrap: 'wrap', alignItems: 'center' }}>
               <span style={{ fontSize: '0.6875rem', color: WH.textMuted, fontWeight: 600 }}>{t('pl.topoLabel')}:</span>
@@ -788,8 +974,11 @@ export default function PacketLossDashboard() {
               <span style={{ fontSize: '0.625rem', color: WH.textDim }}>{t('pl.topoHint')}</span>
             </div>
           )}
-          {/* 控制行（线框图）：左 = Layers · Topology · Site Filters，右 = Map Controls。
-              图层开关由地图内浮层改为行内复选框，地图画面更干净；缩放/复位集中右侧。 */}
+          {/* 控制行：左 = Layers · Topology · Show OK sites，右 = Map Controls。
+              ⚠️ 2026-11-16 用户要求：**状态图例已移到地图左下角**（见上方
+              MapLegendOverlay），这里不再重复一排色点 —— 同一件事两个位置，
+              用户会以为是两套开关。本行只留「看什么图层」和「地图怎么动」。
+              缩放/复位按钮在 MapContainer 之外，靠 MapControlsBridge 递出的实例驱动。 */}
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--wh-space-sm)', marginTop: 'var(--wh-space-sm)' }}>
             <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--wh-space-md)' }}>
               <span style={{ display: 'flex', alignItems: 'center', gap: 'var(--wh-space-sm)' }}>
@@ -811,25 +1000,6 @@ export default function PacketLossDashboard() {
               <span style={{ display: 'flex', alignItems: 'center', gap: 'var(--wh-space-sm)' }}>
                 <span style={{ fontSize: '0.6875rem', color: WH.textMuted }}>{t('pl.showOk')}</span>
                 <Switch size="small" checked={includeOk} onChange={setIncludeOk} />
-              </span>
-              <span style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
-                {STATUS_ORDER.map(st => {
-                  const hidden = hiddenStatuses.has(st)
-                  return (
-                    <span key={st} onClick={() => toggleStatusVisible(st)}
-                      title={hidden ? t('pl.showOnMap') : t('pl.hideOnMap')}
-                      style={{
-                        fontSize: '0.6875rem', cursor: 'pointer', userSelect: 'none',
-                        color: hidden ? WH.textDim : WH.textMuted,
-                        opacity: hidden ? 0.45 : 1,
-                        textDecoration: hidden ? 'line-through' : 'none',
-                        display: 'flex', alignItems: 'center', gap: 4,
-                      }}>
-                      <span style={{ width: 10, height: 10, borderRadius: '50%', background: STATUS_COLORS[st], display: 'inline-block', opacity: hidden ? 0.3 : 1 }} />
-                      {STATUS_SHORT[st]}
-                    </span>
-                  )
-                })}
               </span>
             </div>
             <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
@@ -929,7 +1099,7 @@ export default function PacketLossDashboard() {
                 </span>
               </ExplainPopover>
               <span style={{ fontSize: '0.75rem', color: WH.textDim }}>
-                {t('pl.popup.region')}: {siteDetail.site.region || '-'} / {siteDetail.site.province_county || '-'} · {t('pl.popup.gateway')}: {siteDetail.site.gateway || '-'} · {t('pl.popup.network')}: {siteDetail.site.network_type || '-'}
+                {t('pl.popup.region')}: {siteDetail.site.region || '-'} / {siteDetail.site.province_county || '-'} · {t('pl.popup.gateway')}: {siteDetail.site.gateway || '-'} · {t('pl.popup.network')}: {siteDetail.site.network_type || '-'} · {t('pl.siteType')}: {siteTypeLabel(siteDetail.site.site_type || '', t) || '-'}
               </span>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, margin: '0.25rem 0' }}>

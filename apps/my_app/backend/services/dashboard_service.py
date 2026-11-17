@@ -747,7 +747,7 @@ def _fetch_widget(w: Dict[str, Any],
     """取单个组件数据；失败只标记该组件，不拖垮整页。"""
     raw_db = w.get("db", "")
     db = resolve_db(raw_db)
-    from backend.services import ipran_me_alias as _me_alias
+    from backend.services.ipran import ipran_me_alias as _me_alias
     title = w["title"]
     if db == LOCAL_IPRAN_PG:
         title = _me_alias.apply_text(title)
@@ -777,7 +777,7 @@ def _fetch_widget(w: Dict[str, Any],
 
     limit = w.get("limit") or DEFAULT_LIMIT
     # IP RAN 看板：ME/端口可能在 UME 侧改过名（对象 id 不变），查询前把生成时
-    # 留下的旧字面量替换成当前名字；详见 backend/services/ipran_me_alias.py。
+    # 留下的旧字面量替换成当前名字；详见 backend/services/ipran/ipran_me_alias.py。
     src_sql = w["sql"]
     if db == LOCAL_IPRAN_PG:
         src_sql = _me_alias.apply_sql(src_sql)

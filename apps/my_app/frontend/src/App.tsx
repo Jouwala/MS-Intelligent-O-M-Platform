@@ -81,6 +81,7 @@ import {
 } from './api'
 import PortalUserMenu from './components/PortalUserMenu'
 import PageErrorBoundary from './components/PageErrorBoundary'
+import { isEmbedMode } from './embedMode'
 
 // 路由级代码分割：每个页面独立成 chunk，按需加载，首屏不再一次性下载全部页面
 const TableBrowser = lazy(() => import('./pages/TableBrowser'))
@@ -126,8 +127,10 @@ const EmailReports = lazy(() => import('./pages/EmailReports'))
 const MwUmeDashboard = lazy(() => import('./pages/MwUmeDashboard'))
 // IP RAN 光纤拓扑（?page=ipran_topo）：UME 层 lid=1293626099480711168 的网元+链路+告警
 const IpranTopo = lazy(() => import('./pages/IpranTopo'))
-// OLIB FO 网络拓扑（?page=olibTopo）：PDF 两页原图 + 553 个提取站点，纯静态参考页
+// OLIB FO 网络拓扑（?page=olibTopo）：PDF 两页原图 + 667 个提取站点，纯静态参考页
 const NetworkTopology = lazy(() => import('./pages/NetworkTopology'))
+// OLIB 地理网络拓扑（?page=olibTopo_v2）：真实 GPS + 自托管底图 + 骨干链路；v1 保持不动
+const NetworkTopologyV2 = lazy(() => import('./pages/NetworkTopologyV2'))
 const MwRealTimeDashboard = lazy(() => import('./pages/MwRealTimeDashboard'))
 const PortalLogin = lazy(() => import('./pages/PortalLogin'))
 const EflowQa = lazy(() => import('./pages/EflowQa'))
@@ -202,9 +205,9 @@ const FINEBI_PAGE_TO_SLUG: Record<string, string> = Object.fromEntries(
   FINEBI_BOARDS.map((b) => [`finebi_${b.slug}`, b.slug]),
 )
 
-type PageKey = 'overview' | 'tables' | 'upload' | 'dashboard' | 'alarm' | 'ttwo' | 'v1_ttwo' | 'tt' | 'wo' | 'gis' | 'realtime_alarm' | 'packet_loss' | 'archive' | 'sync' | 'warehouse' | 'sp_material' | 'sp_details' | 'sp_report' | 'com_report' | 'warehouse_summary' | 'ms_wo_sla' | 'ms_contract_kpi' | 'battery' | 'person' | 'settings' | 'ip_trace' | 'incident_overview' | 'nur' | 'ms_sla' | 'ms_nur_only' | 'ms_sla_only' | 'alarmManagement' | 'cxoDashboard' | 'vmaxCxoDashboard' | 'vmaxCxoDashboard_Daily' | 'vmaxCxoDashboard_90Days' | 'socTrendDashboard' | 'imonitor' | 'email_reports' | 'mwUmeTopology' | 'ipranTopo' | 'olibTopo' | 'mwRealTime' | 'portalLogin' | 'eflow_qa' | 'eflow_flow' | 'site_avail' | 'avail_ms' | 'avail_flm' | 'avail_county' | 'fme_ranking' | 'noc_analyst' | 'repeat_site_down' | 'cr_analysis' | 'pm_analysis' | 'ran_cells_kpi' | 'bm_speedtest' | 'bm_meta' | 'bp_report' | 'cn_kpi' | 'cn_kpi_5mins' | 'ume_in_kpi' | 'vmax_user_query' | 'vmax_user_cca' | 'ipt_power' | 'feedback' | 'ap_center' | 'help' | `finebi_${string}`
+type PageKey = 'overview' | 'tables' | 'upload' | 'dashboard' | 'alarm' | 'ttwo' | 'v1_ttwo' | 'tt' | 'wo' | 'gis' | 'realtime_alarm' | 'packet_loss' | 'archive' | 'sync' | 'warehouse' | 'sp_material' | 'sp_details' | 'sp_report' | 'com_report' | 'warehouse_summary' | 'ms_wo_sla' | 'ms_contract_kpi' | 'battery' | 'person' | 'settings' | 'ip_trace' | 'incident_overview' | 'nur' | 'ms_sla' | 'ms_nur_only' | 'ms_sla_only' | 'alarmManagement' | 'cxoDashboard' | 'vmaxCxoDashboard' | 'vmaxCxoDashboard_Daily' | 'vmaxCxoDashboard_90Days' | 'socTrendDashboard' | 'imonitor' | 'email_reports' | 'mwUmeTopology' | 'ipranTopo' | 'olibTopo' | 'olibTopo_v2' | 'mwRealTime' | 'portalLogin' | 'eflow_qa' | 'eflow_flow' | 'site_avail' | 'avail_ms' | 'avail_flm' | 'avail_county' | 'fme_ranking' | 'noc_analyst' | 'repeat_site_down' | 'cr_analysis' | 'pm_analysis' | 'ran_cells_kpi' | 'bm_speedtest' | 'bm_meta' | 'bp_report' | 'cn_kpi' | 'cn_kpi_5mins' | 'ume_in_kpi' | 'vmax_user_query' | 'vmax_user_cca' | 'ipt_power' | 'feedback' | 'ap_center' | 'help' | `finebi_${string}`
 
-const VALID_PAGES: PageKey[] = ['overview', 'tables', 'upload', 'dashboard', 'alarm', 'ttwo', 'v1_ttwo', 'tt', 'wo', 'gis', 'realtime_alarm', 'packet_loss', 'archive', 'sync', 'warehouse', 'sp_material', 'sp_details', 'sp_report', 'com_report', 'warehouse_summary', 'ms_wo_sla', 'ms_contract_kpi', 'battery', 'person', 'settings', 'ip_trace', 'incident_overview', 'nur', 'ms_sla','ms_nur_only', 'ms_sla_only', 'alarmManagement', 'cxoDashboard', 'vmaxCxoDashboard', 'vmaxCxoDashboard_Daily', 'vmaxCxoDashboard_90Days', 'socTrendDashboard', 'imonitor', 'email_reports', 'mwUmeTopology', 'ipranTopo', 'olibTopo', 'mwRealTime', 'portalLogin', 'eflow_qa', 'eflow_flow', 'site_avail', 'avail_ms', 'avail_flm', 'avail_county', 'fme_ranking', 'noc_analyst', 'repeat_site_down', 'cr_analysis', 'pm_analysis', 'ran_cells_kpi', 'bm_speedtest', 'bm_meta', 'bp_report', 'cn_kpi', 'cn_kpi_5mins', 'ume_in_kpi', 'vmax_user_query', 'vmax_user_cca', 'ipt_power', 'feedback', 'ap_center', 'help', ...FINEBI_BOARDS.map((b) => `finebi_${b.slug}` as PageKey)]
+const VALID_PAGES: PageKey[] = ['overview', 'tables', 'upload', 'dashboard', 'alarm', 'ttwo', 'v1_ttwo', 'tt', 'wo', 'gis', 'realtime_alarm', 'packet_loss', 'archive', 'sync', 'warehouse', 'sp_material', 'sp_details', 'sp_report', 'com_report', 'warehouse_summary', 'ms_wo_sla', 'ms_contract_kpi', 'battery', 'person', 'settings', 'ip_trace', 'incident_overview', 'nur', 'ms_sla','ms_nur_only', 'ms_sla_only', 'alarmManagement', 'cxoDashboard', 'vmaxCxoDashboard', 'vmaxCxoDashboard_Daily', 'vmaxCxoDashboard_90Days', 'socTrendDashboard', 'imonitor', 'email_reports', 'mwUmeTopology', 'ipranTopo', 'olibTopo', 'olibTopo_v2', 'mwRealTime', 'portalLogin', 'eflow_qa', 'eflow_flow', 'site_avail', 'avail_ms', 'avail_flm', 'avail_county', 'fme_ranking', 'noc_analyst', 'repeat_site_down', 'cr_analysis', 'pm_analysis', 'ran_cells_kpi', 'bm_speedtest', 'bm_meta', 'bp_report', 'cn_kpi', 'cn_kpi_5mins', 'ume_in_kpi', 'vmax_user_query', 'vmax_user_cca', 'ipt_power', 'feedback', 'ap_center', 'help', ...FINEBI_BOARDS.map((b) => `finebi_${b.slug}` as PageKey)]
 
 /* ==================== 自动刷新（大屏 / NOC 值班场景） ====================
  * 背景：各页面此前只在挂载时拉取一次数据（legacy iframe 页面同样只在 onload
@@ -305,6 +308,8 @@ const AR_PAGE_DEFAULTS: Partial<Record<PageKey, number>> = {
   // OLIB 光纤拓扑是纯静态参考图（PDF 提取 + 源级数据文件），不取接口、不写库；
   // 自动刷新对它没有内容可更新，给最松的一档。
   olibTopo: 1800,
+  // v2 读一次静态映射表 + 县界（缓存 30 分钟），同样没有实时内容。
+  olibTopo_v2: 1800,
 }
 /** 原地刷新（不重挂载）的 React 看板页。
  *  这些页到点**只重拉数据**：外壳 `document.dispatchEvent('myapp-refresh')`，页面自己
@@ -548,6 +553,8 @@ const PAGE_META: Record<PageKey, { icon: ReactNode; labelKey: string }> = {
   ipranTopo: { icon: <ClusterOutlined />, labelKey: 'nav.ipranTopo' },
   // OLIB 全国光纤拓扑：PDF 原图 + 站点分布，语义是「全国一张网」，用地球图标
   olibTopo: { icon: <GlobalOutlined />, labelKey: 'nav.olibTopo' },
+  // OLIB 地理网络拓扑：同一套 OLIB 语义，但落到真实经纬度与 GPS 底图上
+  olibTopo_v2: { icon: <GlobalOutlined />, labelKey: 'nav.olibTopoV2' },
   mwRealTime: { icon: <FieldTimeOutlined />, labelKey: 'nav.mwRealTime' },
   gis: { icon: <GlobalOutlined />, labelKey: 'nav.gis' },
   realtime_alarm: { icon: <AlertOutlined />, labelKey: 'nav.realtimeAlarm' },
@@ -591,7 +598,7 @@ const DEFAULT_GROUPS: { key: string; labelKey: string; items: PageKey[] }[] = [
   {
     key: 'grp_network',
     labelKey: 'nav.grp.network',
-    items: ['mwUmeTopology', 'ipranTopo', 'olibTopo', 'mwRealTime', 'gis', 'realtime_alarm', 'person', 'packet_loss', 'battery', 'ip_trace', 'vmax_user_query', 'vmax_user_cca', 'ipt_power', 'bm_speedtest', 'bm_meta'],
+    items: ['mwUmeTopology', 'ipranTopo', 'olibTopo', 'olibTopo_v2', 'mwRealTime', 'gis', 'realtime_alarm', 'person', 'packet_loss', 'battery', 'ip_trace', 'vmax_user_query', 'vmax_user_cca', 'ipt_power', 'bm_speedtest', 'bm_meta'],
   },
   {
     key: 'grp_analysis',
@@ -711,12 +718,12 @@ function toMenuPayload(layout: MenuLayout): MenuLayoutPayload {
  * ⚠️ 刻意不用「有无 ?page= 参数」来判断 —— ?page= 是应用内导航的常态 URL，
  *    且 /myapp/ 打开后会被 replaceState 归一化成 ?page=sync；
  *    若拿它当开关，侧栏会在进入同步页的下一秒消失且再也点不回来。
+ *
+ * 判定本身在 `src/embedMode.ts::isEmbedMode()`（页面内也要读同一口径，
+ * 例如 ipt_power 地图行的最小高度），这里只是保留 App 侧的函数名与调用点。
  */
 function readEmbedMode(): boolean {
-  try {
-    const sp = new URLSearchParams(window.location.search)
-    return sp.get('embed') === '1' || sp.get('embed') === 'true' || sp.get('layout') === 'bare'
-  } catch { return false }
+  return isEmbedMode()
 }
 
 /**
@@ -1684,6 +1691,8 @@ function AppContent() {
         return <IpranTopo />
       case 'olibTopo':
         return <NetworkTopology />
+      case 'olibTopo_v2':
+        return <NetworkTopologyV2 />
       case 'mwRealTime':
         return <MwRealTimeDashboard />
       case 'email_reports':
