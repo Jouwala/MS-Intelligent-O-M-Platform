@@ -212,13 +212,15 @@ TASK_SPECS = [
          description_en="Send Site Outage screenshots and files to WhatsApp groups",
          default_cron="0 3 * * *", category="whatsapp"),
 
-    # 5b. WhatsApp 发送（扩展版）：投递作业并等待浏览器扩展在已登录的 WhatsApp Web 标签页中发送。
-    #     与上面的 Playwright 版并存，互不影响；扩展见 extensions/whatsapp_sender_extension。
-    dict(task_id="whatsapp_send_ext", name="WhatsApp 消息发送（扩展）", name_en="WhatsApp Message Send (Extension)",
-         loader=("backend.services.whatsapp.whatsapp_ext_service", "run_whatsapp_send_ext"),
-         description="投递发送作业，由浏览器扩展在已登录的 WhatsApp Web 中发送 Site Outage 截图",
-         description_en="Dispatch a send job; a browser extension sends Site Outage screenshots in the logged-in WhatsApp Web",
-         default_cron="0 3 * * *", category="whatsapp"),
+    # 5b. （已下线 2026-11-16）WhatsApp 消息发送（扩展）—— 原 task_id `whatsapp_send_ext`。
+    #     下线原因：用户确认不再需要这条「后端投递作业 → 浏览器扩展认领发送」的定时通道，
+    #     只保留 Playwright 版（whatsapp_send）与 Baileys 版（whatsapp_send_baileys）。
+    #     ⚠️ 浏览器扩展本身（Task/my_app/whatsapp_sender_extension）与它共用的接口
+    #     （/api/whatsapp/outbox、/api/whatsapp/ext/job）**仍然存在**：扩展侧栏手动发送、
+    #     扩展自身的定时直发、以及 eFlow P1 告警的 ext 兜底通道都走它们，
+    #     所以 `backend/services/whatsapp_ext_service.py` 没有跟着删。
+    #     回滚方式：把上面那段 spec 原样加回，并在 worker_watchdog 的 m 组补回
+    #     `whatsapp_send_ext`；DB 里的 task_schedule_config 行按需重建。
 
     # 5d. WhatsApp 发送（Baileys 通道）—— 第三种实现，与 Playwright / 扩展版**并行**。
     #     走 whatsapp-kb-bot/src/notify.js 进程（Baileys 协议直发，与聊天机器人/P1告警
@@ -497,7 +499,7 @@ TASK_SPECS = [
     #      ⚠ 上游只有 5 个模板支持 5 分钟（xGW_LICENSE / xGW_CPU_USAGE / 3G_FDD_DATA_TRAFFIC
     #      实测恒为 0 行，服务内会跳过且不计失败）；实测见 cnn_ume_kpi_5mins_service.py 文件头。
     dict(task_id="cnn_kpi_sync_5mins", name="CNN UME KPI 5分钟同步", name_en="CNN UME KPI 5-Min Sync",
-         loader=("backend.services.cnn_ume_kpi_5mins_service", "run_cnn_kpi_sync_5mins"),
+         loader=("backend.services.cnn.cnn_ume_kpi_5mins_service", "run_cnn_kpi_sync_5mins"),
          description="CNN UME 核心网 KPI 5 分钟粒度同步（同 8 个模板，增量窗口默认最近 120 分钟，上轮失败自动回退全窗口补缺口），API 写入 DB CNN 的 5mins_* 新表，供 5 分钟看板 Day0/Day1/Day7 对比",
          description_en="CNN UME core-network KPI sync at 5-minute granularity (same 8 templates, incremental window of the last 120 minutes by default; falls back to the full yesterday-00:00-to-now window after a failed run), API write to DB CNN 5mins_* tables for the 5-minute Day0/Day1/Day7 board",
          default_cron="*/15 * * * *", category="cnn_kpi"),

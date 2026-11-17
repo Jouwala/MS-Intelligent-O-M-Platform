@@ -1,11 +1,12 @@
 /* ============================================================================
  * OLIB FO 网络拓扑 —— 选中站点详情
  * ============================================================================
- * 三项操作与参考页一致：全图定位 / 放大看周边 / 在分布图上查看。
+ * 两项操作与参考页一致：全图定位 / 放大看周边。
+ * （2026-11-16 去掉「在分布图上查看」—— 站点分布视图已按用户要求移除。）
  * 坐标是原图相对位置（近似），不是经纬度 —— 文案里明确写出来。
  * ========================================================================== */
 import { Button, Empty, Space } from 'antd'
-import { AimOutlined, ExpandOutlined, PieChartOutlined } from '@ant-design/icons'
+import { AimOutlined, ExpandOutlined } from '@ant-design/icons'
 
 import { useI18n } from '../../i18n'
 import { WH } from '../../theme'
@@ -17,10 +18,9 @@ interface Props {
   site: TopoSite | null
   onLocate: (s: TopoSite) => void
   onZoom: (s: TopoSite) => void
-  onScatter: () => void
 }
 
-export default function SiteDetail({ site, onLocate, onZoom, onScatter }: Props) {
+export default function SiteDetail({ site, onLocate, onZoom }: Props) {
   const { t } = useI18n()
 
   const typeKey = site
@@ -58,9 +58,6 @@ export default function SiteDetail({ site, onLocate, onZoom, onScatter }: Props)
             </Button>
             <Button size="small" icon={<ExpandOutlined />} onClick={() => onZoom(site)}>
               {t('olibTopo.detail.zoom')}
-            </Button>
-            <Button size="small" icon={<PieChartOutlined />} onClick={onScatter}>
-              {t('olibTopo.detail.scatter')}
             </Button>
           </Space>
           <div style={{ fontSize: 11, color: WH.textDim, marginTop: 'var(--wh-space-xs)', lineHeight: 1.6 }}>

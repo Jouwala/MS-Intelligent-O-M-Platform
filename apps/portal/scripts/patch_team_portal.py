@@ -596,6 +596,13 @@ H(
       if (qaAllow.indexOf('eflow') === -1) eflow = null;
       if (qaAllow.indexOf('rag') === -1) rag = null;
       if (qaAllow.indexOf('master_site') === -1) masterSite = null;
+      /* 2026-11-17：上游第四页签 topology（Topology）＝ 原 GIS Map 的 IP 页签
+         （olibTopo）搬过来的。可见性**沿用 map 域的 olibTopo 子键**（fo / bo / flm
+         勾了）而不是在 qa 域里另立一行 —— 页签只是搬了家，权限不换域，
+         与「谁原来看得到 IP，现在就看得到 Topology」的口径一致。
+         ⚠️ map.olibTopo 自 2026-11-16 起已在矩阵里（原 IP 页签的登记），
+            服务端模板合并会带出来，无需新增 qa/topology 键。 */
+      if (!SCOPE.ok('map', 'olibTopo')) topology = null;
     }""",
 )
 

@@ -57,7 +57,7 @@
       "sub": null,
       "probe": "SCOPE.qaTabs()",
       "title": "Knowledge Q&A 页签区",
-      "note": "页签级过滤：eflow / rag。⚠️ 2026-11-04 起第三页签 CCH 已拆成独立面板 #cchSlot（见 cch 域），这里不再有 vmax；右下角悬浮助手由 qa-assistant.js 按 assistant 判断。"
+      "note": "页签级过滤：eflow / rag / master_site / topology。⚠️ 2026-11-04 起第三页签 CCH 已拆成独立面板 #cchSlot（见 cch 域），这里不再有 vmax；右下角悬浮助手由 qa-assistant.js 按 assistant 判断。⚠️ 2026-11-17：第四页签 topology（Topology）＝ 原 GIS Map 的 IP 页签（olibTopo）搬来，qa-filter 钩子按 map 域 olibTopo 子键（fo / bo / flm）放行，不在 qa 域另立键。"
     },
     {
       "id": "ossSlot",

@@ -73,10 +73,13 @@ TT 告警文本作业（`kind = "text"`，载荷是 `messages`）：
   供正在等待的任务读取。
 
 ## 与任务的关系
-- 原任务 `whatsapp_send`（Playwright）**保持不变**。
-- 新任务 `whatsapp_send_ext`（见 `task_registry.py`）通过
-  `whatsapp_ext_service.run_whatsapp_send_ext()` 投递作业并等待扩展回报，
-  在 sync 页面像普通任务一样显示成功 / 失败 / 耗时 / 历史。
+- `whatsapp_send`（Playwright）**保持不变**。
+- **2026-11-16：任务 `whatsapp_send_ext` 已下线**（用户确认不再需要），因此后端不再有
+  定时投递发图作业的一方；作业里的 `kind = "image"` 分支保留，只对
+  `whatsapp_ext_service` 的作业文件有用（人工投递时才会出现）。
+  当前实际在用的是 `kind = "text"`（eFlow P1 告警的 ext 兜底，见 `tt_alarm_whatsapp_service`）。
+- 扩展侧栏的「手动发送」与扩展自身的定时直发直接读 `/api/whatsapp/outbox`，不经作业文件，
+  与任务下线无关。
 - 本期只发**图片**。`items` 结构通用（带 `mime`），日后要附带最新 `site_outage` xlsx，
   只需在 `build_outbox_payload` 里加一个 item，扩展协议不变。
 

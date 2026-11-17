@@ -4,12 +4,18 @@
 **WhatsApp Message Send** 任务）**并行**的第二种发送实现。两者共用同一份图片目录
 （`SITE_OUTAGE_DIR`）与群组/备注配置（`GROUPS` / `WHATSAPP_CAPTIONS`）；**原任务保持不动**。
 
+> **2026-11-16：定时任务 `whatsapp_send_ext`（WhatsApp 消息发送（扩展））已下线。**
+> 本模块**没有跟着删**，因为它同时是扩展通道的服务端：`/api/whatsapp/outbox`
+> （扩展侧栏手动发送、扩展自身定时直发）与 `/api/whatsapp/ext/job` 的发图分支
+> 都用它；后者与 eFlow P1 告警的文本作业（`tt_alarm_job`）共用同一个认领口。
+> `run_whatsapp_send_ext()` 现在只剩人工/脚本入口，调度器不再调用它。
+
 ## 工作模型（拉取 / 工人）
-1. 任务 `whatsapp_send_ext` 运行（手动或定时）→ `run_whatsapp_send_ext()` 投递一个
-   「待发作业」并阻塞等待。
-2. Chrome 扩展（`extensions/whatsapp_sender_extension`，运行在已登录的 WhatsApp Web 标签页）
+1. 人工/脚本运行 `run_whatsapp_send_ext()`（原为任务 `whatsapp_send_ext`，定时调度已于
+   2026-11-16 下线）→ 投递一个「待发作业」并阻塞等待。
+2. Chrome 扩展（`apps/my_app/whatsapp_sender_extension`，运行在已登录的 WhatsApp Web 标签页）
    定期轮询 `GET /api/whatsapp/ext/job` 认领作业、在浏览器里逐群逐图发送。
-3. 扩展完成后 `POST /api/whatsapp/ext/job/result` 回报；任务收到回报（或超时）后返回结果，
+3. 扩展完成后 `POST /api/whatsapp/ext/job/result` 回报；调用方收到回报（或超时）后返回结果，
    在 sync 页面像普通任务一样显示成功 / 失败 / 耗时 / 历史。
 
 ## 作业状态如何跨进程共享

@@ -220,7 +220,10 @@
        默认 'gis' 与 DATA.MAP_TABS 的第一项一致。 */
     mapTab: (function () {
        /* 2026-11-16：IP 页签的 page 从 ipranTopo 换成 olibTopo。旧会话记着旧值时
-          直接回落到第一页（Alarm），这里改读成新页，用户上次停在 IP 上就还停在 IP。 */
+          直接回落到第一页（Alarm），这里改读成新页，用户上次停在 IP 上就还停在 IP。
+          2026-11-17：IP 页签（olibTopo）已整体移到 Knowledge Q&A（页签 Topology），
+          本栏 MAP_TABS 不再有它 —— 旧会话记着的 'olibTopo' 经 curMap() 的兜底
+          回落到第一页（Alarm），与「页签没了就回落」的既有口径一致，不必再迁移。 */
        var v = ls('olbr.maptab', 'gis');
        return v === 'ipranTopo' ? 'olibTopo' : v;
      })(),
@@ -532,11 +535,18 @@
     var n = Number(v), a = DATA.QC_LEVEL_ABS;
     return n >= a.crit ? 'crit' : (n >= a.warn ? 'warn' : 'ok');
   }
+  /* 卡片 id → 后端接口的 metric 名（2026-11-16 加）。
+     默认同名；只有 PMT 卡在 v3 改了口径（见 olbr-data.js 的 QC_CARD_METRIC）。
+     凡是要拿「后端数据」的地方（卡片大数字 / 存量趋势 / 下钻明细）都过这一层，
+     而卡片 id 本身仍用于文案与「打开完整看板」的映射 —— 两者刻意分开。 */
+  function qcMetricOf(id) {
+    return (DATA.QC_CARD_METRIC && DATA.QC_CARD_METRIC[id]) || id;
+  }
   /* 告警优先用 5 分钟那一档：它比全量新，且失败时会被置成 error 态，
      不会把一小时前的旧数字留在屏幕上冒充实时值。 */
   function qcMetric(id) {
     if (id === 'alarm' && state.qcAlarm) return state.qcAlarm;
-    return (state.qc.m && state.qc.m[id]) || null;
+    return (state.qc.m && state.qc.m[qcMetricOf(id)]) || null;
   }
   /* 后端 generated_at 写死 +08:00，页面时钟用浏览器本地时区：直接切字符串会出现
      「时钟 18:07 / 更新于 02:07」，看着像 8 小时前的旧数据（MsPortal 踩过这个坑）。 */
@@ -784,7 +794,9 @@
      为什么必须连续轴：按点数等距排开，会把「中间断了 20 小时」画成
      「连续 20 小时」—— 等于在横轴上撒谎（本文件 qcTrendSeries 已有同样教训）。 */
   function qcStockSeries(id) {
-    var all = state.qcHistory && state.qcHistory[id];
+    /* 2026-11-16：序列名走 qcMetricOf —— PMT 卡的存量现在由 `pmt_wait` 那一列
+       （等待 PM Manager Approve 的小时快照）供数，与卡片大数字同一口径。 */
+    var all = state.qcHistory && state.qcHistory[qcMetricOf(id)];
     if (!all || !all.length) return null;
     var pts = all.filter(function (p) {
       /* ⚠️ 必须先挡 null / '' 再 Number()：Number(null) === 0 是**有限数**，
@@ -839,7 +851,7 @@
     if (!s) {
       /* 有数据但点不够：给一句说明，别让卡片空着像坏了；
          完全没有数据：不占位（此时卡片本来就没有这一行，挂说明反而是噪音）。 */
-      var raw = state.qcHistory && state.qcHistory[id];
+      var raw = state.qcHistory && state.qcHistory[qcMetricOf(id)];
       if (raw && raw.length) {
         return '<span class="qc-spark-empty">' + esc(t('qc.stock.starving')) + '</span>';
       }
@@ -939,6 +951,8 @@
        v1 摘掉阈值行的理由是「等级分档整个不显示了，再把阈值挂在悬浮里，
        等于让用户按一个屏幕上不存在的规则去读数字」—— 前提已经不成立了。 */
     var tips = [def];
+    /* PMT 卡（v3）：数字口径与其余五张不同，hover 时说清它到底是什么 */
+    if (d.id === 'pmt') tips.push(t('qc.pmtWait.tip'));
     /* 阈值提示挂的是**统一刻度**（5 / 20），不是各指标自己的 QC_TARGETS：
        屏幕上数字与柱子就是按这把尺子染的色，提示也必须是同一把，
        否则 hover 看到 10/30、屏幕上却是按 5/20 上的色 —— 那就又成了黑盒。 */
@@ -3115,17 +3129,21 @@
 
   /* ⚠️ 2026-09-29（用户要求「GIS Map 添加并只显示 /myapp/?page=mwRealTime 的地图组件，
      reload 和 openlink 放到最右边」，随后澄清「GIS Map 和 mwRealTime 都要显示」）：
-     本栏**内嵌** my_app 的地图页（iframe），当前**六个页签**
-     （2026-11-16 IP 页签改为 olibTopo 物理图，2026-11-11 多一个 PL / packet_loss）：
+     本栏**内嵌** my_app 的地图页（iframe），当前**五个页签**
+     （2026-11-17 IP 页签移出本栏、去 Knowledge Q&A 当第四页签「Topology」；
+      2026-11-16 IP 页签改为 olibTopo 物理图，2026-11-11 多一个 PL / packet_loss）：
        · gis         —— 「Alarm」（GIS 页）
        · person      —— 「Person」（人员位置地图，2026-10-19 按用户要求加在 Alarm 之后）
        · mwRealTime  —— 「MW」（微波实时）
        · ipt_power   —— 「Power」（2026-11-06 加，原名 IPT Power，2026-11-11 改名）：
                          只显示 Site map 地图卡，筛选条 / KPI 数字卡 / 右侧站点清单
                          由剥离样式隐藏（见 olbr-data.js 的 MAP_TAB_CSS）
-       · olibTopo    —— 「IP」（2026-11-16 起）：物理拓扑原图，不注入剥离样式；maponly 时搜索框浮在图上
-       · packet_loss —— 「PL」（2026-11-11 加）：只显示 Packet Loss Map 地图卡，
-                         横幅 / KPI 卡 / 图表 / 右侧指标列由 PL_MAP_ONLY_CSS 隐藏
+       · （olibTopo ——「IP」，2026-11-16~11-17 曾在本栏：物理拓扑原图，现搬去
+          Knowledge Q&A 第四页签「Topology」，见 qaItems() 上方的 topologyItem()）
+       · packet_loss —— 「PL」（2026-11-11 加；2026-11-16 按要求改成与其它页签
+                         一样的纯地图形态）：横幅 / KPI / 图表 / Top10、卡片头、
+                         图层开关与地图控制行全部去掉，只留铺满的 Leaflet 画布；
+                         窄 iframe 下落下的 zoom 6 由 schedulePlZoom 补到 8 / 7.5
                          （直开 /myapp/ 仍是完整业务页）
      概念上分两层，读代码时别搞混：
        · 屏幕上方那行标题叫 **GIS Map** —— 那是**栏标题**，来自 map.title
@@ -3236,17 +3254,44 @@
   function mapSrc() {
     return curMap().src;
   }
-  /* Open Link 的地址（2026-10-19 用户：「Open Link 打开完整页面」）。
-     内嵌 src 里的 `maponly=1` 只服务**门户栏内**的"只显示地图"形态；
-     新窗口是给人看的完整页，必须去掉它（Person 页默认就是「筛选条 + KPI +
-     图表 + 地图 + 人员表」的完整看板）。
-     ⚠️ 只剥这一个参数，其余（mwembed / embed / lang / theme）原样保留：
-     它们与本页的取景、语言、主题一致，去掉反而会让新窗口与门户里看到的不一样。 */
+  /* Open Link 的地址 = 该地图页的**独立完整页**（= 直接在浏览器里输入 ?page=xxx 的那一页）。
+     ---------------------------------------------------------------------------
+     2026-10-19 用户：「Open Link 打开完整页面」。当时只剥了 `maponly=1`，
+     `mwembed` / `embed` / `gisShift` 原样带进新窗口 —— **这个判据是错的**。
+
+     ⚠️ 2026-11-17 用户报障（本次教训）：
+       「GIS Map 的 MW 页签，点击 openlink 后 /myapp/?page=mwRealTime&mwembed=1&embed=1&lang=en
+        只有个地图了，应该跟 /myapp/?page=mwRealTime 一样」
+     根因：这四个参数全都只描述**"在门户 iframe 里怎么显示"**，进了独立窗口反而把
+     该页本体拆掉（已用无头浏览器逐帧量过，见 docs/architecture.md 九之二十一）：
+
+       · mwembed=1  —— mw_real_time.html **自己**认它（其 html.mw-embed 那段 CSS），
+                       把本页自己的标题栏 / KPI / 右栏 / 底栏全部 display:none，只剩一张地图。
+                       MW 是 legacy 单文件页，这正是用户看到的「只有个地图」。
+       · embed=1    —— my_app 认它（App.tsx 的 shellHidden），连 my_app 的 Header / 侧栏
+                       也一起隐藏。所以即便只剥 mwembed，新窗口仍不是「直开的那一页」。
+       · maponly=1  —— Person / olibTopo 的"只留画布"开关（PersonMap.tsx 的 readMapOnlyMode）。
+       · gisShift=1 —— Alarm 页为避开门户左侧告警面板做的平移（见 mapItems 上方那大段注释）。
+
+     结论：新窗口把上面四个**全部**去掉，只保留 page / lang / theme 与各页自己的业务参数：
+       · lang  —— 与门户当前语言一致；
+       · theme —— 与门户当前主题一致。`theme.ts::themeFromUrl` 明确写了它「只影响本次渲染、
+                   不写回 localStorage」，所以带过去不会污染用户的全局偏好；去掉则会让
+                   深色门户点开一个浅色窗（同一份 UI 两种入口两套主题，正是那条注释在防的）。
+       · 其余（如 olibTopo 的 view=physical）是页面自己的业务参数，一概不动。
+
+     口径一句话：**Open Link = 直开该页**，不是「把门户里那块 iframe 放大了看」。
+     ⚠️ 将来新增"仅门户内生效"的版式参数时，必须同时加进下面的 MAP_OPEN_DROP，
+        否则又会出现「新窗口里少一块」这类报障。 */
+  var MAP_OPEN_DROP = { maponly: 1, mwembed: 1, embed: 1, gisShift: 1 };
   function mapOpenSrc() {
-    return mapSrc().replace(/([?&])maponly=[^&#]*(&?)/, function (all, pre, post) {
-      if (pre === '?') return post ? '?' : '';
-      return post ? pre : '';
-    }).replace(/[?&]$/, '');
+    var s = mapSrc();
+    var qi = s.indexOf('?');
+    if (qi === -1) return s;
+    var keep = s.slice(qi + 1).split('&').filter(function (kv) {
+      return kv && !MAP_OPEN_DROP[kv.split('=')[0]];
+    });
+    return s.slice(0, qi) + (keep.length ? '?' + keep.join('&') : '');
   }
 
   /* 地图栏的面板头 + 页签 + 工具按钮（2026-09-23 抽出）。
@@ -5044,6 +5089,33 @@
       status: 'online', freq: '', clicks: 0, icon: 'table'
     };
   }
+  /* ================================================================== 2026-11-17
+     Knowledge Q&A 第四页签「Topology」（用户要求）
+     ----------------------------------------------------------------------------
+     用户要求「GIS Map 的 IP 页签移动到 Knowledge Q&A，页签名字 Topology」：
+     内容不变（my_app 的 ?page=olibTopo 物理拓扑原图，view=physical，可模糊搜站点），
+     只是从地图栏搬进问答栏并改名。与 Master Site 同属「页面固定功能」：
+     用合成条目喂给 qaItems()/qaSrc() 的既有管线，不往目录里塞一条假看板。
+     ⚠️ url 用**同源相对路径**：qaSrc 的 my_app 分支统一补 embed=1 / lang / theme，
+        并对 olibTopo 追加 maponly=1（与地图栏 mapItems 同一约定：页面只留拓扑画布，
+        搜索框浮在图上；my_app 侧 NetworkTopology.tsx 的 readMapOnlyMode）。
+        条目 url 本身不带 maponly —— qaOpen「打开」进新窗口看到的是完整页。
+     ⚠️ 地图栏 MAP_TABS 已同步删掉该页签（见 olbr-data.js 的 2026-11-17 注释）；
+        'map.ip' 词条与 share-network 图标保留，由本条目复用。
+     ⚠️ 团队门户 v3/team_portal 的资产由 scripts/patch_team_portal.py 从上游生成：
+        qa-filter 钩子按矩阵 **map 域的 olibTopo 子键**过滤本页签（fo / bo / flm 勾了、
+        smc / cxo 未勾）—— 页签搬了家，可见性不换域。改完上游必须重跑该脚本，
+        `npm run check:team-scope`（本机 python 不在 PATH 时用 py 直跑四个子脚本）会拦。 */
+  function topologyItem() {
+    return {
+      no: -9003, groups: ['Knowledge Q&A'],
+      titleZh: 'Topology（物理拓扑）', titleEn: 'Topology (physical topology)',
+      descZh: 'OLIB 物理拓扑原图（原 GIS Map 的 IP 页签），可模糊搜索站点。',
+      descEn: 'OLIB physical topology drawing (formerly the GIS Map IP tab); fuzzy site search supported.',
+      platform: 'myapp', url: '/myapp/?page=olibTopo&view=physical',
+      status: 'online', freq: '', clicks: 0, icon: 'share-network'
+    };
+  }
   function qaItems() {
     var all = allowed();
     var pick = function (needle) {
@@ -5052,6 +5124,11 @@
     /* 先算好 Master Site，团队版的 qa-filter 钩子（插在下面 eflow 行之后）会按矩阵
        把它置 null；变量必须声明在钩子之前，否则钩子的赋值会被后面的 var 覆盖。 */
     var masterSite = masterSiteItem();
+    /* 2026-11-17：第四页签 topology（Topology，原 GIS Map 的 IP 页签）同样先算好
+       放进变量 —— 理由同上。团队版按 **map 域的 olibTopo 子键**过滤（见
+       scripts/patch_team_portal.py 的 qa-filter 钩子）：页签只是搬了家，
+       可见性沿用原 IP 页签的矩阵口径（fo / bo / flm 勾了），smc / cxo 不出现。 */
+    var topology = topologyItem();
     /* RAG 条目的**识别条件**。历史上有三种 url 形态，必须都能认得出来，
        否则条目被 filter(Boolean) 滤掉、整个 RAG 页签消失（2026-10-24 踩过：
        改地址时只改了下面 qaSrc 的归一目标，漏改这里，导致 RAG 页签不见）：
@@ -5082,6 +5159,13 @@
       if (qaAllow.indexOf('eflow') === -1) eflow = null;
       if (qaAllow.indexOf('rag') === -1) rag = null;
       if (qaAllow.indexOf('master_site') === -1) masterSite = null;
+      /* 2026-11-17：上游第四页签 topology（Topology）＝ 原 GIS Map 的 IP 页签
+         （olibTopo）搬过来的。可见性**沿用 map 域的 olibTopo 子键**（fo / bo / flm
+         勾了）而不是在 qa 域里另立一行 —— 页签只是搬了家，权限不换域，
+         与「谁原来看得到 IP，现在就看得到 Topology」的口径一致。
+         ⚠️ map.olibTopo 自 2026-11-16 起已在矩阵里（原 IP 页签的登记），
+            服务端模板合并会带出来，无需新增 qa/topology 键。 */
+      if (!SCOPE.ok('map', 'olibTopo')) topology = null;
     }
     /* ⚠️ 2026-11-04（用户要求「Knowledge Q&A 里面的 CCH 单独拆出来」）：
        原第三页签 VMAX 用户查询（短标签 CCH）已搬到独立面板 #cchSlot，
@@ -5093,9 +5177,12 @@
     /* 2026-11-08：追加第三页签 master_site（Master Site）。数组顺序即页签条顺序，
        也决定未指定 state.qaTab 时的默认选中项 —— 这里**加在末尾**，默认仍是 eFlow，
        不改动用户既有的默认浏览习惯；localStorage 里的旧 qaTab 值也不受影响。 */
+    /* 2026-11-17：追加第四页签 topology（Topology，原 GIS Map 的 IP 页签搬过来）。
+       同样加在**末尾**，默认选中仍是 eFlow，localStorage 旧值不受影响。 */
     return [eflow && { key: 'eflow', item: eflow },
             rag && { key: 'rag', item: rag },
-            masterSite && { key: 'master_site', item: masterSite }].filter(Boolean);
+            masterSite && { key: 'master_site', item: masterSite },
+            topology && { key: 'topology', item: topology }].filter(Boolean);
   }
   /* 页签上显示的**短标签**（2026-10-12 改）：目录标题太长
      （"RAG Knowledge Q&A (本地知识问答 / Open WebUI)"），
@@ -5108,6 +5195,9 @@
     /* 2026-11-08：第三页签短名。用户指定的页签名就是 "Master Site"，
        中英同值（与 qa.tabRag = 'O&A' 同一处理），不是漏翻译。 */
     if (tab.key === 'master_site') return t('qa.tabMasterSite');
+    /* 2026-11-17：第四页签短名。用户指定的页签名就是 "Topology"，
+       中英同值（与 Master Site 同一处理），不是漏翻译。 */
+    if (tab.key === 'topology') return t('qa.tabTopology');
     return titleOf(tab.item);
   }
   /* 页签的 title 全称：短名之外仍要让用户看得到完整标题（含说明），
@@ -5136,7 +5226,13 @@
       var sep = (q.indexOf('embed=') !== -1) ? '' : '&embed=1';
       var thm = (state.theme === 'dark' && q.indexOf('theme=') === -1) ? '&theme=dark' : '';
       var lng = (q.indexOf('lang=') !== -1) ? '' : langQs();
-      return '/myapp/' + q + sep + thm + lng;
+      /* 2026-11-17：Topology 页签（page=olibTopo）与地图栏 mapItems 同一约定补
+         maponly=1 —— iframe 里只留物理拓扑画布、搜索框浮在图上（my_app 侧
+         NetworkTopology.tsx 的 readMapOnlyMode）。条目 url / qaOpen 的新窗口
+         **不带**它：点「打开」看到的仍是完整页（与地图栏 mapOpenSrc 剥 maponly
+         同一意图，这里靠"条目 url 本来就不带"实现）。 */
+      var topo = (q.indexOf('page=olibTopo') !== -1 && q.indexOf('maponly=') === -1) ? '&maponly=1' : '';
+      return '/myapp/' + q + sep + topo + thm + lng;
     }
     /* RAG（外域）：无论目录里存的是什么旧地址（`http://192.168.100.27:3000/`、
        `https://192.168.100.27/`、`https://192.168.100.27:8443/`），这里**无条件
@@ -7384,7 +7480,10 @@
     var d = state.drill; if (!d.metric) return;
     var seq = ++drillSeq;
     d.loading = true; d.err = ''; renderDrill();
-    api('/api/portal-qc/detail?metric=' + encodeURIComponent(d.metric) +
+    /* 2026-11-16：下钻走 qcMetricOf —— PMT 卡的明细是「等待 PM Manager Approve」
+       那一批（后端 metric=pmt_wait），与卡片大数字同一口径，行数必然相等。
+       标题 / 「打开完整看板」仍用卡片 id（state.drill.metric）去查，故不改那两处。 */
+    api('/api/portal-qc/detail?metric=' + encodeURIComponent(qcMetricOf(d.metric)) +
         '&page=' + d.page + '&size=' + d.size +
         (d.q ? '&q=' + encodeURIComponent(d.q) : '') +
         /* 排序下发到服务端（不是只排当前页）。后端会拿 sort 去撞该 metric 的
@@ -7517,6 +7616,8 @@
     var btn = $('#qcExport'); if (btn) btn.disabled = true;
 
     var metric = d.metric;
+    /* 导出的取数口径必须与屏幕上那张明细表一致（PMT 卡 = pmt_wait） */
+    var apiMetric = qcMetricOf(metric);
     var keyword = d.q || '';
     var label = qcMetricLabel(metric);
 
@@ -7528,7 +7629,7 @@
        而不是整单作废 —— 导出一半也好过什么都拿不到（失败原因最后一起 toast）。 */
     var page = 1, total = null, failed = null;
     function nextPage() {
-      return api('/api/portal-qc/detail?metric=' + encodeURIComponent(metric) +
+      return api('/api/portal-qc/detail?metric=' + encodeURIComponent(apiMetric) +
                  '&page=' + page + '&size=' + DRILL_EXPORT_SIZE +
                  (keyword ? '&q=' + encodeURIComponent(keyword) : ''))
         .then(function (data) {
@@ -7705,22 +7806,52 @@
     if (map) return map;
     try {
       var fk = Object.keys(lc).filter(function (k) { return k.indexOf('__reactFiber') === 0; })[0];
-      if (!fk) return null;
-      var seen = new Set(), stack = [lc[fk]], guard = 0;
-      while (stack.length && guard++ < 4000) {
-        var n = stack.pop();
-        if (!n || seen.has(n)) continue;
-        seen.add(n);
-        if (n.stateNode && typeof n.stateNode.invalidateSize === 'function') return n.stateNode;
-        var mp = n.memoizedProps || n.pendingProps;
-        if (mp) {
-          for (var key in mp) {
-            var v = mp[key];
-            if (v && typeof v === 'object' && typeof v.invalidateSize === 'function') return v;
+      /* ⚠️ 这里**不能**在 fk 为空时直接 return null：自研 LeafletMap 的
+         .leaflet-container 是它自己 createElement 出来的，身上根本没有 fiber，
+         但它的宿主 div 有 —— 下面那段「从宿主 div 往上爬 hook」正是为它准备的。
+         2026-11-16 第一版就是在这里提前返回，导致 tunePlZoom 永远找不到实例。 */
+      if (fk) {
+        var seen = new Set(), stack = [lc[fk]], guard = 0;
+        while (stack.length && guard++ < 4000) {
+          var n = stack.pop();
+          if (!n || seen.has(n)) continue;
+          seen.add(n);
+          if (n.stateNode && typeof n.stateNode.invalidateSize === 'function') return n.stateNode;
+          var mp = n.memoizedProps || n.pendingProps;
+          if (mp) {
+            for (var key in mp) {
+              var v = mp[key];
+              if (v && typeof v === 'object' && typeof v.invalidateSize === 'function') return v;
+            }
           }
+          if (n.child) stack.push(n.child);
+          if (n.sibling) stack.push(n.sibling);
         }
-        if (n.child) stack.push(n.child);
-        if (n.sibling) stack.push(n.sibling);
+      }
+      /* ⚠️ 2026-11-16：my_app 的 LeafletMap 组件**不把 map 实例挂在 DOM 上** ——
+         它每次挂载都 new 一个内层 div 交给 L.map()（见 LeafletMap.tsx 的
+         MapContainer effect），所以 .leaflet-container 上只有 _leaflet_id、
+         没有 React fiber，上面两条路（lc 的挂载点、lc fiber）对 packet_loss /
+         person 这类自研 LeafletMap 页面**全部落空**。地图实例只存在于
+         MapContainer 的 useState / useRef 里。
+         这里从 **宿主 div**（lc.parentElement，React 渲染出来的那个 node）的 fiber
+         沿 return 往上爬，逐个查 hook 链表里的 memoizedState（useState 的 map）
+         与 .current（useRef 的 map），并用 `_container === lc` 认准是这一张图 ——
+         不能用"找到任意一个 map"：StrictMode 卸载过一次的旧实例也在 fiber 里，
+         它对可见画布没有任何影响，调它的 setZoom 会表现成"改了但没反应"。
+         这一步让 invalidateLeaflet / applyMapWheelLock 对自研地图页也生效。 */
+      var host = lc.parentElement;
+      var hk = host ? Object.keys(host).filter(function (k) { return k.indexOf('__reactFiber') === 0; })[0] : null;
+      var fib = hk ? host[hk] : null, hop = 0;
+      while (fib && hop++ < 80) {
+        var h = fib.memoizedState, hi = 0;
+        while (h && hi++ < 40) {
+          var cand = h.memoizedState;
+          if (cand && typeof cand === 'object' && cand.current) cand = cand.current;
+          if (cand && typeof cand.getCenter === 'function' && cand._container === lc) return cand;
+          h = h.next;
+        }
+        fib = fib.return;
       }
     } catch (e) { /* ignore */ }
     return null;
@@ -7833,7 +7964,9 @@
        仍沿用内层页自己的 zoom 8 取景，门户不做任何自动放大（同 Alarm / Person）。
        未登记的页默认也是不放大，这里显式列出便于对照。
        2026-11-11 加 packet_loss（"PL" 页签）：同样用内层页自己的 zoom 8。 */
-    ipt_power: false, olibTopo: false, packet_loss: false
+    ipt_power: false, packet_loss: false
+    /* 2026-11-17：olibTopo（IP 页签）已移到 Knowledge Q&A（页签 Topology），本栏
+       不再加载它，上面的显式列出随之删掉；QA 栏的 iframe 也不走 zoomOnce 这条路。 */
   };
   /* 打开后自动**缩小一级**的页（2026-10-12 加，2026-10-13 清空）。
      与 MAP_ZOOM_IN_BY_PAGE 是两个方向、互斥使用：同一页不会既放大又缩小。
@@ -7876,6 +8009,62 @@
     var m = DATA.MAP_TAB_CSS;
     if (pg && m && Object.prototype.hasOwnProperty.call(m, pg)) return m[pg];
     return DATA.MAP_STRIP_CSS;
+  }
+
+  /* 2026-11-16（PL 页签切纯地图时发现）：packet_loss 页按 `window.innerWidth` 选
+     取景档 —— 门户里 iframe 宽 730，落在「<900 → zoom 6」那一档。摘掉图表只留
+     地图后，730×858 的画布里国土只剩 188×192（实测），周围一大片空白，看起来
+     像"地图没加载"。故门户侧把这一页补到 zoom 8（与 Alarm / MW 同档，实测国土
+     754×766 正好铺满、底图与县色都在）。
+     ---- 为什么在门户侧补，而不改 my_app 的 zoomForWidth ----
+       · 那是预编译产物；为一个门户页签改它要带出一批与本次无关的构建/发布，
+         而且当前源码目录还有在途改动（不适合顺手重建）。
+       · 门户本来就有 findLeafletMap 这条同源通道，取一次实例即可。
+     ---- 边界 ----
+       · 只对 packet_loss 生效，且每个 document 只补一次（用户之后手动缩放不被覆盖；
+         点 Reload 会重建 iframe，自然重新补一次）。
+       · 页面若自己已经 ≥7.5（更宽的窗口），不动它 —— 宁可不改，也不要压掉页面
+         自己的取景决定。
+       · 补完再 invalidateSize 一次：Leaflet 在 setZoom 动画结束后要重新量容器，
+         否则瓦片网格可能停在旧档。 */
+  function tunePlZoom(doc) {
+    if (doc.__olbrPlZoomTuned) return true;
+    var map = findLeafletMap(doc);
+    if (!map) return false;
+    doc.__olbrPlZoomTuned = true;
+    try {
+      /* 取景档按 iframe 实宽分两档：617px 那种窄栏用 8 会把国土左右各裁掉
+         约 9%（实测 754 > 617），7.5 的 533px 正好装下；730px 起用 8
+         （与 Alarm / MW 同档，754px 只压掉极窄一条边，视觉上是"铺满"）。 */
+      var w = doc.documentElement ? doc.documentElement.clientWidth : 0;
+      var target = w >= 700 ? 8 : 7.5;
+      if (map.getZoom() < target) {
+        map.setZoom(target);
+        window.setTimeout(function () { invalidateLeaflet(doc); }, 600);
+      }
+      /* 页面自己的「地图控制」行（缩放 / 复位）随剥离样式一起藏掉了，而
+         MapControlsBridge 又把 Leaflet 默认的 +/- 控件 remove 了 —— 不补回来，
+         纯地图形态就没有任何可见的缩放入口（滚轮默认还被缩放锁拦着）。
+         这里把默认控件重新挂上，与 Alarm / MW 两页左上角那颗一模一样。
+         ⚠️ 只在门户内嵌的纯地图形态里补；直开页面仍有自己的一行控制按钮。 */
+      if (map.zoomControl && map.zoomControl._map !== map) {
+        try { map.zoomControl.addTo(map); } catch (e2) { /* ignore */ }
+      }
+    } catch (e) { /* 拿不到实例就保持页面自己的取景 */ }
+    return true;
+  }
+  /* 地图是数据到位后才挂载的（页面先取数再渲染），stripFrame 的 0/1.4/3.4s 可能
+     都赶在挂载之前。故补一个带重试的调度：每秒试一次，最多 10 次；成功或超时即停。 */
+  function schedulePlZoom(doc) {
+    if (doc.__olbrPlZoomSchedule) return;
+    doc.__olbrPlZoomSchedule = true;
+    var tries = 0;
+    var tick = function () {
+      tries++;
+      if (doc.__olbrPlZoomTuned || tries > 10) return;
+      if (!tunePlZoom(doc)) window.setTimeout(tick, 1000);
+    };
+    tick();
   }
 
   /* 默认比内层页自己的取景再近一级（2026-09-22 用户：「跟手动点一次加号一个效果」）。
@@ -8338,6 +8527,11 @@
       /* 缩放锁：只要拿到 document 就先挂一次拦截路（不依赖地图有没有挂载），
          下面拿到实例再补①那条路。见 applyMapWheelLock 上方的说明。 */
       applyMapWheelLock(f);
+      /* PL 页签：把页面按窄窗口落下的 zoom 6 补成整幅画布的 8（见 schedulePlZoom）。
+         ⚠️ 必须放在「有没有 .leaflet-container」的判断**之外**：Reload 之后页面要
+         重新取数才挂地图，stripFrame 的 0/1.4/3.4s 可能都赶在挂载之前；调度器自己
+         会每秒重试 10 次。2026-11-16 第一版放在里面，点 Reload 后地图又退回 zoom 6。 */
+      if (framePage(f) === 'packet_loss') schedulePlZoom(d);
 
       if (d.querySelector('.leaflet-container')) {
         if (depth > 0) keepOnlyMap(d);
@@ -8431,6 +8625,13 @@
     /* 地图是内嵌 iframe：my_app 只在启动时读一次主题（且这页不收 postMessage），
        所以换主题必须重设 src 才能让地图跟着变深浅色。 */
     var f = $('#mapFrame'); if (f) { f.src = mapSrc(); }
+    /* ⚠️ 2026-11-17：「Open Link」的 href 是**渲染时**拼出来的（mapOpenSrc 读 state.theme），
+       而上面只重设了 iframe 的 src —— 不补这一行，深色门户点开的新窗口仍是浅色。
+       实测（无头浏览器）：light 时 href 无 theme、点 #themeBtn 切到 dark 后 href 依旧无 theme，
+       而 iframe.src 已带 &theme=dark。
+       就地替换 .map-tools 那一段（与 toggleMapWheelLock 同一做法），不重画整个面板：
+       缩放锁按钮的按下态存在 state 里，重建不会丢。 */
+    var mt = $('#l0Map .map-tools'); if (mt) mt.outerHTML = mapToolsHtml();
     /* 报告文件那块不看 URL 参数也不收 postMessage（my_app 只在启动时读 myapp-theme），
        只能靠 ensureEmail 里的「上次主题 ≠ 本次」判据重设 src。
        v1：报告文件常驻（不再是"切到那个页签才渲染"），所以这里无条件调一次。 */

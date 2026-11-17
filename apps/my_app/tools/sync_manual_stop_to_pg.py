@@ -24,7 +24,7 @@ sys.path.insert(0, str(ROOT))
 
 from dotenv import load_dotenv  # noqa: E402
 
-TASK_IDS = ("whatsapp_send", "whatsapp_send_ext", "sp_whatsapp_report")
+TASK_IDS = ("whatsapp_send", "sp_whatsapp_report")
 
 
 def _sqlite_rows():

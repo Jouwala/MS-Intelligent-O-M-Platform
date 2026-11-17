@@ -410,7 +410,9 @@ GROUP_TASK_MAP = {
     "m": (  # 内务轻任务：EWS 邮件会话 + 截图/WhatsApp 文件依赖
         # whatsapp_send_ext 2026-08-31 补录：新注册时漏分组，无 worker 认领，
         # 任务管理页手动执行一直「队列中等待」直到 300s 超时（同下方 finebi 教训）
-        "site_outage_screenshot,whatsapp_send,whatsapp_send_ext,liberia_email_1h,liberia_email_8h,"
+        # ⚠️ 该任务已于 2026-11-16 下线（见 task_registry.py 的 5b 注释），故从本表移除；
+        # 这是一次**有意的删除**，不是漏登记，别当成「新任务忘了分组」加回去。
+        "site_outage_screenshot,whatsapp_send,liberia_email_1h,liberia_email_8h,"
         "kpi_ms_contract,kpi_ms_wo_sla,kpi_sp_spareparts,kpi_sp_consumables,"
         "kpi_ran_availability,email_recovery,ipran_m6k_chart_email,"
         "ccn_free_rating_chart_email,"

@@ -8,8 +8,8 @@
 import { message } from 'antd'
 import { useI18n } from '../../i18n'
 import {
-  CORE_LINKS, CORE_NODES, LINK_COLORS, findSiteByName,
-  type CoreLinkType, type TopoSite,
+  CORE_LINKS, CORE_NODES, LINK_COLORS, findCoreNodeBySite, findSiteByName,
+  normalizeName, type CoreLinkType, type TopoSite,
 } from './topologyData'
 
 const W = 1040
@@ -19,15 +19,19 @@ const LINK_ORDER: CoreLinkType[] = ['exist', 'rail', 'p25a', 'dwdm']
 const LINK_LEGEND_X = [60, 200, 370, 540]
 
 export default function CoreSchematic({
-  onSelect, width = W, height = H,
+  onSelect, selected = null, width = W, height = H,
 }: {
   onSelect: (s: TopoSite) => void
+  /** 当前选中站点：高亮对应骨干节点（搜索定位 / 点击节点共用） */
+  selected?: TopoSite | null
   /** 显示尺寸（viewer 按缩放倍率传入，矢量重绘保持清晰） */
   width?: number
   height?: number
 }) {
   const { t } = useI18n()
   const byId = new Map(CORE_NODES.map(n => [n.id, n]))
+  const selectedNodeId = selected ? findCoreNodeBySite(selected)?.id : undefined
+  const selectedNorm = selected ? normalizeName(selected.name) : ''
 
   const pick = (label: string, siteName?: string) => {
     const site = findSiteByName(siteName)
@@ -60,24 +64,42 @@ export default function CoreSchematic({
         )
       })}
 
-      {CORE_NODES.map(n => (
-        <g
-          key={n.id}
-          role="button"
-          tabIndex={0}
-          style={{ cursor: 'pointer' }}
-          onClick={e => { e.stopPropagation(); pick(n.label, n.site) }}
-          onKeyDown={e => {
-            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(n.label, n.site) }
-          }}
-        >
-          <title>{n.label}</title>
-          <circle cx={n.x} cy={n.y} r={22} fill="transparent" />
-          <circle cx={n.x} cy={n.y} r={17} fill="#29a7e1" stroke="#fff" strokeWidth={2} />
-          <text x={n.x} y={n.y + 5} textAnchor="middle" fontSize={13} fill="#fff" fontWeight={700}>✕</text>
-          <text x={n.x} y={n.y + 32} textAnchor="middle" fontSize={12} fill="#111">{n.label}</text>
-        </g>
-      ))}
+      {CORE_NODES.map(n => {
+        const active = selectedNodeId
+          ? n.id === selectedNodeId
+          : !!(n.site && selectedNorm && normalizeName(n.site) === selectedNorm)
+        return (
+          <g
+            key={n.id}
+            role="button"
+            tabIndex={0}
+            style={{ cursor: 'pointer' }}
+            onClick={e => { e.stopPropagation(); pick(n.label, n.site) }}
+            onKeyDown={e => {
+              if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(n.label, n.site) }
+            }}
+          >
+            <title>{n.label}</title>
+            {active && (
+              <circle
+                cx={n.x} cy={n.y} r={28}
+                fill="rgba(255,121,0,.18)" stroke="#ff5a00" strokeWidth={3}
+              />
+            )}
+            <circle cx={n.x} cy={n.y} r={22} fill="transparent" />
+            <circle
+              cx={n.x} cy={n.y} r={17}
+              fill={active ? '#ff5a00' : '#29a7e1'}
+              stroke="#fff" strokeWidth={2}
+            />
+            <text x={n.x} y={n.y + 5} textAnchor="middle" fontSize={13} fill="#fff" fontWeight={700}>✕</text>
+            <text
+              x={n.x} y={n.y + 32} textAnchor="middle" fontSize={12}
+              fill={active ? '#ff5a00' : '#111'} fontWeight={active ? 700 : 400}
+            >{n.label}</text>
+          </g>
+        )
+      })}
 
       <g fontSize={12}>
         {LINK_ORDER.map((type, i) => (

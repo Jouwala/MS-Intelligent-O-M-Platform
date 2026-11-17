@@ -1,6 +1,6 @@
 # my_app 使用帮助
 
-> 面向使用者的平台功能与操作指南。本文件由「使用帮助」页面同源生成（frontend/src/helpMarkdown.ts），内容依据 docs/manual/ 各章与 backend/task_registry.py 整理。生成日期：2026-11-16。
+> 面向使用者的平台功能与操作指南。本文件由「使用帮助」页面同源生成（frontend/src/helpMarkdown.ts），内容依据 docs/manual/ 各章与 backend/task_registry.py 整理。生成日期：2026-11-17。
 
 > 站内入口：侧边栏「使用帮助」，或直链 `http://<host>/myapp/?page=help`。
 
@@ -10,7 +10,7 @@
 
 - [1. 平台简介](#1-平台简介)
 - [2. 通用操作](#2-通用操作)
-- [3. 任务管理详解（85 个任务）](#3-任务管理详解)
+- [3. 任务管理详解（84 个任务）](#3-任务管理详解)
 - [4. 页面指南](#4-页面指南)
 - [5. 运维与排障](#5-运维与排障)
 - [6. 常见问题](#6-常见问题)
@@ -83,7 +83,7 @@
 
 > ⚠️ **新增任务必须同时登记进 `worker_watchdog.py` 的 `GROUP_TASK_MAP`** —— 只写 `TASK_SPECS` 不分组 = 任务入队后永远 pending。这是本项目已发生过四次的事故模式（finebi_report_sync / whatsapp_send_ext / sp_email_details / 2026-09-18 的 olib_soc 与 vmax_multi_data_sync）。
 
-### 3.3 全量任务清单（85 个）
+### 3.3 全量任务清单（84 个）
 
 | 任务 | task_id | 默认 cron | 组 | 工作流脚本 |
 | --- | --- | --- | --- | --- |
@@ -92,7 +92,6 @@
 | RAN UME 日报 | `ran_ume_daily` | `0 2 * * *` | u | `services/ran/ran_ume_service.py → run_ran_ume_full_task` |
 | Site Outage 截图 | `site_outage_screenshot` | `0 1 * * *` | m | `services/site/site_outage_service.py → run_site_outage_screenshot` |
 | WhatsApp 消息发送 | `whatsapp_send` | `0 3 * * *` | m | `services/whatsapp/whatsapp_service.py → run_whatsapp_send` |
-| WhatsApp 消息发送（扩展） | `whatsapp_send_ext` | `0 3 * * *` | m | `services/whatsapp/whatsapp_ext_service.py → run_whatsapp_send_ext` |
 | WhatsApp 消息发送（Baileys） | `whatsapp_send_baileys` | `0 4 * * *` | m | `services/whatsapp/whatsapp_send_baileys_service.py → run_whatsapp_send_baileys` |
 | eFlow P1 告警 WhatsApp 推送 | `tt_alarm_whatsapp_alert` | `2-59/5 * * * *` | m | `services/tt/tt_alarm_whatsapp_service.py → run_tt_alarm_whatsapp_alert` |
 | MS SLA 完整同步 | `ms_sla_full` | `0 5 * * *` | n | `services/ms/ms_sla_service.py → run_full_sync` |
@@ -190,7 +189,7 @@
 
 **维护要点**:
 
-- 增量只拉新变更；发现漏数据靠次日 eflow_sync_full 全量兜底
+- 增量只拉新变更且**从不删除**（3 天窗口天然不完整，删了就是事故）；发现漏数据靠次日 eflow_sync_full 全量兜底，**删除 eFlow 已删的单也由该任务做对账**
 - 凭据分组 eflow；会话被踢会连续 failed，由 auto_retry_failed 自动重试
 
 #### eFlow 每日全量同步（`eflow_sync_full`）
@@ -198,13 +197,14 @@
 - 默认 cron: `0 1 * * *`　|　worker 组: **n**
 - 工作流脚本: `services/eflow/sync_from_eflow_api.py → sync_from_eflow_api(mode="full")`
 
-**功能**: eFlow 全量兜底：拉全量窗口（默认自 2026-01-01），补齐增量遗漏并刷新报告。大窗口下 TT/WO 分段拉取，避免单次大导出失败；TT/WO 缺失即判任务失败
+**功能**: eFlow 全量兜底：拉全量窗口（默认自 2026-01-01），补齐增量遗漏、**删除 eFlow 已删除的单**并刷新报告。大窗口下 TT/WO 分段拉取，避免单次大导出失败；TT/WO 缺失即判任务失败
 
 **工作流与数据流**:
 
 1. 每天 01:00 按全量窗口拉取全部记录
 1. 窗口跨度大时 TT/WO **分段拉取**（默认 30 天/段）后合并去重，避免单次大导出超过 120s 轮询窗口而 500 失败
 1. 与增量写同一批主库表，去重覆盖
+1. **对账删除**：比对上游权威单号集合，删掉 eFlow 已删除、本地仍残留的 TT/WO/CR
 1. 完成后刷新相关报告产物
 
 **维护要点**:
@@ -212,6 +212,7 @@
 - 白天发现 eFlow 缺数的首要修复手段，可在任务管理页手动执行一次
 - 全量窗口起点可配置，调整时注意拉取时长；段长由 EFLOW_FULL_SEGMENT_DAYS 控制（默认 30 天）
 - 2026-10-09 修复：此前 TT/WO 全量导出连续多日 500 失败，而任务仍报 success=True（缺失键被静默 continue）。现 TT/WO 缺失即写 errors → success=False
+- 2026-11-16 新增对账删除：此前只 upsert 从不删除，eFlow 删掉的单永久残留（实测本地多出 TT 11 行 / WO 54 行）。**权威源走 base/list 直查而非全量导出** —— 实测导出比直查少约 43/27 行正常单，用导出会误删。四道闸门（只在 full 模式做 / 权威集合必须扫全 / 空集合跳过该表 / 超阈值跳过该表）见 03-data-layer.md；EFLOW_RECONCILE_DELETE=0 可零改码关闭
 
 #### RAN UME 日报（`ran_ume_daily`）
 
@@ -265,22 +266,6 @@
 
 - 依赖截图任务先成功；WhatsApp Web 登录态失效时需人工重新扫码
 
-#### WhatsApp 消息发送（扩展）（`whatsapp_send_ext`）
-
-- 默认 cron: `0 3 * * *`　|　worker 组: **m**
-- 工作流脚本: `services/whatsapp/whatsapp_ext_service.py → run_whatsapp_send_ext`
-
-**功能**: WhatsApp 发送（扩展版）：投递发送作业，由浏览器扩展在已登录的 WhatsApp Web 中发送，与 Playwright 版并存
-
-**工作流与数据流**:
-
-1. 投递发送作业到队列
-1. 浏览器扩展（whatsapp_sender_extension）在已登录的 WhatsApp Web 标签页中实际发送
-
-**维护要点**:
-
-- 2026-08-31 上线时曾漏登记 worker 分组导致 pending 卡死，后补入 m 组——新增任务务必同步登记 GROUP_TASK_MAP
-
 #### WhatsApp 消息发送（Baileys）（`whatsapp_send_baileys`）
 
 - 默认 cron: `0 4 * * *`　|　worker 组: **m**
@@ -290,7 +275,7 @@
 
 **工作流与数据流**:
 
-1. 本任务扫 SITE_OUTAGE_DIR（与 whatsapp_send / whatsapp_send_ext 共享同一份图片目录与 GROUPS 配置）并把 items（含磁盘绝对路径）写进作业文件 data/whatsapp_send_baileys_job.json
+1. 本任务扫 SITE_OUTAGE_DIR（与 whatsapp_send 共享同一份图片目录与 GROUPS 配置）并把 items（含磁盘绝对路径）写进作业文件 data/whatsapp_send_baileys_job.json
 1. whatsapp-kb-bot/src/notify.js 进程的轮询器认领（claim 即置 running + 原子写回），按 (群 × 文件) 调 sock.sendMessage({ image|document, ... })
 1. 服务端回执（res.key.id）确认送达才计入 sent；单条失败不重试到群（避免重复），由 my_app 的 auto_retry_failed 决定
 1. notify.js 回写 result 到作业文件；本任务轮询到 done/failed 后返回（task_runner 据此记任务历史）
@@ -382,6 +367,7 @@
 - 默认 dry_run 演练（只匹配记录不真派单），核对无误后到「任务配置」关掉
 - 关联 99933 无法判定时（fiber 只有 ME 推导站名、与 cmdb 写法不同，如 luogan/luogon）按「没有关联」继续派单并记 correlation_undetermined 留痕——不能因为站名匹配不到就长期漏派
 - 站点解析失败（cmdb 无此站点，如实测 Tokadeh）时自动派不了：记 N 并在群里发一条「需人工在 eFlow 处理」通报，同一条只发一次（send_status 抑制），不静默漏派
+- 站点解析失败是 cmdb 缺档（ME/站名在 cmdb 里找不到站点），不是任务错误（2026-11-17）：本轮失败全是这一类、且 cmdb 索引本身拉到了时，结果记 pending_cmdb（success=true，提示文案留在 message），执行历史显示橙色「待补 cmdb」提示而不是红色 Error；补齐 cmdb 站点/ME 命名后下一轮自动派单。cmdb 索引为空（没拉到）或混有建单失败时仍判 failed
 - Fiber 派单必须带数字站点 ID + 站点名，只传 ME 名接口回 success 却不建 TT（实测教训）
 - Fiber 派单时灵时不灵，故内置重试，且以回查到 ttid 才判成功（不信接口的 status:true）
 - 告警上游已有 ttid 时直接跳过：eFlow 自己的派单规则会先建 TT，不跳过就会重复建单（实测 Zardun 两条）
@@ -2060,12 +2046,13 @@ UME 四层拓扑（IP RAN 光纤 / IP Core / Metro Ring / DWDM）：四层共用
 
 #### olibTopo（`olibTopo`）
 
-OLIB FO 全国光纤网络拓扑（静态参考页）：把 Orange Liberia 网络拓扑 PDF 的第 1 页物理图、第 2 页逻辑图原样嵌入，并在物理图上叠加 553 个提取站点。支持缩放 / 平移 / 站点搜索 / 骨干核心与 5G·ISP 筛选，点站点可看区域、原图相对位置和类型，并可全图定位或放大看周边链路。
+OLIB FO 全国光纤网络拓扑（静态参考页）：把 Orange Liberia 网络拓扑 PDF 的第 1 页物理图、第 2 页逻辑图原样嵌入，并在物理图上叠加 667 个提取站点。支持缩放 / 平移 / 站点搜索 / 骨干核心与 5G·ISP 筛选，点站点可看区域、原图相对位置和类型，并可全图定位或放大看周边链路。
 
-- 四个视图：「原图 · 物理拓扑」（叠加站点点位）/「原图 · 逻辑拓扑」/「骨干示意」（按第 2 页逻辑图梳理的 9 个核心节点与链路）/「站点分布」（散点，按区域着色）
+- 三个视图：「原图 · 物理拓扑」（叠加站点点位）/「原图 · 逻辑拓扑」/「骨干示意」（按第 2 页逻辑图梳理的 9 个核心节点与链路）
 - 物理图点位：灰=普通、红=5G、蓝=ISP、紫=骨干核心；半径随缩放反向补偿，放大后仍是细小圆点。滚轮缩放、拖动平移，右下角缩略图可点击跳转，工具条可重置 / 全屏 / 隐藏点位
 - 右侧站点查询是模糊搜索：忽略大小写和标点，可以按站名或区域里的词匹配，打错一个字母或少写一两个字母也能找到；另有区域下拉与「全部 / 5G / ISP / 骨干核心」快捷筛选。结果超过 300 条时只渲染前 300 条并明确提示，不会静默截断。点一条结果会放大到该站
-- 点站点后详情卡显示区域、原图相对位置（近似值，不是 GPS）与类型；「全图定位」「放大看周边链路」「在分布图上查看」三个按钮与参考页一致
+- 点站点后详情卡显示区域、原图相对位置（近似值，不是 GPS）与类型；「全图定位」「放大看周边链路」两个按钮与参考页一致
+- 数据口径与来源（PDF 出处、坐标换算、骨干核心与链路、已知限制）在**页面最下面**：右下角只有一个问号，点开才展开，不占首屏也没有常驻说明条
 - 本页是**纯静态参考页**：数据来自 PDF 一次性提取，存于 networkTopology/topologyData.ts，原图在 public/topology/；不连后端、不写库，自动刷新建议 1800 秒且内容不会变化
 
 #### MW 微波实时（`mwRealTime`，iframe 页）
@@ -2305,6 +2292,7 @@ LTE 丢包看板（RAN UME SDR / IPRAN IPPD）：最近 7 个完整自然日、�
 - 三处最容易核对不上的地方直接写进气泡：**状态饼图含无坐标站点、区域柱图只统计非 OK（含 Minor/Warning）、顶部 Affected Sites 只是 Critical + Major** —— 三个集合不同，数字不该互相对账
 - 每日趋势的中位数**只取当天 >0 的读数**（逐小时丢包约 59% 是 0，全量取中位会被压成 0 失去意义）；而 Top 站点用的是**含 0 的每站点中位**（否则「半天全断」与「整天全断」同为 100，失去区分度）—— 同名「中位数」两种口径，气泡各写各的
 - 本页原先有两份自写气泡（复制按钮、主题色、强调渲染各自一套），已删除并统一走 `components/MetricExplain`；下钻「共 N 行」气泡写明它是搜索框筛过的行数、接口按上限截断
+- **站点类型过滤（2026-11-17）**：Packet Loss Status 横幅右侧的下拉按主数据站点类型（ERA / COOL / NORMAL，取 `eflow_site.site_type`；口述的 `COOLI` 在库里就是 `COOL`）筛选，**整页数字一起变** —— 站点总数、Affected Sites、六张状态卡、饼图、区域分布、每日趋势、Top 站点、地图圆点与图例、点击下钻的明细全部换成选中档位。**默认档位是 NORMAL**（用户口径），需要看全网时切到 `All`。下拉里的两个数是「被丢包监控的站点数 / 主数据站点总数」，恒为全量分布（切档不变），实测 ERA `197/216`、NORMAL `520/600`、COOL `0/64`。**COOLI 的分子是 0 不是漏做**：64 个 COOL 站在 UME 网元清单里都在，但丢包数据只来自 `SDR_IPPD` / `ITRAN_IPPD` 两个 IP 承载模板，这些站在源表 `packet_loss_data` 里一条读数都没有（按编码、按站名模糊查均为 0），下拉里因此置灰；在 eflow_site 里按编码和名称都找不到的站点归入「未匹配主数据」（4 个），保证 197 + 0 + 520 + 4 = 721 与「全部」对得上
 
 #### 电池看板（`battery`）
 

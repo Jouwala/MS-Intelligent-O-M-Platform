@@ -27,7 +27,7 @@
     python tools/backfill_manual_stop_flag.py --check
         # 只看当前状态，不写库（改动前先跑这个确认名单）
 
-    python tools/backfill_manual_stop_flag.py --apply whatsapp_send whatsapp_send_ext
+    python tools/backfill_manual_stop_flag.py --apply whatsapp_send
         # 把列出的 task_id 置为「用户手动关过」（manually_stopped=1）
 
     python tools/backfill_manual_stop_flag.py --clear whatsapp_send
@@ -64,13 +64,11 @@ _SPEC_BY_ID = {spec["task_id"]: spec for spec in TASK_SPECS}
 
 # 默认回填名单（2026-10-20 由业务侧确认）：
 #   whatsapp_send        —— WhatsApp 消息发送（Playwright 通道）
-#   whatsapp_send_ext    —— WhatsApp 消息发送（扩展）—— 同一批产物的另一条通道，
-#                           业务上只保留一条；原为豁免任务，2026-10-20 移出豁免名单
 #   sp_whatsapp_report   —— Comsumables&SpareParts Report Whatsapp
-# 三个都已在库里是 enabled=0 / manually_stopped=0 或 1（见下），这里做幂等回填。
+# 两个都已在库里是 enabled=0 / manually_stopped=0 或 1（见下），这里做幂等回填。
+# （`whatsapp_send_ext` 曾在此名单里，2026-11-16 该任务下线，故移除。）
 DEFAULT_TASK_IDS = [
     "whatsapp_send",
-    "whatsapp_send_ext",
     "sp_whatsapp_report",
 ]
 
