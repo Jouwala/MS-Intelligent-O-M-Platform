@@ -6,7 +6,7 @@
 | `docs/architecture/` | 架构现状：模块地图、数据源登记表 |
 | `docs/adr/` | 架构决策记录（ADR） |
 | `docs/operations/` | 运维记录（如回滚演练记录，见方案第 9 节） |
-| `docs/archive/` | 历史档案（`PROJECT_DOCS.md`、`PROJECT_DOCS_ARCHIVE.md`；只存档，现状不写回） |
+| `docs/archive/` | 历史档案（`PROJECT_DOCS.md`、`PROJECT_DOCS_ARCHIVE.md`、旧 MS 副本仓库重构执行方案；只存档，现状不写回，说明见 `docs/archive/README.md`） |
 
 ## 约定
 
