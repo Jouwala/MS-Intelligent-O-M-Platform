@@ -220,7 +220,10 @@
        默认 'gis' 与 DATA.MAP_TABS 的第一项一致。 */
     mapTab: (function () {
        /* 2026-11-16：IP 页签的 page 从 ipranTopo 换成 olibTopo。旧会话记着旧值时
-          直接回落到第一页（Alarm），这里改读成新页，用户上次停在 IP 上就还停在 IP。 */
+          直接回落到第一页（Alarm），这里改读成新页，用户上次停在 IP 上就还停在 IP。
+          2026-11-17：IP 页签（olibTopo）已整体移到 Knowledge Q&A（页签 Topology），
+          本栏 MAP_TABS 不再有它 —— 旧会话记着的 'olibTopo' 经 curMap() 的兜底
+          回落到第一页（Alarm），与「页签没了就回落」的既有口径一致，不必再迁移。 */
        var v = ls('olbr.maptab', 'gis');
        return v === 'ipranTopo' ? 'olibTopo' : v;
      })(),
@@ -3126,15 +3129,17 @@
 
   /* ⚠️ 2026-09-29（用户要求「GIS Map 添加并只显示 /myapp/?page=mwRealTime 的地图组件，
      reload 和 openlink 放到最右边」，随后澄清「GIS Map 和 mwRealTime 都要显示」）：
-     本栏**内嵌** my_app 的地图页（iframe），当前**六个页签**
-     （2026-11-16 IP 页签改为 olibTopo 物理图，2026-11-11 多一个 PL / packet_loss）：
+     本栏**内嵌** my_app 的地图页（iframe），当前**五个页签**
+     （2026-11-17 IP 页签移出本栏、去 Knowledge Q&A 当第四页签「Topology」；
+      2026-11-16 IP 页签改为 olibTopo 物理图，2026-11-11 多一个 PL / packet_loss）：
        · gis         —— 「Alarm」（GIS 页）
        · person      —— 「Person」（人员位置地图，2026-10-19 按用户要求加在 Alarm 之后）
        · mwRealTime  —— 「MW」（微波实时）
        · ipt_power   —— 「Power」（2026-11-06 加，原名 IPT Power，2026-11-11 改名）：
                          只显示 Site map 地图卡，筛选条 / KPI 数字卡 / 右侧站点清单
                          由剥离样式隐藏（见 olbr-data.js 的 MAP_TAB_CSS）
-       · olibTopo    —— 「IP」（2026-11-16 起）：物理拓扑原图，不注入剥离样式；maponly 时搜索框浮在图上
+       · （olibTopo ——「IP」，2026-11-16~11-17 曾在本栏：物理拓扑原图，现搬去
+          Knowledge Q&A 第四页签「Topology」，见 qaItems() 上方的 topologyItem()）
        · packet_loss —— 「PL」（2026-11-11 加；2026-11-16 按要求改成与其它页签
                          一样的纯地图形态）：横幅 / KPI / 图表 / Top10、卡片头、
                          图层开关与地图控制行全部去掉，只留铺满的 Leaflet 画布；
@@ -3249,17 +3254,44 @@
   function mapSrc() {
     return curMap().src;
   }
-  /* Open Link 的地址（2026-10-19 用户：「Open Link 打开完整页面」）。
-     内嵌 src 里的 `maponly=1` 只服务**门户栏内**的"只显示地图"形态；
-     新窗口是给人看的完整页，必须去掉它（Person 页默认就是「筛选条 + KPI +
-     图表 + 地图 + 人员表」的完整看板）。
-     ⚠️ 只剥这一个参数，其余（mwembed / embed / lang / theme）原样保留：
-     它们与本页的取景、语言、主题一致，去掉反而会让新窗口与门户里看到的不一样。 */
+  /* Open Link 的地址 = 该地图页的**独立完整页**（= 直接在浏览器里输入 ?page=xxx 的那一页）。
+     ---------------------------------------------------------------------------
+     2026-10-19 用户：「Open Link 打开完整页面」。当时只剥了 `maponly=1`，
+     `mwembed` / `embed` / `gisShift` 原样带进新窗口 —— **这个判据是错的**。
+
+     ⚠️ 2026-11-17 用户报障（本次教训）：
+       「GIS Map 的 MW 页签，点击 openlink 后 /myapp/?page=mwRealTime&mwembed=1&embed=1&lang=en
+        只有个地图了，应该跟 /myapp/?page=mwRealTime 一样」
+     根因：这四个参数全都只描述**"在门户 iframe 里怎么显示"**，进了独立窗口反而把
+     该页本体拆掉（已用无头浏览器逐帧量过，见 docs/architecture.md 九之二十一）：
+
+       · mwembed=1  —— mw_real_time.html **自己**认它（其 html.mw-embed 那段 CSS），
+                       把本页自己的标题栏 / KPI / 右栏 / 底栏全部 display:none，只剩一张地图。
+                       MW 是 legacy 单文件页，这正是用户看到的「只有个地图」。
+       · embed=1    —— my_app 认它（App.tsx 的 shellHidden），连 my_app 的 Header / 侧栏
+                       也一起隐藏。所以即便只剥 mwembed，新窗口仍不是「直开的那一页」。
+       · maponly=1  —— Person / olibTopo 的"只留画布"开关（PersonMap.tsx 的 readMapOnlyMode）。
+       · gisShift=1 —— Alarm 页为避开门户左侧告警面板做的平移（见 mapItems 上方那大段注释）。
+
+     结论：新窗口把上面四个**全部**去掉，只保留 page / lang / theme 与各页自己的业务参数：
+       · lang  —— 与门户当前语言一致；
+       · theme —— 与门户当前主题一致。`theme.ts::themeFromUrl` 明确写了它「只影响本次渲染、
+                   不写回 localStorage」，所以带过去不会污染用户的全局偏好；去掉则会让
+                   深色门户点开一个浅色窗（同一份 UI 两种入口两套主题，正是那条注释在防的）。
+       · 其余（如 olibTopo 的 view=physical）是页面自己的业务参数，一概不动。
+
+     口径一句话：**Open Link = 直开该页**，不是「把门户里那块 iframe 放大了看」。
+     ⚠️ 将来新增"仅门户内生效"的版式参数时，必须同时加进下面的 MAP_OPEN_DROP，
+        否则又会出现「新窗口里少一块」这类报障。 */
+  var MAP_OPEN_DROP = { maponly: 1, mwembed: 1, embed: 1, gisShift: 1 };
   function mapOpenSrc() {
-    return mapSrc().replace(/([?&])maponly=[^&#]*(&?)/, function (all, pre, post) {
-      if (pre === '?') return post ? '?' : '';
-      return post ? pre : '';
-    }).replace(/[?&]$/, '');
+    var s = mapSrc();
+    var qi = s.indexOf('?');
+    if (qi === -1) return s;
+    var keep = s.slice(qi + 1).split('&').filter(function (kv) {
+      return kv && !MAP_OPEN_DROP[kv.split('=')[0]];
+    });
+    return s.slice(0, qi) + (keep.length ? '?' + keep.join('&') : '');
   }
 
   /* 地图栏的面板头 + 页签 + 工具按钮（2026-09-23 抽出）。
@@ -5057,6 +5089,33 @@
       status: 'online', freq: '', clicks: 0, icon: 'table'
     };
   }
+  /* ================================================================== 2026-11-17
+     Knowledge Q&A 第四页签「Topology」（用户要求）
+     ----------------------------------------------------------------------------
+     用户要求「GIS Map 的 IP 页签移动到 Knowledge Q&A，页签名字 Topology」：
+     内容不变（my_app 的 ?page=olibTopo 物理拓扑原图，view=physical，可模糊搜站点），
+     只是从地图栏搬进问答栏并改名。与 Master Site 同属「页面固定功能」：
+     用合成条目喂给 qaItems()/qaSrc() 的既有管线，不往目录里塞一条假看板。
+     ⚠️ url 用**同源相对路径**：qaSrc 的 my_app 分支统一补 embed=1 / lang / theme，
+        并对 olibTopo 追加 maponly=1（与地图栏 mapItems 同一约定：页面只留拓扑画布，
+        搜索框浮在图上；my_app 侧 NetworkTopology.tsx 的 readMapOnlyMode）。
+        条目 url 本身不带 maponly —— qaOpen「打开」进新窗口看到的是完整页。
+     ⚠️ 地图栏 MAP_TABS 已同步删掉该页签（见 olbr-data.js 的 2026-11-17 注释）；
+        'map.ip' 词条与 share-network 图标保留，由本条目复用。
+     ⚠️ 团队门户 v3/team_portal 的资产由 scripts/patch_team_portal.py 从上游生成：
+        qa-filter 钩子按矩阵 **map 域的 olibTopo 子键**过滤本页签（fo / bo / flm 勾了、
+        smc / cxo 未勾）—— 页签搬了家，可见性不换域。改完上游必须重跑该脚本，
+        `npm run check:team-scope`（本机 python 不在 PATH 时用 py 直跑四个子脚本）会拦。 */
+  function topologyItem() {
+    return {
+      no: -9003, groups: ['Knowledge Q&A'],
+      titleZh: 'Topology（物理拓扑）', titleEn: 'Topology (physical topology)',
+      descZh: 'OLIB 物理拓扑原图（原 GIS Map 的 IP 页签），可模糊搜索站点。',
+      descEn: 'OLIB physical topology drawing (formerly the GIS Map IP tab); fuzzy site search supported.',
+      platform: 'myapp', url: '/myapp/?page=olibTopo&view=physical',
+      status: 'online', freq: '', clicks: 0, icon: 'share-network'
+    };
+  }
   function qaItems() {
     var all = allowed();
     var pick = function (needle) {
@@ -5065,6 +5124,11 @@
     /* 先算好 Master Site，团队版的 qa-filter 钩子（插在下面 eflow 行之后）会按矩阵
        把它置 null；变量必须声明在钩子之前，否则钩子的赋值会被后面的 var 覆盖。 */
     var masterSite = masterSiteItem();
+    /* 2026-11-17：第四页签 topology（Topology，原 GIS Map 的 IP 页签）同样先算好
+       放进变量 —— 理由同上。团队版按 **map 域的 olibTopo 子键**过滤（见
+       scripts/patch_team_portal.py 的 qa-filter 钩子）：页签只是搬了家，
+       可见性沿用原 IP 页签的矩阵口径（fo / bo / flm 勾了），smc / cxo 不出现。 */
+    var topology = topologyItem();
     /* RAG 条目的**识别条件**。历史上有三种 url 形态，必须都能认得出来，
        否则条目被 filter(Boolean) 滤掉、整个 RAG 页签消失（2026-10-24 踩过：
        改地址时只改了下面 qaSrc 的归一目标，漏改这里，导致 RAG 页签不见）：
@@ -5095,6 +5159,13 @@
       if (qaAllow.indexOf('eflow') === -1) eflow = null;
       if (qaAllow.indexOf('rag') === -1) rag = null;
       if (qaAllow.indexOf('master_site') === -1) masterSite = null;
+      /* 2026-11-17：上游第四页签 topology（Topology）＝ 原 GIS Map 的 IP 页签
+         （olibTopo）搬过来的。可见性**沿用 map 域的 olibTopo 子键**（fo / bo / flm
+         勾了）而不是在 qa 域里另立一行 —— 页签只是搬了家，权限不换域，
+         与「谁原来看得到 IP，现在就看得到 Topology」的口径一致。
+         ⚠️ map.olibTopo 自 2026-11-16 起已在矩阵里（原 IP 页签的登记），
+            服务端模板合并会带出来，无需新增 qa/topology 键。 */
+      if (!SCOPE.ok('map', 'olibTopo')) topology = null;
     }
     /* ⚠️ 2026-11-04（用户要求「Knowledge Q&A 里面的 CCH 单独拆出来」）：
        原第三页签 VMAX 用户查询（短标签 CCH）已搬到独立面板 #cchSlot，
@@ -5106,9 +5177,12 @@
     /* 2026-11-08：追加第三页签 master_site（Master Site）。数组顺序即页签条顺序，
        也决定未指定 state.qaTab 时的默认选中项 —— 这里**加在末尾**，默认仍是 eFlow，
        不改动用户既有的默认浏览习惯；localStorage 里的旧 qaTab 值也不受影响。 */
+    /* 2026-11-17：追加第四页签 topology（Topology，原 GIS Map 的 IP 页签搬过来）。
+       同样加在**末尾**，默认选中仍是 eFlow，localStorage 旧值不受影响。 */
     return [eflow && { key: 'eflow', item: eflow },
             rag && { key: 'rag', item: rag },
-            masterSite && { key: 'master_site', item: masterSite }].filter(Boolean);
+            masterSite && { key: 'master_site', item: masterSite },
+            topology && { key: 'topology', item: topology }].filter(Boolean);
   }
   /* 页签上显示的**短标签**（2026-10-12 改）：目录标题太长
      （"RAG Knowledge Q&A (本地知识问答 / Open WebUI)"），
@@ -5121,6 +5195,9 @@
     /* 2026-11-08：第三页签短名。用户指定的页签名就是 "Master Site"，
        中英同值（与 qa.tabRag = 'O&A' 同一处理），不是漏翻译。 */
     if (tab.key === 'master_site') return t('qa.tabMasterSite');
+    /* 2026-11-17：第四页签短名。用户指定的页签名就是 "Topology"，
+       中英同值（与 Master Site 同一处理），不是漏翻译。 */
+    if (tab.key === 'topology') return t('qa.tabTopology');
     return titleOf(tab.item);
   }
   /* 页签的 title 全称：短名之外仍要让用户看得到完整标题（含说明），
@@ -5149,7 +5226,13 @@
       var sep = (q.indexOf('embed=') !== -1) ? '' : '&embed=1';
       var thm = (state.theme === 'dark' && q.indexOf('theme=') === -1) ? '&theme=dark' : '';
       var lng = (q.indexOf('lang=') !== -1) ? '' : langQs();
-      return '/myapp/' + q + sep + thm + lng;
+      /* 2026-11-17：Topology 页签（page=olibTopo）与地图栏 mapItems 同一约定补
+         maponly=1 —— iframe 里只留物理拓扑画布、搜索框浮在图上（my_app 侧
+         NetworkTopology.tsx 的 readMapOnlyMode）。条目 url / qaOpen 的新窗口
+         **不带**它：点「打开」看到的仍是完整页（与地图栏 mapOpenSrc 剥 maponly
+         同一意图，这里靠"条目 url 本来就不带"实现）。 */
+      var topo = (q.indexOf('page=olibTopo') !== -1 && q.indexOf('maponly=') === -1) ? '&maponly=1' : '';
+      return '/myapp/' + q + sep + topo + thm + lng;
     }
     /* RAG（外域）：无论目录里存的是什么旧地址（`http://192.168.100.27:3000/`、
        `https://192.168.100.27/`、`https://192.168.100.27:8443/`），这里**无条件
@@ -7881,7 +7964,9 @@
        仍沿用内层页自己的 zoom 8 取景，门户不做任何自动放大（同 Alarm / Person）。
        未登记的页默认也是不放大，这里显式列出便于对照。
        2026-11-11 加 packet_loss（"PL" 页签）：同样用内层页自己的 zoom 8。 */
-    ipt_power: false, olibTopo: false, packet_loss: false
+    ipt_power: false, packet_loss: false
+    /* 2026-11-17：olibTopo（IP 页签）已移到 Knowledge Q&A（页签 Topology），本栏
+       不再加载它，上面的显式列出随之删掉；QA 栏的 iframe 也不走 zoomOnce 这条路。 */
   };
   /* 打开后自动**缩小一级**的页（2026-10-12 加，2026-10-13 清空）。
      与 MAP_ZOOM_IN_BY_PAGE 是两个方向、互斥使用：同一页不会既放大又缩小。
@@ -8540,6 +8625,13 @@
     /* 地图是内嵌 iframe：my_app 只在启动时读一次主题（且这页不收 postMessage），
        所以换主题必须重设 src 才能让地图跟着变深浅色。 */
     var f = $('#mapFrame'); if (f) { f.src = mapSrc(); }
+    /* ⚠️ 2026-11-17：「Open Link」的 href 是**渲染时**拼出来的（mapOpenSrc 读 state.theme），
+       而上面只重设了 iframe 的 src —— 不补这一行，深色门户点开的新窗口仍是浅色。
+       实测（无头浏览器）：light 时 href 无 theme、点 #themeBtn 切到 dark 后 href 依旧无 theme，
+       而 iframe.src 已带 &theme=dark。
+       就地替换 .map-tools 那一段（与 toggleMapWheelLock 同一做法），不重画整个面板：
+       缩放锁按钮的按下态存在 state 里，重建不会丢。 */
+    var mt = $('#l0Map .map-tools'); if (mt) mt.outerHTML = mapToolsHtml();
     /* 报告文件那块不看 URL 参数也不收 postMessage（my_app 只在启动时读 myapp-theme），
        只能靠 ensureEmail 里的「上次主题 ≠ 本次」判据重设 src。
        v1：报告文件常驻（不再是"切到那个页签才渲染"），所以这里无条件调一次。 */

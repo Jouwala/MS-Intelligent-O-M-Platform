@@ -2513,6 +2513,104 @@ FO / BO / FLM 三个团队门户的 PL 页签同步生效（smc / cxo 仍按矩�
 底图、县色、站点圆点齐全。本次截图与探针均为一次性产物（`TMP/`，不入库）；
 留档图 `TMP/_shot_pl_final.png`。
 
+## 九之二十一、2026-11-17 GIS Map「Open Link」改为直开该页（MW 页签只剩地图的根因）
+
+**报障原话。**「`https://localhost/v3/olbrportal/` 页面的 GIS Map 的 MW 页签，点击 openlink 后
+`https://localhost/myapp/?page=mwRealTime&mwembed=1&embed=1&lang=en` 只有个地图了，
+应该跟 `https://localhost/myapp/?page=mwRealTime` 一样」。
+
+**根因。** `mapOpenSrc()`（`v3/olbrportal/assets/olbr.js`）只从内嵌 src 里剥掉了 `maponly=1`，
+把 `mwembed` / `embed` / `gisShift` 原样带进了新窗口。这四个参数全都只描述「在门户 iframe 里
+怎么显示」，进独立窗口后反而把该页本体拆掉：
+
+| 参数 | 谁在认它 | 进独立窗口后的后果 |
+| --- | --- | --- |
+| `mwembed=1` | `mw_real_time.html` 的 `html.mw-embed` CSS | **本页自己的**标题栏 / KPI / 右栏 / 底栏全部 `display:none`，只剩一张地图 —— 即用户看到的症状 |
+| `embed=1` | my_app `App.tsx` 的 `shellHidden` | 连 my_app 的 Header / 侧栏一起隐藏，仍不是「直开的那一页」 |
+| `maponly=1` | `PersonMap.tsx::readMapOnlyMode` | Person / olibTopo 只留画布 |
+| `gisShift=1` | 门户按页平移（本文件九之八 / `MAP_ZOOM_IN_BY_PAGE` 同一族开关） | Alarm 页的地图被平移 10% 右移，直开页没有这个位移 |
+
+`mwembed` 那条是 2026-11-10 为「门户里 MW 只留地图」特意做的（见 my_app 手动 11-feature-guide），
+**在 iframe 里是对的**；错的是把它当成「这一页怎么显示」的持久设置带给了新窗口。
+
+**做法（只改门户壳，my_app 一行未动）。** `mapOpenSrc()` 改成按参数名过滤：
+
+```js
+var MAP_OPEN_DROP = { maponly: 1, mwembed: 1, embed: 1, gisShift: 1 };
+// 保留 page / lang / theme 与各页自己的业务参数（如 olibTopo 的 view=physical）
+```
+
+- 保留 `lang`：与门户当前语言一致。
+- 保留 `theme`：与门户当前主题一致。`theme.ts::themeFromUrl` 明确「只影响本次渲染、不写回
+  localStorage」，带过去不污染用户偏好；去掉会让深色门户点开一个浅色窗。
+- 口径一句话：**Open Link = 直开该页**，不是「把门户里那块 iframe 放大了看」。
+- ⚠️ **将来新增「仅门户内生效」的版式参数，必须同时加进 `MAP_OPEN_DROP`**，否则又会出现
+  「新窗口里少一块」的同类报障。
+
+**实测验收（无头浏览器 + 真实点击 `#mapOpen`，1600×900）。** 五个页签的 Open Link 均不再带
+内嵌参数（iframe src 一字未改）：
+
+| 页签 | iframe src（未变） | Open Link（改后） |
+| --- | --- | --- |
+| Alarm | `/myapp/?page=gis&mwembed=1&embed=1&gisShift=1&lang=en` | `/myapp/?page=gis&lang=en` |
+| Person | `…&page=person&mwembed=1&embed=1&maponly=1&lang=en` | `/myapp/?page=person&lang=en` |
+| **MW** | `…&page=mwRealTime&mwembed=1&embed=1&lang=en` | **`/myapp/?page=mwRealTime&lang=en`** |
+| Power | `…&page=ipt_power&mwembed=1&embed=1&lang=en` | `/myapp/?page=ipt_power&lang=en` |
+| PL | `…&page=packet_loss&mwembed=1&embed=1&lang=en` | `/myapp/?page=packet_loss&lang=en` |
+
+MW 弹窗内逐帧量：`html.mw-embed` 为 false；内层 `#kpis` 1555×104、`#right` 370×593、
+`#topo-head` 1141×39 全部 `display:grid/flex`（改前这四项均 `none/0x0`），
+主帧 Header 63px 在 —— 与直开 `/myapp/?page=mwRealTime&lang=en` 逐项一致（截图像素级同观感）。
+本次探针与截图都是一次性产物（`TMP/`，不入库）。
+
+**顺带修掉的一处「href 不跟主题」。** `#mapOpen` 的 href 是渲染时拼的，而 `setTheme()` 以前
+只重设 `#mapFrame.src`、不重画工具条 —— 于是在深色门户里点开的新窗口仍是浅色
+（实测：切到 dark 后 iframe.src 已有 `&theme=dark`，href 却还是没 theme）。
+现在 `setTheme()` 末尾就地替换 `.map-tools`（与 `toggleMapWheelLock()` 同一做法，缩放锁
+的按下态存在 `state` 里，重建不丢）。改后 dark 的 href = `…&theme=dark&lang=en`，
+弹窗内 `documentElement.dataset.theme = dark`、KPI / 右栏尺寸与浅色一致。
+
+**团队门户。** `v3/team_portal/assets/olbr.js` 由 `scripts/patch_team_portal.py` 从上游生成，
+已同步重跑；`npm run check:team-scope` 的四项全部 ✓（含共享资产）。团队门户要登录才能进，
+故那边只做到「生成物与上游基线逐字节一致」这一层证据，没有真点一次。
+
+**本次刻意没动的。** `v1/olbrportal` / `v2/olbrportal` / `MsPortal` 三个旧壳的 Open Link 仍是
+直接 `href=mapSrc()`（打开的就是内嵌地址），同样会只剩地图。那三份是历史版本，
+用户报的是 `/v3/olbrportal/`，故不顺手改 —— 要改就得各自新增一份 `mapOpenSrc()`
+并各自实测（三份实现不同，MsPortal 是 JS 里给 `href` 赋值）。
+
+## 九之二十二、2026-11-17 GIS Map「IP」页签移到 Knowledge Q&A（改名 Topology）
+
+**起因。** 用户要求 `/v3/olbrportal/` 的 GIS Map 栏不再放「IP」页签，把它的内容
+（`/myapp/?page=olibTopo&view=physical` 的 OLIB 物理拓扑原图）搬进 Knowledge Q&A 栏
+当页签，页签名按用户点名改为 **Topology**。
+
+**做法（只改门户壳，my_app 一行未动）。**
+
+- `v3/olbrportal/assets/olbr-data.js`：`MAP_TABS` 删掉 `olibTopo` 行（本栏剩五个页签）。
+  `'map.ip'` 词条、`PH['share-network']` 图标、`MAP_TAB_CSS['olibTopo']` **保留**
+  —— QA 栏的合成条目还在用图标，词条与空剥离样式按 `map.alarm` / `map.loss` 的
+  既有约定留着，将来恢复页签不用重写。
+- `v3/olbrportal/assets/olbr.js`：
+  - 新增 `topologyItem()`（合成条目 `no:-9003`，url `/myapp/?page=olibTopo&view=physical`，
+    icon `share-network`），与 `masterSiteItem()` 同一套「页面固定功能」口径；
+  - `qaItems()` 追加第四页签 `topology`（加在末尾，默认选中仍是 eFlow，旧
+    `localStorage.qatab` 不受影响）；
+  - `qaSrc()` 对 `page=olibTopo` 追加 `maponly=1`（与地图栏 `mapItems()` 同一约定：
+    iframe 只留物理拓扑画布、搜索框浮在图上；my_app 侧 `NetworkTopology.tsx` 的
+    `readMapOnlyMode`）。条目 url 本身不带它 —— qaOpen「打开」新窗口仍是完整页；
+  - 旧会话 `localStorage.maptab === 'olibTopo'` 由 `curMap()` 的兜底回落到第一页
+    （Alarm），不做额外迁移。
+
+**团队门户。** 页签搬了家，可见性**不换域**：`patch_team_portal.py` 的 `qa-filter`
+钩子按矩阵 **map 域的 `olibTopo` 子键**（fo / bo / flm 勾了）放行 QA 的 `topology`
+页签，不在 qa 域另立键 —— 谁原来看得到 IP，现在就看得到 Topology；smc / cxo 不变。
+`map.olibTopo` 子键保留为可见性真源（map-filter 钩子已消费不到它）。生成物已重跑
+`patch_team_portal.py` + `sync_team_assets.py`，四道一致性检查全 ✓。
+
+**验收。** 两份 olbr.js / olbr-data.js `node --check` 通过；无头浏览器实测见同日记录
+（GIS Map 页签条无 IP、Knowledge Q&A 出现 Topology 且内嵌物理拓扑画布）。
+
 ## 十、相关文档
 
 | 内容 | 去哪里 |
