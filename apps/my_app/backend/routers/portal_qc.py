@@ -45,7 +45,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from backend.database import get_raw_connection
 from backend.dialect_helpers import list_table_names, table_columns, upsert
-from backend.services.eflow_alarm_service import ALARM_CODE_CONDS
+from backend.services.eflow.eflow_alarm_service import ALARM_CODE_CONDS
 # PM 里程碑口径（2026-11-16）：PMT 卡的「等待 PM Manager Approve」数必须与
 # my_app ?page=pm_analysis 里程碑条上的同名节点逐条相等，所以口径不在这里
 # 另写一份，而是复用 pm_workflow_service（那边是里程碑语义的唯一真相源）。

@@ -38,8 +38,8 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 
-from backend.services.eflow_api_client import _headers_extra, _http_request
-from backend.services.eflow_data_mapper import (
+from backend.services.eflow.eflow_api_client import _headers_extra, _http_request
+from backend.services.eflow.eflow_data_mapper import (
     CR_API_PATH,
     CR_LIST_FIELDS,
     CR_REFERER,
