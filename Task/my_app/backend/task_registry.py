@@ -212,13 +212,15 @@ TASK_SPECS = [
          description_en="Send Site Outage screenshots and files to WhatsApp groups",
          default_cron="0 3 * * *", category="whatsapp"),
 
-    # 5b. WhatsApp 发送（扩展版）：投递作业并等待浏览器扩展在已登录的 WhatsApp Web 标签页中发送。
-    #     与上面的 Playwright 版并存，互不影响；扩展见 Task/my_app/whatsapp_sender_extension。
-    dict(task_id="whatsapp_send_ext", name="WhatsApp 消息发送（扩展）", name_en="WhatsApp Message Send (Extension)",
-         loader=("backend.services.whatsapp_ext_service", "run_whatsapp_send_ext"),
-         description="投递发送作业，由浏览器扩展在已登录的 WhatsApp Web 中发送 Site Outage 截图",
-         description_en="Dispatch a send job; a browser extension sends Site Outage screenshots in the logged-in WhatsApp Web",
-         default_cron="0 3 * * *", category="whatsapp"),
+    # 5b. （已下线 2026-11-16）WhatsApp 消息发送（扩展）—— 原 task_id `whatsapp_send_ext`。
+    #     下线原因：用户确认不再需要这条「后端投递作业 → 浏览器扩展认领发送」的定时通道，
+    #     只保留 Playwright 版（whatsapp_send）与 Baileys 版（whatsapp_send_baileys）。
+    #     ⚠️ 浏览器扩展本身（Task/my_app/whatsapp_sender_extension）与它共用的接口
+    #     （/api/whatsapp/outbox、/api/whatsapp/ext/job）**仍然存在**：扩展侧栏手动发送、
+    #     扩展自身的定时直发、以及 eFlow P1 告警的 ext 兜底通道都走它们，
+    #     所以 `backend/services/whatsapp_ext_service.py` 没有跟着删。
+    #     回滚方式：把上面那段 spec 原样加回，并在 worker_watchdog 的 m 组补回
+    #     `whatsapp_send_ext`；DB 里的 task_schedule_config 行按需重建。
 
     # 5d. WhatsApp 发送（Baileys 通道）—— 第三种实现，与 Playwright / 扩展版**并行**。
     #     走 whatsapp-kb-bot/src/notify.js 进程（Baileys 协议直发，与聊天机器人/P1告警

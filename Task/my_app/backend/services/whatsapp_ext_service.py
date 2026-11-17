@@ -1,15 +1,27 @@
 """
 WhatsApp 扩展发送服务（配合 Chrome 扩展 Task/my_app/whatsapp_sender_extension）
 
+⚠️ 2026-11-16：由本服务驱动的定时任务 `whatsapp_send_ext`（WhatsApp 消息发送（扩展））
+已按用户要求**下线**（见 `backend/task_registry.py` 的 5b 注释）。本模块**不能删** ——
+它还是扩展通道的服务端：
+  * `build_outbox_payload()` / `resolve_image_path()` 供 `/api/whatsapp/outbox`
+    （扩展侧栏手动发送、扩展自身定时直发）取图片清单；
+  * 「投递作业 → 扩展认领 → 回报」的作业状态机仍是 `/api/whatsapp/ext/job` 的
+    发图分支（`whatsapp_job_claim` 按 `kind` 分发），并与 eFlow P1 告警的
+    `tt_alert_job`（文本分支）共用同一个认领口。
+所以 `run_whatsapp_send_ext()` 现在**没有调度器调用**，只保留为人工/脚本投递入口
+（`python -m backend.services.whatsapp_ext_service`）；若要恢复定时发送，
+按 task_registry.py 5b 注释里的回滚方式加回任务即可。
+
 与 whatsapp_service.run_whatsapp_send（Playwright 自启浏览器）**并行**的第二种实现，
 两者共用同一份图片目录与群组/备注配置；原任务保持不动。
 
 工作模型（拉取/工人）：
-- 本任务不直接发送。它在后端投递一个「待发作业」并阻塞等待；
+- 入口函数不直接发送。它在后端投递一个「待发作业」并阻塞等待；
 - Chrome 扩展运行在用户已登录的 WhatsApp Web 标签页里，定期轮询
   GET /api/whatsapp/ext/job 认领作业、在浏览器里逐群逐图发送，
   完成后把结果 POST 回 /api/whatsapp/ext/job/result；
-- 本任务收到扩展回报（或超时）后返回结果，从而在 /myapp/?page=sync
+- 入口函数收到扩展回报（或超时）后返回结果，从而在 /myapp/?page=sync
   像普通任务一样展示成功/失败/耗时/历史。
 
 作业状态用一个「原子写的 JSON 文件」在任务进程与 Web API 进程之间共享。
@@ -199,7 +211,8 @@ def complete_job(job_id: str, result: dict) -> bool:
 
 
 # ==========================================================
-# 任务入口（供 task_registry 的 whatsapp_send_ext 调用）
+# 人工/脚本投递入口（调度任务 whatsapp_send_ext 已于 2026-11-16 下线，
+# 现在只有 `python -m backend.services.whatsapp_ext_service` 会调它）
 # ==========================================================
 def run_whatsapp_send_ext() -> dict:
     start_time = time.time()

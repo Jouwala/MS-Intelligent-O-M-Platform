@@ -387,6 +387,7 @@ var seq = ++qcDrillSeq;
 | `_verify_v1_zoomperpage.cjs` | **两个地图页签「打开是否自动放大」的按页验收**（2026-10-16 用户：「alarm 这个地图不要在点一次放大了」）。5 条：MW(mwRealTime) 仍是 zoom 8 且点一次 `-` 回到 7（未累加）；Alarm(gis) 打开态与直开 `/myapp/?page=gis` 的跨度**完全一致**（实测都是 752，ratio 1.000 = 未被放大）；地图左移仍在。⚠️ 页签显示名与 page 值不同名：**Alarm = gis、MW = mwRealTime**（见 `olbr-data.js` 的 `map.gis`/`map.mw`），看代码时别搞混 | 不写 |
 | `_diag_v1_pandir.cjs` | 只读诊断：**实测**地图内容左移 vs 右移对「被排名条压住的站点数 / 可见站点数」的影响。结论反直觉 —— 左移 160px 压在排名条上的站点 44→54（更糟）、可见站点 574→193；右移 160px 才是 44→26。用户 2026-10-15 在知悉该结果后仍明确选择「就要左移」，故保留此脚本作为**该决定的事实依据**，避免后人误当 Bug 改回去 | 不写 |
 | `_diag_v1_rankgap.cjs` | 只读诊断：拆解「MAINTENANCE ALERTS 为什么没在最右边」。把注入的 `transform` 覆盖为 `none` 前后对比，证明 gap 216px→56px 完全由那次误加的 `translateX(-160px)` 造成，与 index.css 的 `right:196px`（为让开图层开关而设）无关 | 不写 |
+| `_probe_portal_maptab.cjs` + `_probe_openlink_e2e.cjs` | **GIS Map「Open Link」是不是真的打开了完整页**（2026-11-17 用户报「MW 页签点 openlink 只剩一张地图」的验收）。前者逐个页签打印 `#mapFrame` 的 src 与 `#mapOpen` 的 href；后者**真点一次** `#mapOpen`、抓 popup，逐帧量 `html.mw-embed` 与 `#kpis` / `#right` / `#topo-head` / Header 的 display 与尺寸。判据是**与直开 `/myapp/?page=xxx` 逐项一致**：内嵌 src 仍带 `mwembed=1&embed=1`（那是正确的），Open Link 必须一个都不带 | 不写 |
 
 > ⚠️ `_verify_v1_editgrp2.cjs` 与 `_verify_v1_itemadddel.cjs` 改的是**服务端全局目录 —— 共享的生产数据**。
 > 跑之前确认没有别人在编辑目录，跑完看「收尾核对」那一段是否全绿。

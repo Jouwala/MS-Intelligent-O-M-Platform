@@ -1342,6 +1342,7 @@ LTE 丢包（RAN UME SDR/IPRAN IPPD），最近 **7 个完整自然日、小时�
   用图例隐掉一档后与后端 `status_pie.pct`（分母恒为全量站点）不再相等 —— 这句也写进 ⓘ，避免用户拿两边对账。
 
 - **地图图例移到左下角（2026-11-16 用户要求）**：状态图例原先挤在地图下方控制行的 Layers / Show OK sites 那一带，现**移进地图、贴左下角**，直接复用 `pages/gismap/MapLegendOverlay.tsx`（与 GIS / 人员地图同一份浮层；位置、置灰删除线、点击隐藏都在那边，本页只喂行数据，`PacketLossDashboard.tsx` 只多一个 `MapLegendOverlay` 引用与 `legendRows`）。为了让浮层有定位父级，地图外面包了一层 `position:relative` 的 flex 容器（`:777-800`，画布高度与改造前一致）。三处口径必须记住：① 行数字取 `status_counts`，与顶部状态卡 / 饼图同源，**含无坐标站点**，地图圆点只画有坐标站点（实测 Critical 230 vs 红点 228），这句写进 `pl.legendNote` 的 ⓘ；② 点某行 = 客户端 `hiddenStatuses` 显隐（即刻生效，县名数字联动），不触发取数；③ OK 行同时受 `include_ok` 开关控制 —— 开关关闭时后端不返回 OK 站点（`toggleLegendStatus` 会先把它重新打开），图例据此置灰，避免「图例显示 438、地图一个绿点都没有、点了还没反应」。控制行因此只剩 Layers（地名 / 道路）· Topology · Show OK sites · Map Controls。另：页面根节点加了 `flexShrink: 0` —— `?embed=1`（门户 iframe 与直开内嵌地址）时 App 的 Content 被钉成 `height:100%`，根节点默认 `flex-shrink:1`，内容高于视口时整页被**压进一屏**而不是滚动：头部横幅压到 5px、Top Sites 卡只剩 31px（卡片 `overflow:hidden` 裁掉 380px 画布），看起来就是「Top Sites 只有一行数据」（2026-11-16 用户反馈）。固定为不可收缩后按内容高度排版、由 `main` 滚动；门户的 PL_MAP_ONLY_CSS 用 `!important` 把高度改回 100%，不受影响。
+- **站点类型过滤（2026-11-17 用户要求「在 Packet Loss Status 添加站点类型过滤，如 ERA / NORMAL / COOL」）**：Packet Loss Status 横幅右侧新增 `Select`，档位取主数据 `eflow_site.site_type`（**ERA / COOL / NORMAL**，与 GIS / 人员页的「站点等级」同一列同一口径；用户口述的 `COOLI` 在库里就是 `COOL`），选项与计数由 `overview` 的 `site_type_counts` 下发。**一参到底**：同一个 `site_type` 同时过滤状态卡 / 饼图 / 区域分布 / 每日趋势 / Top 站点 / 地图圆点，`/overview`、`/map-sites`、`/drilldown` 三个端点都吃这个参数，下钻弹窗透传同一档位并在标题里写明档位 —— **不做「只筛状态卡」**，否则同一页一半数字筛过、一半没筛，用户对不上账只会当成 bug（与「下钻 WHERE 必须与概览一致」同一条纪律）。四处实测事实：① 站点类型**现取主库实时表**（`packet_loss_dashboard.py::_site_type_index`，TTL 600s）而不是 `site_pl_summary` —— 那张表每天 06:30 才整表重写，靠同步落库要等到次日早上才有值，当天打开下拉会是空的；② 721 个丢包站 = ERA 197 + NORMAL 520 + 未匹配主数据 4（按 `Site_Code`、再按站点名小写回连 `eflow_site`）；③ 主数据 64 个 `COOL` 站**没有任何丢包读数**（SDR / IPRAN 的 IPPD 模板里没有它们），故下拉里不出现 COOL —— 给一个点了必然是空页的选项只会被当成 bug，这条与「COOL 缺席」「未匹配主数据」的含义都写进 `pl.explain.siteType` 的 ⓘ；④ 每日趋势与 Top 站点是按 `Managed Element` 末尾 `(CODE)` / 站点名回连到选中档位后再聚合的（`_me_in_site_type`），不是只筛站点汇总表，否则趋势里的「受影响站点」会比顶部站点数还大。另有两条实现约束：缓存键必须带档位（`overview:{档位}`），否则切档会命中全量缓存、表现为「下拉变了、数字没变」；`warmup()` 调 `pl_overview()` 必须显式传 `site_type=""` —— 直接调用省略参数拿到的是 FastAPI 的 `Query` 默认对象，会被当成一个真实（不存在）的档位，预热就落到「0 站点」的缓存键上。
 - 口径与 Excel 报告 `Packet_Loss_Status_Output Automation` **完全一致**：`STATUS` 是 0~23 的标志块，最近 3 天同整点丢包均 >0.5% 记 1，全 0 为 OK；`FINAL_STATUS` 在 OK 时强制 `No Packet loss[<0.1]`，否则按 Last 1 day Max PL 五级分类（:3-5）。
 - 操作：`Switch` 控制是否包含 OK 站点（`include_ok`，:249）、Popover 显示口径说明、下钻 `GET /api/packet-loss-dashboard/drilldown?status=&limit=800`（:273）、拓扑叠加复用 `GET /api/gis/topology`（:224，该端点 2026-09-25 起读 `kml_mw_links`；本页线宽加粗按 KML 线色判定，见 10c）。
 - **站点点击下钻（2026-11-11）**：地图圆点 `CircleMarker onClick` → 统一 `DraggableClickModal`（`placement="top"`，`PacketLossDashboard.tsx:909`；异步内容长高后仍留在视口内），**不再用 Leaflet Popup**。数据走新增只读端点 `GET /api/packet-loss-dashboard/site-detail?site_code=&site_name=`（`packet_loss_dashboard.py:309`）：按 code→name 关联 `site_pl_summary`，原始读数用参数化 `Managed Element LIKE '%(code)'` 查询，窗口与概览同口径（最近 7 个完整自然日、剔除当天），返回 `daily`（逐日 max / 中位 / 受影响小时 / 读数数）与 `hourly`（最后一个完整日 24 小时）。弹窗内：统计条（`ExplainPopover`）+ 每日柱线图 + 逐小时表（搜索 / 排序 / 筛选 / `exportAoaReport` 导出）。
@@ -1491,7 +1492,13 @@ UME 侧 KPI 的采集结果：业务量、成功率、失败分因（系统侧 /
   **不要**改成 `AVG(Cell_Availability)` —— 那会把大区与小区权重拉平，`avail_recon_sync.py`
   顶部记录了 v1 因口径错误返工的经过。日/周/月三档直接复用表里重建任务算好的
   `Begin_Time` / `WK` / `Month` 列，页面与后端**都不自己推周号**。
-- **数字悬浮说明（2026-11-03，`AGENTS.md` 三.3c）**：三张矩阵的卡标题、四张 KPI 卡标题各挂
+- **顶部汇总卡（2026-11-17 改版，用户要求）**：只有**三张**制式卡（2G / 3G / 4G），
+  卡标题就写制式本身、**居中加粗**，数字与「Period」副行一并居中（`StatCard` 的 `align="center"`），
+  三张用 `md={8}` 铺满一行。原先第四张「未匹配主数据占比」卡已**去掉** —— 该桶的数据没消失：
+  区域表末行 `UNMATCHED` 照旧单列，Excel 的 `Summary` 页也仍导出占比（`i18n.tsx` 的
+  `availMs.unmatchedShare` 保留就是给导出用的；`availMs.kpiTech` / `availMs.unmatchedTip`
+  两个键随卡片一起删除）。
+- **数字悬浮说明（2026-11-03，`AGENTS.md` 三.3c）**：三张矩阵的卡标题、三张 KPI 卡标题各挂
   `MetricExplain::ExplainIcon`（讲这一列怎么算），矩阵每个可用率数字本身挂 `ExplainPopover`
   （讲这一格：`分子 681 / 分母 717` + 分母是**站点-日**观测数、分子是这些观测的可用率累加、
   因此是站点-日加权、环比、点击下钻）。此前这里只有一个 `Tooltip title=` 原生提示，

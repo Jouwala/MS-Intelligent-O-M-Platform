@@ -20,6 +20,10 @@ interface StatCardProps {
   explainText?: string
   /** 紧凑卡：给窄栏里横排多张用。默认仍是大数字卡。 */
   dense?: boolean
+  /** 卡内排版：左对齐（默认，既有页面行为不变）或整卡居中。
+   *  居中时**标题、大数字、subText 一起居中** —— 只居中标题会让数字孤零零偏在左边，
+   *  三张并排的窄卡尤其明显（2026-11-17 可用率多维矩阵的 2G/3G/4G 卡就是这种用法）。 */
+  align?: 'left' | 'center'
   /** subText 默认常驻在数字下方。click = 不占高度，点数字才弹出，且不冒泡到卡片 onClick。 */
   subTextTrigger?: 'always' | 'click'
 }
@@ -36,11 +40,13 @@ export default function StatCard({
   onClick,
   explainText,
   dense = false,
+  align = 'left',
   subTextTrigger = 'always',
 }: StatCardProps) {
+  const centered = !dense && align === 'center'
   const number = (
     <ExplainPopover text={explainText || ''} placement="bottom">
-      <span style={{ display: 'block' }}>
+      <span style={{ display: 'block', textAlign: centered ? 'center' : undefined }}>
         <Statistic
           value={value}
           suffix={suffix}
@@ -62,7 +68,7 @@ export default function StatCard({
       marginTop: dense ? '0.2rem' : undefined,
       marginBottom: dense ? 0 : '0.25rem',
       lineHeight: dense ? 1.2 : undefined,
-      textAlign: dense ? 'center' : undefined,
+      textAlign: dense || centered ? 'center' : undefined,
       overflow: 'hidden',
       display: dense ? '-webkit-box' : undefined,
       WebkitLineClamp: dense ? 2 : undefined,
@@ -116,7 +122,10 @@ export default function StatCard({
           </>
         )}
         {subText && subTextTrigger === 'always' && (
-          <div style={{ fontSize: '0.75rem', color: WH.textDim, marginTop: '0.25rem' }}>
+          <div style={{
+            fontSize: '0.75rem', color: WH.textDim, marginTop: '0.25rem',
+            textAlign: centered ? 'center' : undefined,
+          }}>
             {subText}
           </div>
         )}

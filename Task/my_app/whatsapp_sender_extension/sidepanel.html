@@ -64,7 +64,7 @@
     <div id="progress" class="muted small"></div>
     <div class="muted small hint">
       「立即发送」直接从后端 outbox 拉图发送（便于测试）；
-      「认领后端作业」检查后端任务（whatsapp_send_ext）是否投递了待发作业，有则发送并回报结果；
+      「认领后端作业」检查后端是否有待发作业（如 eFlow P1 告警文本作业，或人工投递的发图作业），有则发送并回报结果；
       「清空输入框」清掉 WhatsApp 输入框中残留的备注文字（发送失败后卡住时用）；
       「页面诊断」输出 WhatsApp 页面元素实况（发送失败时把结果发给开发者）。
     </div>

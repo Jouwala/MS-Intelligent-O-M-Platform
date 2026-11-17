@@ -4,7 +4,7 @@
 //   STATUS = 0~23 标志块（最近 3 天同整点丢包均 >0.5% 记 1）全 0 -> OK，否则 NOK
 //   FINAL_STATUS = STATUS=OK 强制 No Packet loss[<0.1]，否则按 Last 1 day Max PL 五级分类
 import { useEffect, useState, useMemo, useCallback } from 'react'
-import { Card, Row, Col, Tag, Spin, Alert, Empty, Table, Input, Button, Switch } from 'antd'
+import { Card, Row, Col, Tag, Spin, Alert, Empty, Table, Input, Button, Switch, Select } from 'antd'
 import {
   AlertOutlined, WarningOutlined, EnvironmentOutlined,
   PieChartOutlined, DashboardOutlined,
@@ -70,6 +70,13 @@ const STATUS_SHORT: Record<string, string> = {
    图例要与开关联动，故给这个字符串一个名字，避免再手抄一遍。 */
 const OK_STATUS = 'No Packet loss[<0.1]'
 
+/* 站点类型（eflow_site.site_type）的「主数据缺档」哨兵值，与后端
+   `packet_loss_dashboard.SITE_TYPE_UNKNOWN` 逐字一致 —— 两边不一致，
+   选它就会永远筛出 0 行。真值只有 ERA / COOL / NORMAL 三档。 */
+const SITE_TYPE_UNKNOWN = '(unmapped)'
+const siteTypeLabel = (value: string, t: (key: string) => string) =>
+  value === SITE_TYPE_UNKNOWN ? t('pl.siteType.unmapped') : value
+
 // 指标计算说明（鼠标悬停「?」查看，可复制）
 const getMetricExplain = (t: (key: string) => string): Record<string, string> => ({
   'Total Sites': t('pl.explain.totalSites'),
@@ -80,6 +87,7 @@ const getMetricExplain = (t: (key: string) => string): Record<string, string> =>
   'No Packet loss': t('pl.explain.noPacketLoss'),
   'Affected Sites': t('pl.explain.affectedSites'),
   'Data Granularity': t('pl.explain.granularity'),
+  'Site Type': t('pl.explain.siteType'),
 })
 
 // 拓扑视图：按 backhaul/transport 类型（gateway 字段）聚合站点，
@@ -221,6 +229,8 @@ const getUniqueFilters = (data: any[], key: string) => {
 interface PlSite {
   site_name: string; site_code: string; lat: number; lng: number
   region: string; province_county: string; gateway: string; network_type: string
+  /** eflow_site.site_type：ERA / NORMAL / …（主数据缺档时为 `'(unmapped)'`） */
+  site_type?: string
   status: string; last_day_max_pl: number; total_pl: number; affected_hours: number
 }
 
@@ -244,6 +254,12 @@ export default function PacketLossDashboard() {
   const [mapSites, setMapSites] = useState<PlSite[]>([])
   // 默认显示 OK 站点（include_ok=true），地图展示全量有坐标站点
   const [includeOk, setIncludeOk] = useState(true)
+  /* 站点类型过滤（2026-11-17 用户要求「在 Packet Loss Status 添加站点类型过滤」）：
+     `''` = 全部，其余为 eflow_site.site_type 的真值（ERA / NORMAL / …）。
+     **一参到底** —— 状态卡 / 饼图 / 区域 / 每日趋势 / Top 站点 / 地图 / 下钻全部
+     跟着它走；只筛一半的话同一页数字互相对不上，用户会当成 bug。
+     选项来自接口的 site_type_counts（只列真有丢包站点的档位，点了不会空页）。 */
+  const [siteType, setSiteType] = useState('')
   const [hiddenStatuses, setHiddenStatuses] = useState<Set<string>>(new Set())
   // 拓扑显示开关：开启后复用 GIS Map 的真实拓扑链路（/api/gis/topology），按传输类型着色
   const [showTopology, setShowTopology] = useState(false)
@@ -329,9 +345,11 @@ export default function PacketLossDashboard() {
   useEffect(() => {
     setLoading(true)
     setError(null)
+    // 缓存键必须带 siteType：不带的话切「全部 → ERA」会直接命中全量缓存，
+    // 表现为「下拉变了、数字没变」。
     Promise.all([
-      cachedGet('pl:overview', () => api.get('/packet-loss-dashboard/overview')),
-      cachedGet(`pl:map:${includeOk}`, () => api.get('/packet-loss-dashboard/map-sites', { params: { include_ok: includeOk } })),
+      cachedGet(`pl:overview:${siteType}`, () => api.get('/packet-loss-dashboard/overview', { params: { site_type: siteType } })),
+      cachedGet(`pl:map:${includeOk}:${siteType}`, () => api.get('/packet-loss-dashboard/map-sites', { params: { include_ok: includeOk, site_type: siteType } })),
     ])
       .then(([ov, mp]) => {
         setData(ov.data)
@@ -340,7 +358,7 @@ export default function PacketLossDashboard() {
       })
       .catch(err => { console.error('Packet Loss API error:', err); setError(err.message || 'Failed to load') })
       .finally(() => setLoading(false))
-  }, [includeOk])
+  }, [includeOk, siteType])
 
   const openDrilldown = useCallback((trigger: any, status: string, title: string) => {
     let anchor: { x: number; y: number } | null = null
@@ -354,15 +372,16 @@ export default function PacketLossDashboard() {
     setDrillLoading(true)
     setDrillData([])
     setDrillSearch('')
-    setDrillTitle(title)
-    api.get('/packet-loss-dashboard/drilldown', { params: { status, limit: 800 } })
+    // 标题带上当前站点类型：弹窗里的行数必须能与刚才点的那张卡对上（同一档位）
+    setDrillTitle(`${title}${siteType ? ` · ${t('pl.siteType')} = ${siteTypeLabel(siteType, t)}` : ''}`)
+    api.get('/packet-loss-dashboard/drilldown', { params: { status, limit: 800, site_type: siteType } })
       .then(res => {
         setDrillData(res.data.data || [])
         setDrillTotal(res.data.total || 0)
       })
       .catch(() => setDrillTitle('Failed to load data'))
       .finally(() => setDrillLoading(false))
-  }, [])
+  }, [siteType, t])
 
   // 站点下钻：锚点取该站点在屏幕上的投影位置（CircleMarker onClick 无事件对象，
   // 用 mapInstance.latLngToContainerPoint + 容器 rect 换算成 clientX/Y），
@@ -676,6 +695,23 @@ export default function PacketLossDashboard() {
   const fmt = (n: number) => (n ?? 0).toLocaleString(numLocale(locale))
   const chartClick = (titlePrefix: string) => (p: any) => openDrilldown(p, p.name, `${titlePrefix} = ${STATUS_SHORT[p.name] || p.name}`)
 
+  /* 站点类型下拉（2026-11-17）：值 / 计数都来自接口 `site_type_counts`，
+     而该字段**恒为全量分布**，所以切到 ERA 后下拉里的数字不会跟着变小（那是筛完
+     以后的数字，容易让人以为 TOTAL 丢了站点）。「全部」的计数 = 各档之和。
+     COOL 档会缺席 —— 主数据里 64 个 COOL 站没有任何丢包读数，给了选项点进去
+     也只会是空页；原因写在 `pl.explain.siteType` 的气泡里。 */
+  const siteTypeCounts: Record<string, number> = data.site_type_counts || {}
+  const siteTypeOptions = [
+    {
+      value: '',
+      label: `${t('pl.siteType.all')} (${Object.values(siteTypeCounts).reduce((a, b) => a + (b || 0), 0)})`,
+    },
+    ...Object.entries(siteTypeCounts).map(([k, n]) => ({
+      value: k,
+      label: `${siteTypeLabel(k, t)} (${n})`,
+    })),
+  ]
+
   /* 地图图例行（2026-11-16 用户要求「图例放地图左下角，不要放在 Layers / Show OK sites」）。
      数字取 status_counts —— 与顶部六张状态卡、Loss Distribution 饼图**同一份口径**
      （含无坐标站点；地图圆点只画有坐标的站点，两者常差几个，口径写在 pl.legendNote 的 ⓘ）。
@@ -726,9 +762,29 @@ export default function PacketLossDashboard() {
               <Tag color="cyan" style={{ borderRadius: 'var(--wh-radius-lg)', fontWeight: 600 }}>{t('pl.granularity')}</Tag>
             </ExplainPopover>
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--wh-space-md)', fontSize: '0.75rem', color: WH.textDim }}>
-            <ClockCircleOutlined />
-            <span>{t('pl.updated')}: {data.generated_at ? String(data.generated_at).replace('T', ' ').slice(0, 19) : 'N/A'}</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--wh-space-md)', flexWrap: 'wrap', fontSize: '0.75rem', color: WH.textDim }}>
+            {/* 站点类型过滤（2026-11-17 用户要求「在 Packet Loss Status 添加站点类型过滤」）：
+                放在 Packet Loss Status 这一条横幅里，让它一眼就是「整页现在的视角」，
+                而不是地图上的一个图层开关。选择即刻生效（整页重取数）。 */}
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              <span style={{ fontSize: '0.75rem', color: WH.textMuted, fontWeight: 600 }}>{t('pl.siteType')}</span>
+              <ExplainIcon text={METRIC_EXPLAIN['Site Type']} placement="bottom" />
+              <Select
+                size="small"
+                value={siteType}
+                onChange={setSiteType}
+                options={siteTypeOptions}
+                style={{ minWidth: 132 }}
+                popupMatchSelectWidth={false}
+                aria-label={t('pl.siteType')}
+              />
+            </span>
+            {/* 时钟与时间文本必须同组：拆成 flex 的两个子项时，窄屏换行会把图标单独
+                甩到上一行，看起来像「多出一个图标」。 */}
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              <ClockCircleOutlined />
+              <span>{t('pl.updated')}: {data.generated_at ? String(data.generated_at).replace('T', ' ').slice(0, 19) : 'N/A'}</span>
+            </span>
           </div>
         </div>
       </Card>
@@ -989,7 +1045,7 @@ export default function PacketLossDashboard() {
                 </span>
               </ExplainPopover>
               <span style={{ fontSize: '0.75rem', color: WH.textDim }}>
-                {t('pl.popup.region')}: {siteDetail.site.region || '-'} / {siteDetail.site.province_county || '-'} · {t('pl.popup.gateway')}: {siteDetail.site.gateway || '-'} · {t('pl.popup.network')}: {siteDetail.site.network_type || '-'}
+                {t('pl.popup.region')}: {siteDetail.site.region || '-'} / {siteDetail.site.province_county || '-'} · {t('pl.popup.gateway')}: {siteDetail.site.gateway || '-'} · {t('pl.popup.network')}: {siteDetail.site.network_type || '-'} · {t('pl.siteType')}: {siteTypeLabel(siteDetail.site.site_type || '', t) || '-'}
               </span>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, margin: '0.25rem 0' }}>

@@ -34,7 +34,7 @@ import type { TrendSeries } from './AvailTrend'
 // 数字悬浮口径说明：与 avail_flm 共用同一套文案（两页是同一个 SUM(分子)/SUM(分母) 口径）
 import { ExplainIcon, ExplainPopover } from '../components/MetricExplain'
 import {
-  SUM_RATIO_COL_KEY, SUM_RATIO_KPI_KEY, SUM_RATIO_UNMATCHED_KEY, sumRatioCellText,
+  SUM_RATIO_COL_KEY, SUM_RATIO_KPI_KEY, sumRatioCellText,
 } from './availSumRatio'
 import { exportReport } from '../utils/excelReport'
 import type { ReportSheetSpec } from '../utils/excelReport'
@@ -436,19 +436,24 @@ export default function AvailMs() {
     )
   }
 
-  /* ---- 汇总卡：点卡片也能下钻（全网 × 制式） ---- */
+  /* ---- 汇总卡：点卡片也能下钻（全网 × 制式） ----
+     2026-11-17（用户要求）：只保留三张制式卡，卡标题由「2G network-wide availability」
+     改成就写制式本身「2G」，标题与数字**居中加粗**；原先第四张「未匹配主数据」卡已去掉
+     （该桶仍然存在：区域表末行照旧单列，Excel 的 Summary 页也仍导出占比）。
+     三张卡因此用 `md=8` 铺满整行（手机上 xs=24 一张一行，避免出现「两张 + 半行空位」）。 */
   const summary = matrix?.summary
   const statCards = summary
     ? ['2G', '3G', '4G'].map(tk => {
       const v = summary.by_tech?.[tk]
       const below = v != null && v < thr
       return (
-        <Col xs={12} sm={12} md={6} key={tk}>
+        <Col xs={24} sm={8} md={8} key={tk}>
           <StatCard
+            align="center"
             title={(
-              <span>
-                {t('availMs.kpiTech', { tech: tk })}
-                <span style={{ marginLeft: 4 }}><ExplainIcon text={t(SUM_RATIO_KPI_KEY)} /></span>
+              <span style={{ fontWeight: 700, fontSize: '0.9375rem', color: WH.text, letterSpacing: '.02em' }}>
+                {tk}
+                <span style={{ marginLeft: 4, fontWeight: 400 }}><ExplainIcon text={t(SUM_RATIO_KPI_KEY)} /></span>
               </span>
             )}
             value={v == null ? '—' : (v * 100).toFixed(2)}
@@ -732,21 +737,6 @@ export default function AvailMs() {
       {!!statCards.length && (
         <Row gutter={[12, 12]}>
           {statCards}
-          <Col xs={12} sm={12} md={6}>
-            <StatCard
-              title={(
-                <span>
-                  {t('availMs.unmatchedShare')}
-                  <span style={{ marginLeft: 4 }}><ExplainIcon text={t(SUM_RATIO_UNMATCHED_KEY)} /></span>
-                </span>
-              )}
-              value={summary?.unmatched_share == null ? '—'
-                : (summary.unmatched_share * 100).toFixed(2)}
-              suffix={summary?.unmatched_share == null ? '' : '%'}
-              accentColor={WH.warn}
-              subText={t('availMs.unmatchedTip')}
-            />
-          </Col>
         </Row>
       )}
 

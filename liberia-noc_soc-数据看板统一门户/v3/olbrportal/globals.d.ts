@@ -37,4 +37,29 @@ declare interface Window {
    * 主文件只读不写：改这些常量请改 olbr-data.js，不要在这里补写。
    */
   OLBR_DATA: any;
+  /**
+   * 团队门户 assets/team-scope.js 注入的作用域查询引擎。
+   * /v3/olbrportal/ 不引该脚本，运行时没有这个属性；olbr.js 的 wantCxortGroup()
+   * 读 window.OLBR_SCOPE，缺了就 fail-closed（不取 CXO RealTime）。
+   * 本声明只让 checkJs 认识这个可选全局，不引入任何运行时代码。
+   * 签名与 v3/team_portal/globals.d.ts 的 OLBR_SCOPE 对齐；此处多一个 undefined，
+   * 因为上游页根本不赋值。
+   */
+  OLBR_SCOPE: {
+    teamId: string;
+    team: { id: string; zh: string; en: string } | null;
+    isTeamPortal: boolean;
+    matrix: { [domain: string]: { [sub: string]: string[] } };
+    ok: (domain: string, sub?: string) => boolean;
+    subs: (domain: string) => string[];
+    ossSlotOf: (item: any) => string;
+    ossSlots: () => string[];
+    viewGroups: () => string[];
+    mapPages: () => string[];
+    qaTabs: () => string[];
+    reportIds: () => string[];
+    hasComplaint: () => boolean;
+    hasEscalation: () => boolean;
+    hasFeedback: () => boolean;
+  } | null | undefined;
 }

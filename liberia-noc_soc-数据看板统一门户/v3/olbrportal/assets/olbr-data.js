@@ -165,7 +165,7 @@ window.OLBR_DATA = (function () {
          ⚠️ 目录里本来就有 page=packet_loss 的看板（Packet Loss Dashboard…），
             但页签按钮的显示名走 tabLabelOf(page, key) → t(key)，**不取目录标题**；
             目录标题只落进 m.title，用作按钮的 title 提示。故这里才是显示名的唯一来源。 */
-      'map.pl': 'PL',
+      'map.pl': 'Packet Loss',
       /* 2026-09-28 按用户要求把按钮文案改成 "Open Link"（原来中英分别是
          「新窗口打开」/ "Open in new tab"）。用户给的是英文串，
          两份字典都照写（与 qc.sub.* 那次改名同一条约定：用户点名的写法不翻译）。
@@ -934,7 +934,7 @@ window.OLBR_DATA = (function () {
           本词条按 map.alarm / map.loss 的约定保留，将来恢复页签不用重写。 */
        'map.ip': 'IP',
       /* 2026-11-11 加，与中文那份同值（用户点名的 "PL"）。 */
-      'map.pl': 'PL',
+      'map.pl': 'Packet Loss',
       /* 2026-09-28：改为用户点名的 "Open Link"（原为 "Open in new tab"）。
          中文那份同值 —— 用户要的就是这一串英文。 */
       'map.open': 'Open Link', 'map.reload': 'Reload', 'map.load': 'Loading…',

@@ -1,6 +1,6 @@
 # my_app User Help & Guide
 
-> User-facing platform features & operations guide. Generated from the same source as the in-app Help page (frontend/src/helpMarkdown.ts), compiled from docs/manual/ and backend/task_registry.py. Generated on 2026-11-16.
+> User-facing platform features & operations guide. Generated from the same source as the in-app Help page (frontend/src/helpMarkdown.ts), compiled from docs/manual/ and backend/task_registry.py. Generated on 2026-11-17.
 
 > In-app entry: the "Help" sidebar item, or `http://<host>/myapp/?page=help` directly.
 
@@ -10,7 +10,7 @@
 
 - [1. Platform Overview](#1-platform-overview)
 - [2. General Usage](#2-general-usage)
-- [3. Task Manager Deep Dive (85 tasks)](#3-task-manager-deep-dive)
+- [3. Task Manager Deep Dive (84 tasks)](#3-task-manager-deep-dive)
 - [4. Pages Guide](#4-pages-guide)
 - [5. Ops & Troubleshooting](#5-ops-troubleshooting)
 - [6. FAQ](#6-faq)
@@ -83,7 +83,7 @@ Built for the NOC scenario "boards every day, reports must go out": 41+ schedule
 
 > ⚠️ **New tasks MUST also be registered in `GROUP_TASK_MAP` in worker_watchdog.py** — declaring them only in TASK_SPECS leaves them pending forever. This accident happened four times (finebi_report_sync / whatsapp_send_ext / sp_email_details / the olib_soc and vmax_multi_data_sync tasks found on 2026-09-18).
 
-### 3.3 Full task catalog (85 tasks)
+### 3.3 Full task catalog (84 tasks)
 
 | Task | task_id | Default cron | Group | Workflow script |
 | --- | --- | --- | --- | --- |
@@ -92,7 +92,6 @@ Built for the NOC scenario "boards every day, reports must go out": 41+ schedule
 | RAN UME Daily Report | `ran_ume_daily` | `0 2 * * *` | u | `services/ran_ume_service.py → run_ran_ume_full_task` |
 | Site Outage Screenshot | `site_outage_screenshot` | `0 1 * * *` | m | `services/site_outage_service.py → run_site_outage_screenshot` |
 | WhatsApp Message Send | `whatsapp_send` | `0 3 * * *` | m | `services/whatsapp_service.py → run_whatsapp_send` |
-| WhatsApp Message Send (Extension) | `whatsapp_send_ext` | `0 3 * * *` | m | `services/whatsapp_ext_service.py → run_whatsapp_send_ext` |
 | WhatsApp Message Send (Baileys) | `whatsapp_send_baileys` | `0 4 * * *` | m | `services/whatsapp_send_baileys_service.py → run_whatsapp_send_baileys` |
 | eFlow P1 Alarm WhatsApp Push | `tt_alarm_whatsapp_alert` | `2-59/5 * * * *` | m | `services/tt_alarm_whatsapp_service.py → run_tt_alarm_whatsapp_alert` |
 | MS SLA Full Sync | `ms_sla_full` | `0 5 * * *` | n | `services/ms_sla_service.py → run_full_sync` |
@@ -190,7 +189,7 @@ Workflow & maintenance notes per task:
 
 **Maintenance**:
 
-- Delta mode only fetches changes; gaps are backfilled next night by eflow_sync_full
+- Delta mode only fetches changes and **never deletes** (the 3-day window is inherently incomplete); gaps are backfilled next night by eflow_sync_full, which is also where tickets removed in eFlow get reconciled away
 - Credential group eflow; kicked sessions cause consecutive failures, auto-retried by auto_retry_failed
 
 #### eFlow Daily Full Sync（`eflow_sync_full`）
@@ -198,13 +197,14 @@ Workflow & maintenance notes per task:
 - Default cron: `0 1 * * *`　|　worker group: **n**
 - Workflow script: `services/sync_from_eflow_api.py → sync_from_eflow_api(mode="full")`
 
-**What it does**: Full-window backfill (default since 2026-01-01) to cover delta gaps and refresh reports. Wide windows fetch TT/WO in segments; a missing TT/WO now fails the task
+**What it does**: Full-window backfill (default since 2026-01-01) to cover delta gaps, **delete tickets already removed in eFlow**, and refresh reports. Wide windows fetch TT/WO in segments; a missing TT/WO now fails the task
 
 **Workflow & data flow**:
 
 1. Daily 01:00 pull the full window
 1. For wide windows TT/WO are fetched in **segments** (default 30 days each) then merged/deduped, avoiding a single huge export exceeding the 120s poll window and failing with 500
 1. Write into the same dynamic tables with dedup
+1. **Reconcile delete**: compare against the upstream authoritative ticket set and drop TT/WO/CR rows that eFlow has already removed
 1. Refresh related report artifacts afterwards
 
 **Maintenance**:
@@ -212,6 +212,7 @@ Workflow & maintenance notes per task:
 - First remedy when eFlow data is missing mid-day — run it manually from Task Manager
 - The window start is configurable; mind the fetch duration. Segment length via EFLOW_FULL_SEGMENT_DAYS (default 30d)
 - Fixed 2026-10-09: the TT/WO full export had been failing with 500 for days while the task still reported success=True (the missing key was silently skipped). Now a missing TT/WO writes an error → success=False
+- Reconcile delete added 2026-11-16: it previously only upserted and never deleted, so tickets removed in eFlow stayed forever (measured 11 extra TT / 54 extra WO rows). **The authoritative source is base/list lookup, not the full export** — the export was measured to miss ~43/27 live rows, which would cause false deletions. Four gates (full mode only / authoritative set must be complete / empty set skips that table / over-threshold skips that table) are documented in 03-data-layer.md; EFLOW_RECONCILE_DELETE=0 turns it off without a code change
 
 #### RAN UME Daily Report（`ran_ume_daily`）
 
@@ -265,22 +266,6 @@ Workflow & maintenance notes per task:
 
 - Depends on the screenshot task finishing first; re-scan QR manually when the WhatsApp Web session expires
 
-#### WhatsApp Message Send (Extension)（`whatsapp_send_ext`）
-
-- Default cron: `0 3 * * *`　|　worker group: **m**
-- Workflow script: `services/whatsapp_ext_service.py → run_whatsapp_send_ext`
-
-**What it does**: Extension-based WhatsApp sending: dispatches a send job; a browser extension sends it in the logged-in WhatsApp Web (coexists with the Playwright version)
-
-**Workflow & data flow**:
-
-1. Dispatch a send job to the queue
-1. The browser extension (whatsapp_sender_extension) actually sends it in the logged-in WhatsApp Web tab
-
-**Maintenance**:
-
-- Missed its worker-group registration on 2026-08-31 and stuck pending; now in group m — always register new tasks in GROUP_TASK_MAP
-
 #### WhatsApp Message Send (Baileys)（`whatsapp_send_baileys`）
 
 - Default cron: `0 4 * * *`　|　worker group: **m**
@@ -290,7 +275,7 @@ Workflow & maintenance notes per task:
 
 **Workflow & data flow**:
 
-1. This task scans SITE_OUTAGE_DIR (shared with whatsapp_send / whatsapp_send_ext) and writes items (with absolute disk paths) into the job file data/whatsapp_send_baileys_job.json
+1. This task scans SITE_OUTAGE_DIR (shared with whatsapp_send) and writes items (with absolute disk paths) into the job file data/whatsapp_send_baileys_job.json
 1. The whatsapp-kb-bot/src/notify.js process polls and claims the job (sets running on claim + atomic write-back), then calls sock.sendMessage({ image|document, ... }) for each (group × file) pair
 1. The server-acknowledged message id (res.key.id) is the only success criterion; a single failed send is not retried into the group (prevents duplicates); auto_retry_failed decides on retries
 1. notify.js writes the result back to the job file; this task returns once it sees done/failed (task_runner records the run history)
@@ -2318,6 +2303,7 @@ LTE packet loss board (RAN UME SDR / IPRAN IPPD): last 7 complete calendar days 
 - The three easiest misreadings are stated in the bubbles: **the status pie includes sites without coordinates, the region bars count non-OK sites only (Minor and Warning included), and the header Affected Sites is Critical + Major only** — three different sets that were never meant to reconcile
 - The daily-trend median **uses only readings above 0 for that day** (about 59% of hourly readings are 0, so a full median collapses to zero and stops being meaningful), while Top sites use a **per-site median that includes zeros** (otherwise "half a day fully down" and "fully down all day" both become 100 and the ranking loses its point) — the same word "median" for two calibers, each stated where it is used
 - This page used to carry two hand-written popovers (their own copy button, theme colours and emphasis rendering); both were deleted in favour of `components/MetricExplain`. The drill "N rows" bubble now states that it is the count after the search-box filter and that the API truncates at a cap
+- **Site-type filter (2026-11-17)**: the dropdown on the right of the Packet Loss Status bar filters by the master-data site type (ERA / NORMAL / …, from `eflow_site.site_type`) and **every number on the page follows** — total sites, Affected Sites, the six status cards, the pie, region bars, daily trend, Top sites, map dots and legend, and the drill-down detail all switch to the selected grade. The counts in the dropdown are always the full distribution (they do not change when you switch). None of the 64 COOL sites has a packet-loss reading, so COOL is not offered; sites that cannot be matched in eflow_site by code or name fall under "Unmapped site", so ERA + NORMAL + unmapped = everything
 
 #### Battery Dashboard（`battery`）
 

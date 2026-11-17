@@ -465,7 +465,9 @@ export const PAGE_DOCS: Record<Locale, Record<string, PageDoc>> = {
         '**每个数字都能悬浮看算法**（2026-11-04）：六张状态卡的 ⓘ 与数字气泡同源（判据在采集层落的 FinalStatus：STATUS≠OK 且 Last 1 day Max PL ≥5 / [1,5) / [0.5,1) / [0.1,0.5) 分别是 Critical/Major/Minor/Warning，STATUS=OK 强制归一为 No Packet loss），页头 Affected Sites / 粒度标签也挂了气泡',
         '三处最容易核对不上的地方直接写进气泡：**状态饼图含无坐标站点、区域柱图只统计非 OK（含 Minor/Warning）、顶部 Affected Sites 只是 Critical + Major** —— 三个集合不同，数字不该互相对账',
         '每日趋势的中位数**只取当天 >0 的读数**（逐小时丢包约 59% 是 0，全量取中位会被压成 0 失去意义）；而 Top 站点用的是**含 0 的每站点中位**（否则「半天全断」与「整天全断」同为 100，失去区分度）—— 同名「中位数」两种口径，气泡各写各的',
-        '本页原先有两份自写气泡（复制按钮、主题色、强调渲染各自一套），已删除并统一走 `components/MetricExplain`；下钻「共 N 行」气泡写明它是搜索框筛过的行数、接口按上限截断'],
+        '本页原先有两份自写气泡（复制按钮、主题色、强调渲染各自一套），已删除并统一走 `components/MetricExplain`；下钻「共 N 行」气泡写明它是搜索框筛过的行数、接口按上限截断',
+        '**站点类型过滤（2026-11-17）**：Packet Loss Status 横幅右侧的下拉按主数据站点类型（ERA / NORMAL / …，取 `eflow_site.site_type`）筛选，**整页数字一起变** —— 站点总数、Affected Sites、六张状态卡、饼图、区域分布、每日趋势、Top 站点、地图圆点与图例、点击下钻的明细全部换成选中档位；下拉里的计数恒为全量分布（切档不变）。主数据里 64 个 COOL 站没有任何丢包读数，故不出现 COOL 选项；在 eflow_site 里按站点编码和名称都找不到的站点归入「未匹配主数据」，保证 ERA + NORMAL + 未匹配 = 全部',
+      ],
     },
     battery: {
       desc: '站点电池健康度 / SOC / 充放电状态与告警明细。',
@@ -1172,7 +1174,9 @@ export const PAGE_DOCS: Record<Locale, Record<string, PageDoc>> = {
         '**Every number explains itself on hover** (2026-11-04): the six status cards share one text between the ⓘ and the number bubble (the verdict is written in the collection layer as FinalStatus: STATUS≠OK with Last 1 day Max PL ≥5 / [1,5) / [0.5,1) / [0.1,0.5) = Critical/Major/Minor/Warning, and STATUS=OK is forced into No Packet loss); the header Affected Sites and granularity tags carry bubbles too',
         'The three easiest misreadings are stated in the bubbles: **the status pie includes sites without coordinates, the region bars count non-OK sites only (Minor and Warning included), and the header Affected Sites is Critical + Major only** — three different sets that were never meant to reconcile',
         'The daily-trend median **uses only readings above 0 for that day** (about 59% of hourly readings are 0, so a full median collapses to zero and stops being meaningful), while Top sites use a **per-site median that includes zeros** (otherwise "half a day fully down" and "fully down all day" both become 100 and the ranking loses its point) — the same word "median" for two calibers, each stated where it is used',
-        'This page used to carry two hand-written popovers (their own copy button, theme colours and emphasis rendering); both were deleted in favour of `components/MetricExplain`. The drill "N rows" bubble now states that it is the count after the search-box filter and that the API truncates at a cap'],
+        'This page used to carry two hand-written popovers (their own copy button, theme colours and emphasis rendering); both were deleted in favour of `components/MetricExplain`. The drill "N rows" bubble now states that it is the count after the search-box filter and that the API truncates at a cap',
+        '**Site-type filter (2026-11-17)**: the dropdown on the right of the Packet Loss Status bar filters by the master-data site type (ERA / NORMAL / …, from `eflow_site.site_type`) and **every number on the page follows** — total sites, Affected Sites, the six status cards, the pie, region bars, daily trend, Top sites, map dots and legend, and the drill-down detail all switch to the selected grade. The counts in the dropdown are always the full distribution (they do not change when you switch). None of the 64 COOL sites has a packet-loss reading, so COOL is not offered; sites that cannot be matched in eflow_site by code or name fall under "Unmapped site", so ERA + NORMAL + unmapped = everything',
+      ],
     },
     battery: {
       desc: 'Site battery health / SOC / charge-discharge status and alarm details.',

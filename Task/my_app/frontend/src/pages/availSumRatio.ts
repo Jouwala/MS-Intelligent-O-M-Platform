@@ -29,8 +29,9 @@ export const SUM_RATIO_COL_KEY = 'availSum.explainCol'
 export const SUM_RATIO_KPI_KEY = 'availSum.explainKpi'
 /** FLM 页区域 KPI 卡 ⓘ 的文案键（区域 = 全部制式合计，与按制式切的卡口径不同） */
 export const SUM_RATIO_REGION_KPI_KEY = 'availSum.explainRegionKpi'
-/** 未匹配占比卡 ⓘ 的文案键 */
-export const SUM_RATIO_UNMATCHED_KEY = 'availSum.explainUnmatched'
+/* 2026-11-17：`SUM_RATIO_UNMATCHED_KEY`（未匹配占比卡的 ⓘ）随 avail_ms 第四张卡一起删除。
+   未匹配占比本身仍在：区域表末行 UNMATCHED、Excel 的 Summary 页照旧导出，
+   解释写在 `availMs.warn.regionAllIncludesUnmatched`（那条常驻的黄条）。 */
 
 /** 单元格气泡：这一格自己的构成（分子/分母语义 + 加权含义 + 环比） */
 export function sumRatioCellText(cell: SumRatioCell, t: TFn): string {

@@ -6,7 +6,7 @@
 // 运行模型：
 //   1) chrome.alarms 每 1 分钟 tick 一次；
 //   2) 当前时刻匹配配置的 cron 时触发「定时发送」：
-//      - 若后端恰有待发作业（任务 whatsapp_send_ext 投递）则认领并发送、回报结果；
+//      - 若后端恰有待发作业（人工投递的发图作业；原定时任务 whatsapp_send_ext 已于 2026-11-16 下线）则认领并发送、回报结果；
 //      - 否则直接从 outbox 拉图发送（2 分钟内刚成功发送过则跳过，防双发）；
 //   3) 其余分钟仍会认领后端的待发作业，保证后端任务手动/定时触发都能及时送达。
 //
@@ -15,7 +15,7 @@
 
 const DEFAULTS = {
   server_url: "http://localhost",
-  cron: "0 3 * * *", // 与后端任务 whatsapp_send_ext 的 default_cron 一致
+  cron: "0 3 * * *", // 与 my_app 的 Site Outage 截图发送时段一致（原任务 whatsapp_send_ext 已于 2026-11-16 下线）
   enabled: true,
 };
 const CFG_KEY = "wa_sender_config";

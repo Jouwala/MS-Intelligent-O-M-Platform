@@ -346,7 +346,7 @@ $j | ConvertTo-Json -Depth 6 | Set-Content $p -Encoding UTF8
 2026-09-29 出过重复告警事故）。Baileys 不碰页面，这些复杂度全部消失，
 且发送确认是 `sendMessage()` 返回的**服务端 message id**，不是猜的。
 
-> 发图任务（`whatsapp_send_ext` / `whatsapp_send`）**仍走原通道**，本次只改了 P1 文本告警。
+> 发图任务（`whatsapp_send`）**仍走原通道**，本次只改了 P1 文本告警。
 
 **投递前在线检查**：投递前读推送进程的心跳，离线立刻产出 `warnings`
 （把「几分钟后才知道」压成「这一轮就知道」）：

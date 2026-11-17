@@ -41,9 +41,10 @@ declare interface Window {
   /* ==================================================== 团队门户专用全局 ==
      下面三个全局只在 /v3/{fo,bo,flm,smc,cxo}_portal/ 这一套页面里存在
      （v3/olbrportal/ 上游那页不引这三个脚本，故 window 上没有它们）。
-     声明放在本文件是因为 team_portal 与 olbrportal 共用同一份 globals 形状，
-     上游那页的 tsc 检查同样会因为「不声明」而报噪声错误 —— 故此处只声明，
-     不给上游那页引入任何运行时代码。 */
+     两份壳各有自己的 globals.d.ts，tsconfig 互不 include。
+     上游 olbr.js 若读到其中某个全局（目前是 OLBR_SCOPE），必须在
+     v3/olbrportal/globals.d.ts 再声明一次，只写在这里消不掉上游的 TS2339。
+     声明不是运行时代码：/v3/olbrportal/ 不引这三个脚本。 */
   /** assets/team-matrix.js 注入：可见性矩阵（生成文件，勿手改） */
   OLBR_TEAM_MATRIX: {
     [domain: string]: { [sub: string]: string[] };
