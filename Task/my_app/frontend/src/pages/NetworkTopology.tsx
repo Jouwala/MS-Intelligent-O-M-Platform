@@ -1,8 +1,8 @@
 /* ============================================================================
  * OLIB FO 网络拓扑（?page=olibTopo）
  * ============================================================================
- * 页面定位：把 Orange Liberia《Orange_network_topology_20251226.pdf》的两页原图
- * 和 553 个提取站点做成一张可缩放、可搜索、可定位的参考图。**纯静态参考页**，
+ * 页面定位：把 Orange Liberia《Orange network topology_20260623.pdf》的两页原图
+ * 和 667 个提取站点做成一张可缩放、可搜索、可定位的参考图。**纯静态参考页**，
  * 不取接口、不写库，所以 AR_PAGE_DEFAULTS 取最松的 1800 秒（见 App.tsx）。
  *
  * 组成：
@@ -104,8 +104,8 @@ export default function NetworkTopology() {
     [query, sector, filter],
   )
 
-  /* 搜索命中后放大到该站，方便在 553 个点里看清是哪一个 */
-  const pick = useCallback((s: TopoSite) => { viewer.current?.zoomTo(s) }, [])
+  /* 搜索 / 详情定位一律留在当前页签，不切物理图 */
+  const pick = useCallback((s: TopoSite) => { viewer.current?.focusHere(s) }, [])
   const locate = useCallback((s: TopoSite) => { viewer.current?.locate(s) }, [])
   const zoomTo = useCallback((s: TopoSite) => { viewer.current?.zoomTo(s) }, [])
 

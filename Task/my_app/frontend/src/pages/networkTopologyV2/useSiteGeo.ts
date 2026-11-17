@@ -1,12 +1,12 @@
 /* ============================================================================
  * OLIB GIS 拓扑 —— 站点 GPS 映射表加载
  * ============================================================================
- * 映射表是 public/olib/olib-site-geo.json（约 92KB，553 条），由
+ * 映射表是 public/olib/olib-site-geo.json（约 110KB，667 条），由
  * scripts/gen-olib-site-geo.mjs 生成，来源是 /api/gis/sites 的 master_site_db
  * 快照。页面**不**在运行时做名称匹配：匹配口径必须可复查、可 diff。
  *
  * 为什么要单独 fetch 而不是 import：
- *   553 条映射是数据资产，不是代码；放 public 后不进入 JS bundle，改映射表
+ *   667 条映射是数据资产，不是代码；放 public 后不进入 JS bundle，改映射表
  *   不需要重建整个前端 chunk（但仍需 build/刷新，见 vite public 的复制时机）。
  * ========================================================================== */
 import { useCallback, useEffect, useState } from 'react'

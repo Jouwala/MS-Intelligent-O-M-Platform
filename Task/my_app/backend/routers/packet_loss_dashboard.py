@@ -126,7 +126,7 @@ def _site_type_index() -> dict:
     cached = _cache_get("site_type_index", _SITE_TYPE_TTL)
     if cached is not None:
         return cached
-    index: dict = {"code": {}, "name": {}}
+    index: dict = {"code": {}, "name": {}, "total": {}}
     try:
         conn = get_raw_connection(str(APP_DB_PATH), timeout=30)
         try:
@@ -135,6 +135,7 @@ def _site_type_index() -> dict:
         finally:
             conn.close()
         for site_id, site_name, site_type in rows:
+            raw = str(site_type or "").strip()
             st = _norm_site_type(site_type)
             code = str(site_id or "").strip()
             name = str(site_name or "").strip().lower()
@@ -142,6 +143,11 @@ def _site_type_index() -> dict:
                 index["code"][code] = st
             if name:
                 index["name"][name] = st
+            # 主数据里每个档位的站点总数（下拉显示「被监控 / 主数据」用）。
+            # 空值不计入任何档位 —— 它不是一种「站点类型」，混进去会让各档之和
+            # 悄悄超过主数据总数。
+            if raw:
+                index["total"][st] = index["total"].get(st, 0) + 1
     except Exception:  # noqa: BLE001 主数据取不到时降级为「全部未匹配」，不影响看板其它数字
         logger.warning("[丢包看板] 站点类型读取失败（eflow_site），筛选降级为未匹配", exc_info=True)
     return _cache_set("site_type_index", index)
@@ -175,22 +181,44 @@ def _filter_site_type(rows: list, site_type: str) -> list:
 
 
 def _site_type_counts(rows: list) -> dict:
-    """各站点类型的监控站点数（下拉选项与计数）。
+    """各站点类型**被丢包监控**的站点数（下拉里的分子）。
 
-    只列出**当前真有站点**的档位，且 COOL 之类没有丢包读数的档位不会出现 ——
-    实测主数据 64 个 COOL 站没有任何丢包读数，给一个点了必然空页的选项只会被
-    当成 bug（`pl.explain.siteType` 的气泡里写明了这件事）。未匹配档排最后。
+    ⚠️ 与上一版的关键差别（2026-11-17 用户提问「为什么没有 COOLI 的统计」）：
+    上一版只列出「有丢包读数」的档位，于是 COOL 直接从下拉里消失 —— 用户看到
+    站点类型里没有 COOLI，第一反应是「功能漏做了」。现在**主数据里存在的档位
+    一律列出**，没有读数就显示 0，并配合 `site_type_totals` 显示成 `0 / 64`：
+    数字本身就把「有这类站点、但没被丢包模板覆盖」讲清楚了。
+
+    实测（2026-11-17）：主数据 ERA 216 / COOL 64 / NORMAL 600，其中被丢包监控的
+    是 197 / 0 / 520 —— 64 个 COOL 站在 UME 网元清单里**都在**（moc=SDR），但
+    SDR / IPRAN 两个 IPPD 模板对它们一条读数都没有，所以不是筛选或关联的 bug。
     """
-    counts: dict = {}
+    monitored: dict = {}
     for row in rows:
         key = row.get("site_type") or SITE_TYPE_UNKNOWN
-        counts[key] = counts.get(key, 0) + 1
-    ordered = {k: counts[k] for k in SITE_TYPE_ORDER if counts.get(k)}
-    ordered.update({k: v for k, v in sorted(counts.items(), key=lambda kv: -kv[1])
-                    if k not in ordered and k != SITE_TYPE_UNKNOWN})
-    if counts.get(SITE_TYPE_UNKNOWN):
-        ordered[SITE_TYPE_UNKNOWN] = counts[SITE_TYPE_UNKNOWN]
-    return ordered
+        monitored[key] = monitored.get(key, 0) + 1
+    totals = _site_type_index().get("total", {})
+    # 顺序：ERA / COOL / NORMAL 固定在前（用户口径），其余档位按主数据/读数合并后
+    # 的集合追加，未匹配档恒排最后 —— 与 GIS 页 `_site_type_stats()` 同一取舍。
+    known = set(monitored) | set(totals)
+    order = [k for k in SITE_TYPE_ORDER if k in known]
+    order += sorted(k for k in known if k not in order and k != SITE_TYPE_UNKNOWN)
+    if SITE_TYPE_UNKNOWN in known:
+        order.append(SITE_TYPE_UNKNOWN)
+    return {k: monitored.get(k, 0) for k in order}
+
+
+def _site_type_totals(counts: dict) -> dict:
+    """各站点类型在主数据里的站点总数（下拉里的分母）。
+
+    未匹配档没有主数据分母，用它的读数站点数顶上，保证前端「分子/分母」恒有值、
+    不用在前端写 `?? 0` 这类会让缺数看起来像 0 的兜底。
+    """
+    totals = dict(_site_type_index().get("total", {}))
+    out = {}
+    for key, n in counts.items():
+        out[key] = totals.get(key, n) if key != SITE_TYPE_UNKNOWN else n
+    return out
 
 
 def _me_in_site_type(me, codes: set, names: set) -> bool:
@@ -259,6 +287,8 @@ def pl_overview(site_type: str = Query(
     rows_all = _load_summary_rows()
     rows = _filter_site_type(rows_all, site_type)
     meta = _load_meta()
+    # 下拉的分子/分母只跟主数据走，与当前选中档位无关（切档后数字不变）
+    _st_counts = _site_type_counts(rows_all)
 
     status_counts = {s: 0 for s in STATUS_ORDER}
     region_counts: dict = {}
@@ -392,9 +422,12 @@ def pl_overview(site_type: str = Query(
         "generated_at": meta.get("last_sync_time"),
         "report_path": meta.get("report_path"),
         # 当前生效的站点类型（"all" = 全部），前端据此回显下拉；
-        # site_type_counts 恒为**不过滤**的分布，供下拉展示各档站点数
+        # site_type_counts / site_type_totals 恒为**不过滤**的分布，供下拉展示
+        # 「被丢包监控的站点数 / 主数据站点总数」—— COOL 档分子为 0 但有分母，
+        # 用户一眼能看到「这类站点存在、只是没有丢包读数」。
         "site_type": want or "all",
-        "site_type_counts": _site_type_counts(rows_all),
+        "site_type_counts": _st_counts,
+        "site_type_totals": _site_type_totals(_st_counts),
         "total_sites": total_sites,
         "affected_sites": affected_total,
         "status_counts": status_counts,

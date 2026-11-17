@@ -17,7 +17,7 @@ import { PmtilesLayer } from '../gismap/PmtilesLayer'
 import CountyLayer, { type CountyPolygon } from './CountyLayer'
 import GeoTopologyLayer from './GeoTopologyLayer'
 import type { CoreLinkType } from '../networkTopology/topologyData'
-import type { GeoLink, GeoSite } from './types'
+import type { FiberLink, GeoLink, GeoSite } from './types'
 
 export const LB_CENTER: [number, number] = [6.35, -9.5]
 export const LB_ZOOM = 8
@@ -43,6 +43,7 @@ function MapReset({ token }: { token: number }) {
 export interface GeoTopologyMapProps {
   sites: GeoSite[]
   links: GeoLink[]
+  fiberLinks: FiberLink[]
   selected: GeoSite | null
   focus: { index: number; token: number; zoom?: number } | null
   resetToken: number
@@ -54,7 +55,7 @@ export interface GeoTopologyMapProps {
 }
 
 export default function GeoTopologyMap({
-  sites, links, selected, focus, resetToken, isDark, onSelect,
+  sites, links, fiberLinks, selected, focus, resetToken, isDark, onSelect,
   typeLabel, clusterLabel, linkTypeLabel,
 }: GeoTopologyMapProps) {
   const [counties, setCounties] = useState<CountyPolygon[]>([])
@@ -80,7 +81,7 @@ export default function GeoTopologyMap({
     <MapContainer
       center={LB_CENTER}
       zoom={LB_ZOOM}
-      className="olibv2-map"
+      className={`olibv2-map${isDark ? ' is-dark' : ''}`}
       style={{ position: 'absolute', inset: 0, background: 'var(--wh-page-bg)' }}
     >
       <PmtilesLayer
@@ -96,6 +97,7 @@ export default function GeoTopologyMap({
       <GeoTopologyLayer
         sites={sites}
         links={links}
+        fiberLinks={fiberLinks}
         selected={selected}
         focus={focus}
         onSelect={onSelect}

@@ -17,10 +17,12 @@ import { methodLabel, reasonLabel, siteTypeLabel } from './labels'
 import type { GeoLink, GeoSite } from './types'
 
 export default function V2SiteDetail({
-  site, links, onLocate, onZoom, onSelect, onClear,
+  site, links, locateEnabled = true, onLocate, onZoom, onSelect, onClear,
 }: {
   site: GeoSite | null
   links: GeoLink[]
+  /** 地理图需有 GPS；物理/逻辑/骨干用 PDF 点位，由页面传入 */
+  locateEnabled?: boolean
   onLocate: (s: GeoSite) => void
   onZoom: (s: GeoSite) => void
   onSelect: (index: number) => void
@@ -107,11 +109,11 @@ export default function V2SiteDetail({
       )}
 
       <div className="olibv2-detail-actions">
-        <Button size="small" type="primary" icon={<AimOutlined />} disabled={!site.located}
+        <Button size="small" type="primary" icon={<AimOutlined />} disabled={!locateEnabled}
           onClick={() => onLocate(site)}>
           {t('olibV2.detail.locate')}
         </Button>
-        <Button size="small" icon={<ZoomInOutlined />} disabled={!site.located}
+        <Button size="small" icon={<ZoomInOutlined />} disabled={!locateEnabled}
           onClick={() => onZoom(site)}>
           {t('olibV2.detail.zoom')}
         </Button>

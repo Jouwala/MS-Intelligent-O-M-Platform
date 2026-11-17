@@ -3,6 +3,7 @@
   "hidden": [
     "tt-batch-check",
     "knowledge-search",
-    "tt-postmortem"
+    "tt-postmortem",
+    "wo-close"
   ]
 }

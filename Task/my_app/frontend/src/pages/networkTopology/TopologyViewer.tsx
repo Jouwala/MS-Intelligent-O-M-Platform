@@ -3,7 +3,7 @@
  * ============================================================================
  * 交互与参考页一致：
  *   · 物理 / 逻辑图：滚轮缩放（以光标为中心）、拖动平移、重置适应窗口、全屏；
- *   · 物理图上叠加 553 个站点点位（灰=普通 / 红=5G / 蓝=ISP / 紫=骨干核心），
+ *   · 物理图上叠加 667 个站点点位（灰=普通 / 红=5G / 蓝=ISP / 紫=骨干核心），
  *     点位半径按 1/scale 反向补偿，放大后仍保持约 3px，不会糊成一团；
  *   · 选中站点画十字虚线 + 橙色脉冲光圈 + 名称标签；右下角缩略图显示当前视野；
  *   · 骨干示意图与原图共用同一套平移缩放。
@@ -19,7 +19,7 @@ import {
   forwardRef, memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState,
   type PointerEvent as ReactPointerEvent, type MouseEvent as ReactMouseEvent,
 } from 'react'
-import { Button, Space } from 'antd'
+import { Button, Space, message } from 'antd'
 import {
   EyeInvisibleOutlined, EyeOutlined, FullscreenExitOutlined, FullscreenOutlined,
   ReloadOutlined, ZoomInOutlined, ZoomOutOutlined,
@@ -28,17 +28,20 @@ import {
 import { useI18n } from '../../i18n'
 import { WH, useTheme } from '../../theme'
 import {
-  SITES, TOPO_DOCS, TOPO_PAGE_SIZE, siteColor, sitePercent,
+  LOGICAL_PINS, SITES, TOPO_DOCS, TOPO_PAGE_SIZE,
+  findCoreNodeBySite, findLogicalPin, findSiteByName, siteColor, sitePercent,
   type TopoSite, type TopoView,
 } from './topologyData'
 import CoreSchematic from './CoreSchematic'
 
 export interface TopologyViewerHandle {
   fit: () => void
-  /** 全图定位：切到物理图并适应窗口（选中态由 onSelect 同步） */
+  /** 当前页签内全图适应（选中站点；有点位则高亮） */
   locate: (site: TopoSite) => void
-  /** 放大看周边：切到物理图并把该站点放到视野中心 */
+  /** 当前页签内放大到站点（物理 / 逻辑标签 / 骨干节点） */
   zoomTo: (site: TopoSite) => void
+  /** 搜索选中：同 zoomTo，始终留在当前页签 */
+  focusHere: (site: TopoSite) => void
 }
 
 interface Props {
@@ -55,7 +58,7 @@ const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v
 /** 原图尺寸（缩放坐标系）；loaded 后才画 overlay */
 type Natural = { w: number; h: number; view: 'physical' | 'logical' }
 
-/** 站点圆点：只在 scale / 选中项变化时重渲染，拖拽平移不碰这 553 个节点 */
+/** 站点圆点：只在 scale / 选中项变化时重渲染，拖拽平移不碰这 667 个节点 */
 const SiteDots = memo(function SiteDots({
   w, h, scale, selectedIndex, onSelect,
 }: {
@@ -83,6 +86,41 @@ const SiteDots = memo(function SiteDots({
             <title>
               {`${s.name} · ${s.sector}${s.is5g ? ' · 5G' : ''}${s.isp ? ' · ISP' : ''}`}
             </title>
+          </circle>
+        )
+      })}
+    </>
+  )
+})
+
+/** 逻辑图点位：只有第 2 页能匹配到的标签（约 65 个），不是全量 667 */
+const LogicalDots = memo(function LogicalDots({
+  w, h, scale, selectedName, onSelect,
+}: {
+  w: number
+  h: number
+  scale: number
+  selectedName: string | null
+  onSelect: (s: TopoSite) => void
+}) {
+  const r = (selected: boolean) => ((selected ? 6.2 : 3.8) / Math.max(scale, 0.04)).toFixed(2)
+  return (
+    <>
+      {LOGICAL_PINS.map(pin => {
+        const site = findSiteByName(pin.name)
+        if (!site) return null
+        const selected = !!selectedName && selectedName === site.name
+        return (
+          <circle
+            key={pin.name}
+            className={selected ? 'topo-site is-selected' : 'topo-site'}
+            cx={(pin.x / 1000 * w).toFixed(2)}
+            cy={(pin.y / 1000 * h).toFixed(2)}
+            r={r(selected)}
+            fill={siteColor(site)}
+            onClick={e => { e.stopPropagation(); onSelect(site) }}
+          >
+            <title>{`${site.name} · ${site.sector}`}</title>
           </circle>
         )
       })}
@@ -155,7 +193,13 @@ const TopologyViewer = forwardRef<TopologyViewerHandle, Props>(function Topology
   const [transform, setTransform] = useState({ s: 1, x: 0, y: 0 })
   const [natural, setNatural] = useState<Natural | null>(null)
   const [isFullscreen, setIsFullscreen] = useState(false)
-  const [pending, setPending] = useState<{ site: TopoSite; mode: 'fit' | 'zoom' } | null>(null)
+  /** abs：骨干示意用 viewBox 绝对坐标；缺省则用站点千分比换算到当前 content */
+  const [pending, setPending] = useState<{
+    site: TopoSite
+    mode: 'fit' | 'zoom'
+    expectView: TopoView
+    abs?: { x: number; y: number }
+  } | null>(null)
 
   /* 画布内容尺寸：原图用 natural size，骨干示意用固定 viewBox
    * （2026-11-16 去掉站点分布视图后，非原图的只剩 core 一种） */
@@ -215,35 +259,73 @@ const TopologyViewer = forwardRef<TopologyViewerHandle, Props>(function Topology
     return () => document.removeEventListener('fullscreenchange', onFs)
   }, [])
 
-  const zoomToSite = useCallback((site: TopoSite) => {
+  const zoomToPoint = useCallback((cx: number, cy: number) => {
     if (!content || !viewSize.w) return
     const s = Math.min(viewSize.w / content.w, viewSize.h / content.h) * 6
-    const cx = site.x / 1000 * content.w
-    const cy = site.y / 1000 * content.h
     setTransform({ s, x: viewSize.w / 2 - cx * s, y: viewSize.h / 2 - cy * s })
   }, [content, viewSize])
 
-  /* 从详情面板 / 搜索结果触发的定位：等物理图加载好再执行，避免用空 content 计算 */
+  const zoomToSite = useCallback((site: TopoSite) => {
+    if (!content) return
+    zoomToPoint(site.x / 1000 * content.w, site.y / 1000 * content.h)
+  }, [content, zoomToPoint])
+
+  /* 等目标页签 content 就绪再缩放，避免切页/首屏时用空尺寸计算 */
   useEffect(() => {
-    if (!pending || view !== 'physical' || !content) return
-    if (pending.mode === 'zoom') zoomToSite(pending.site)
-    else fit()
+    if (!pending || view !== pending.expectView || !content) return
+    if (pending.mode === 'zoom') {
+      if (pending.abs) zoomToPoint(pending.abs.x, pending.abs.y)
+      else zoomToSite(pending.site)
+    } else fit()
     setPending(null)
-  }, [pending, view, content, fit, zoomToSite])
+  }, [pending, view, content, fit, zoomToSite, zoomToPoint])
+
+  /* 一律留在当前页签定位，不再强制切到物理图 */
+  const focusOnView = useCallback((site: TopoSite, mode: 'fit' | 'zoom') => {
+    onSelect(site)
+    if (view === 'physical') {
+      setPending({ site, mode, expectView: 'physical' })
+      return
+    }
+    if (view === 'logical') {
+      const pin = findLogicalPin(site)
+      if (!pin) {
+        message.info(t('olibTopo.search.logicalNoPos', { name: site.name }))
+        return
+      }
+      if (mode === 'fit') {
+        setPending({ site, mode: 'fit', expectView: 'logical' })
+        return
+      }
+      const page = content && content.w ? content : TOPO_PAGE_SIZE.logical
+      setPending({
+        site,
+        mode: 'zoom',
+        expectView: 'logical',
+        abs: { x: pin.x / 1000 * page.w, y: pin.y / 1000 * page.h },
+      })
+      return
+    }
+    if (view === 'core') {
+      const node = findCoreNodeBySite(site)
+      if (!node) {
+        message.info(t('olibTopo.search.coreMiss', { name: site.name }))
+        return
+      }
+      if (mode === 'fit') {
+        setPending({ site, mode: 'fit', expectView: 'core' })
+        return
+      }
+      setPending({ site, mode: 'zoom', expectView: 'core', abs: { x: node.x, y: node.y } })
+    }
+  }, [content, onSelect, t, view])
 
   useImperativeHandle(ref, () => ({
     fit,
-    locate: (site: TopoSite) => {
-      onSelect(site)
-      if (view !== 'physical') onViewChange('physical')
-      setPending({ site, mode: 'fit' })
-    },
-    zoomTo: (site: TopoSite) => {
-      onSelect(site)
-      if (view !== 'physical') onViewChange('physical')
-      setPending({ site, mode: 'zoom' })
-    },
-  }), [fit, onSelect, view, onViewChange])
+    locate: (site: TopoSite) => focusOnView(site, 'fit'),
+    zoomTo: (site: TopoSite) => focusOnView(site, 'zoom'),
+    focusHere: (site: TopoSite) => focusOnView(site, 'zoom'),
+  }), [fit, focusOnView])
 
   const toggleFullscreen = () => {
     const el = viewerRef.current
@@ -276,11 +358,21 @@ const TopologyViewer = forwardRef<TopologyViewerHandle, Props>(function Topology
    * 重新栅格化 SVG，任意倍率都清晰。平移仍用 transform，缩放时才改宽高。 */
   const display = content ? { w: content.w * transform.s, h: content.h * transform.s } : null
 
-  /* 高亮位置（视图坐标系） */
+  /* 高亮位置（视图坐标系）：物理用全量坐标；逻辑用第 2 页标签坐标 */
   const highlight = useMemo(() => {
-    if (view !== 'physical' || !selected || !content) return null
-    const px = transform.x + (selected.x / 1000) * content.w * transform.s
-    const py = transform.y + (selected.y / 1000) * content.h * transform.s
+    if (!selected || !content) return null
+    let x = selected.x
+    let y = selected.y
+    if (view === 'logical') {
+      const pin = findLogicalPin(selected)
+      if (!pin) return null
+      x = pin.x
+      y = pin.y
+    } else if (view !== 'physical') {
+      return null
+    }
+    const px = transform.x + (x / 1000) * content.w * transform.s
+    const py = transform.y + (y / 1000) * content.h * transform.s
     return { px, py }
   }, [view, selected, content, transform])
 
@@ -401,11 +493,29 @@ const TopologyViewer = forwardRef<TopologyViewerHandle, Props>(function Topology
                   />
                 </svg>
               )}
+              {view === 'logical' && sitesVisible && natural && natural.view === 'logical' && display && (
+                <svg
+                  className="topo-overlay"
+                  width={display.w}
+                  height={display.h}
+                  viewBox={`0 0 ${natural.w} ${natural.h}`}
+                  aria-label={t('olibTopo.overlay.ariaLogical', { n: LOGICAL_PINS.length })}
+                >
+                  <LogicalDots
+                    w={natural.w}
+                    h={natural.h}
+                    scale={transform.s}
+                    selectedName={selected?.name ?? null}
+                    onSelect={onSelect}
+                  />
+                </svg>
+              )}
             </>
           )}
           {view === 'core' && (
             <CoreSchematic
               onSelect={onSelect}
+              selected={selected}
               width={1040 * transform.s}
               height={540 * transform.s}
             />
@@ -460,7 +570,7 @@ const TopologyViewer = forwardRef<TopologyViewerHandle, Props>(function Topology
       </div>
 
       <div className="topo-hint" style={{ color: WH.textMuted }}>
-        {t(hintKey, { n: SITES.length })}
+        {t(hintKey, { n: view === 'logical' ? LOGICAL_PINS.length : SITES.length })}
       </div>
     </>
   )

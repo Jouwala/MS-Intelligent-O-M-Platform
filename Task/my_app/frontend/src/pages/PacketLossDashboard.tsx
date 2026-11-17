@@ -74,6 +74,19 @@ const OK_STATUS = 'No Packet loss[<0.1]'
    `packet_loss_dashboard.SITE_TYPE_UNKNOWN` 逐字一致 —— 两边不一致，
    选它就会永远筛出 0 行。真值只有 ERA / COOL / NORMAL 三档。 */
 const SITE_TYPE_UNKNOWN = '(unmapped)'
+/* 「全部」用的**非空**哨兵值（2026-11-17 修）。
+   此前用空串 `''` 当下拉的值，antd Select 把空串当成「没有值」处理 ——
+   一进页面下拉是**空白**的，用户只能看到下面的数字，分不清现在是全量还是某一档
+   （用户反馈「默认显示 Normal 站点的统计」就是这么来的：空白框 + 最大的那组数字）。
+   换成 'all' 后：后端 `_site_type_want()` 本来就认 'all' 为不过滤，
+   下拉也能正常回显「All (721/880)」。 */
+const ALL_SITE_TYPE = 'all'
+/* 默认视角 = NORMAL（2026-11-17 用户明确要求「默认要显示 Normal」）。
+   为什么固定成常量而不是从接口猜：默认值属于产品口径，跟着数据漂移会让人
+   「今天进页面是 NORMAL、明天变成 ERA」却找不到原因。
+   兜底见 `useEffect` 里的判断：若 NORMAL 档在某天真的变成 0 个被监控站点
+   （例如主数据改名/上游停采），自动退回「全部」，不让用户一进页面就是空页。 */
+const DEFAULT_SITE_TYPE = 'NORMAL'
 const siteTypeLabel = (value: string, t: (key: string) => string) =>
   value === SITE_TYPE_UNKNOWN ? t('pl.siteType.unmapped') : value
 
@@ -255,11 +268,12 @@ export default function PacketLossDashboard() {
   // 默认显示 OK 站点（include_ok=true），地图展示全量有坐标站点
   const [includeOk, setIncludeOk] = useState(true)
   /* 站点类型过滤（2026-11-17 用户要求「在 Packet Loss Status 添加站点类型过滤」）：
-     `''` = 全部，其余为 eflow_site.site_type 的真值（ERA / NORMAL / …）。
+     `ALL_SITE_TYPE`（'all'）= 全部，其余为 eflow_site.site_type 的真值（ERA / COOL / NORMAL）。
      **一参到底** —— 状态卡 / 饼图 / 区域 / 每日趋势 / Top 站点 / 地图 / 下钻全部
      跟着它走；只筛一半的话同一页数字互相对不上，用户会当成 bug。
-     选项来自接口的 site_type_counts（只列真有丢包站点的档位，点了不会空页）。 */
-  const [siteType, setSiteType] = useState('')
+     选项来自接口的 site_type_counts + site_type_totals：主数据里有的档位全列，
+     没有丢包读数的（如 COOL 0/64）显示出来但置灰，见 `siteTypeOptions`。 */
+  const [siteType, setSiteType] = useState(DEFAULT_SITE_TYPE)
   const [hiddenStatuses, setHiddenStatuses] = useState<Set<string>>(new Set())
   // 拓扑显示开关：开启后复用 GIS Map 的真实拓扑链路（/api/gis/topology），按传输类型着色
   const [showTopology, setShowTopology] = useState(false)
@@ -352,6 +366,16 @@ export default function PacketLossDashboard() {
       cachedGet(`pl:map:${includeOk}:${siteType}`, () => api.get('/packet-loss-dashboard/map-sites', { params: { include_ok: includeOk, site_type: siteType } })),
     ])
       .then(([ov, mp]) => {
+        /* 默认档位兜底：NORMAL 若某天变成「0 个被监控站点」（主数据改名、上游停采
+           等），直接停在这一档会让用户一进页面就是空页 + 一堆 0。此时自动退回
+           「全部」，并在控制台留一行原因 —— 静默改口径比空页更难排查。
+           只在**当前就是某一具体档位**时判断，避免和用户手动选档互相打架。 */
+        const counts = ov.data?.site_type_counts || {}
+        if (siteType !== ALL_SITE_TYPE && (counts[siteType] ?? 0) === 0) {
+          console.warn(`[packet_loss] 站点类型 ${siteType} 没有丢包读数，自动退回 All`)
+          setSiteType(ALL_SITE_TYPE)
+          return
+        }
         setData(ov.data)
         setMapSites(mp.data.sites || [])
         setError(null)
@@ -373,7 +397,7 @@ export default function PacketLossDashboard() {
     setDrillData([])
     setDrillSearch('')
     // 标题带上当前站点类型：弹窗里的行数必须能与刚才点的那张卡对上（同一档位）
-    setDrillTitle(`${title}${siteType ? ` · ${t('pl.siteType')} = ${siteTypeLabel(siteType, t)}` : ''}`)
+    setDrillTitle(`${title}${siteType !== ALL_SITE_TYPE ? ` · ${t('pl.siteType')} = ${siteTypeLabel(siteType, t)}` : ''}`)
     api.get('/packet-loss-dashboard/drilldown', { params: { status, limit: 800, site_type: siteType } })
       .then(res => {
         setDrillData(res.data.data || [])
@@ -695,20 +719,34 @@ export default function PacketLossDashboard() {
   const fmt = (n: number) => (n ?? 0).toLocaleString(numLocale(locale))
   const chartClick = (titlePrefix: string) => (p: any) => openDrilldown(p, p.name, `${titlePrefix} = ${STATUS_SHORT[p.name] || p.name}`)
 
-  /* 站点类型下拉（2026-11-17）：值 / 计数都来自接口 `site_type_counts`，
-     而该字段**恒为全量分布**，所以切到 ERA 后下拉里的数字不会跟着变小（那是筛完
-     以后的数字，容易让人以为 TOTAL 丢了站点）。「全部」的计数 = 各档之和。
-     COOL 档会缺席 —— 主数据里 64 个 COOL 站没有任何丢包读数，给了选项点进去
-     也只会是空页；原因写在 `pl.explain.siteType` 的气泡里。 */
+  /* 站点类型下拉（2026-11-17 用户提问后改版）：两个数都来自接口、且**恒为全量分布**
+     （切档后不跟着变小，否则会让人以为 TOTAL 丢了站点）：
+       · site_type_counts = 被丢包监控的站点数
+       · site_type_totals = 主数据里的站点总数
+     下拉因此显示成 `COOL (0 / 64)` —— COOLI 有自己的选项、有分母，用户一眼就知道
+     「这类站点存在、主数据里有 64 个，只是最近 7 天一条丢包读数都没有」，
+     而不是「功能漏做了」或「筛选把我筛没了」。
+     分子为 0 的档位置灰（`disabled`）：选中它必然是一页空图，点进去只会被当成 bug。
+     数据一旦有了读数，分子 > 0 自动解禁，不需要回来改代码。 */
   const siteTypeCounts: Record<string, number> = data.site_type_counts || {}
+  const siteTypeTotals: Record<string, number> = data.site_type_totals || {}
+  const countLabel = (k: string) =>
+    `${siteTypeLabel(k, t)} (${siteTypeCounts[k] ?? 0} / ${siteTypeTotals[k] ?? siteTypeCounts[k] ?? 0})`
+  /* 「全部」的分母只加**主数据里真有类型**的档位（排除未匹配档）：
+     未匹配那 4 个站本来就不在主数据里，加进去会变成 721/884，
+     而主数据实际只有 880 站 —— 分母对不上是最容易被当成「统计错了」的细节。 */
+  const allTotal = Object.entries(siteTypeTotals)
+    .filter(([k]) => k !== SITE_TYPE_UNKNOWN)
+    .reduce((a, [, n]) => a + (n || 0), 0)
   const siteTypeOptions = [
     {
-      value: '',
-      label: `${t('pl.siteType.all')} (${Object.values(siteTypeCounts).reduce((a, b) => a + (b || 0), 0)})`,
+      value: ALL_SITE_TYPE,
+      label: `${t('pl.siteType.all')} (${Object.values(siteTypeCounts).reduce((a, b) => a + (b || 0), 0)} / ${allTotal})`,
     },
-    ...Object.entries(siteTypeCounts).map(([k, n]) => ({
+    ...Object.keys(siteTypeCounts).map(k => ({
       value: k,
-      label: `${siteTypeLabel(k, t)} (${n})`,
+      label: countLabel(k),
+      disabled: (siteTypeCounts[k] ?? 0) === 0,
     })),
   ]
 
@@ -788,6 +826,22 @@ export default function PacketLossDashboard() {
           </div>
         </div>
       </Card>
+
+      {/* 兜底：所选站点类型在窗口内一个读数都没有时，页面下半部分全是 0 和空图，
+          看起来就像坏了。这种情况通常只会通过 URL 直传参数触发（下拉里 0 读数的
+          档位已置灰），仍要明确说明「是这类站点没有丢包读数，不是筛选出错」。
+          按 AGENTS.md 三.3b，这属于「数据不全」的异常而不是「口径解释」，故常驻。 */}
+      {data.total_sites === 0 && (
+        <Alert
+          type="warning"
+          showIcon
+          message={t('pl.siteType.emptyTitle', { type: siteTypeLabel(siteType, t) })}
+          description={t('pl.siteType.emptyDesc', {
+            monitored: siteTypeCounts[siteType] ?? 0,
+            total: siteTypeTotals[siteType] ?? 0,
+          })}
+        />
+      )}
 
       {/* 2. 核心指标卡片 */}
       <Row gutter={[12, 12]}>

@@ -216,6 +216,17 @@ class SiteIndex:
         self._fuzzy_threshold = float(fuzzy_threshold)
         self._loaded = False
 
+    @property
+    def loaded_count(self) -> int:
+        """已装入索引的 cmdb 站点数（**不触发网络加载**）。
+
+        用途：区分「站点解析失败」的两种成因 ——
+          * >0：cmdb 索引是健康拉到的，某条告警解析不出站点 = cmdb 数据缺档（配置问题）；
+          * 0：cmdb 根本没拉到（接口异常/返回非列表），那是系统故障，不能当成站点缺档。
+        见 `fiber_assign_service.apply_outcome` 的 pending_cmdb 分支。
+        """
+        return len(self._by_name)
+
     def load(self) -> None:
         if self._loaded:
             return

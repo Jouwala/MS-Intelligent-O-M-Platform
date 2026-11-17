@@ -1383,6 +1383,14 @@ eFlow 的 `relatedAlarms` 对这 5 条返回 **0 条**（eFlow 自己也没把�
   拿它去 cmdb 比对命名。若只是拼写差异（且不是等长元音互换），近似匹配**不会**兜底，
   应修 ME 命名或 cmdb 站名，而不是调低 `site_fuzzy_threshold`（调低只会把它变成错派风险）。
   这类告警**不静默**：群里会收到一条「需人工在 eFlow 处理」通报（同一条只发一次）。
+- `status=pending_cmdb`（结果 `message` 里写着「cmdb 站点缺档」）→ **不是任务失败**：
+  本轮所有失败都是「ME/站名在 cmdb 找不到站点」，且 cmdb 索引本身是健康拉到的
+  （`cmdb_site_count>0`）。这属于 cmdb 配置待补，`success=true`，Run History 显示
+  橙色「待补 cmdb」提示而不是红色 ❌ Error（2026-11-17 如意要求：提示照旧可见，
+  但不能报错）。补齐 cmdb 站点或 ME 命名后下一轮自动派单。
+  判据在 `fiber_assign_service.py:apply_outcome`（pending_cmdb 分支）：
+  **`cmdb_site_count=0`（cmdb 没拉到）或混有建单失败时仍判 `failed`** —— 前者是系统
+  故障，后者是 eFlow 侧真失败，都不能当「配置待补」放过。
 - `merged>0` → 有告警被合并进组长告警的 TT（同一次光纤中断），这是**预期行为**，不是漏派。
   核对方法：拿 `skip_reason` 里的组长 alarm_key 去状态表查它的 `tt_no`，
   确认这个单号确实建出来了；若组长那条失败（`N`），成员**不会被合并**

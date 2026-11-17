@@ -3,7 +3,7 @@
  * OLIB 站点 GPS 映射表生成器（?page=olibTopo_v2 的数据源）
  * ============================================================================
  * 输入
- *   1. src/pages/networkTopology/topologyData.ts 里的 553 条 RAW_SITES
+ *   1. src/pages/networkTopology/topologyData.ts 里的 RAW_SITES（667 条；换 PDF 后随之变化）
  *      （站点名 + PDF 相对坐标 + 5G/ISP 标记 + 区域；**不是 GPS**）
  *   2. 后端 GET /api/gis/sites（master_site_db，真实经纬度）
  *   3. scripts/olib-site-aliases.json（人工核验的拼写别名）
@@ -171,7 +171,7 @@ async function build() {
   return {
     generatedAt: new Date().toISOString().slice(0, 10),
     source: {
-      topology: 'Orange_network_topology_20251226.pdf → networkTopology/topologyData.ts（553 条站名/相对坐标）',
+      topology: `Orange network topology_20260623.pdf → networkTopology/topologyData.ts（${rows.length} 条站名/相对坐标）`,
       gps: 'GET /api/gis/sites → master_site_db（真实经纬度快照）',
       aliases: 'scripts/olib-site-aliases.json（人工核验）',
     },

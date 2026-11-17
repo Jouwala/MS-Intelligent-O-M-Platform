@@ -57,6 +57,7 @@ export default function V2SiteSearch({
         allowClear
         value={query}
         onChange={(e) => onQuery(e.target.value)}
+        onPressEnter={() => { if (results[0]) onPick(results[0]) }}
         placeholder={t('olibV2.search.placeholder')}
         prefix={<SearchOutlined style={{ color: 'var(--wh-text-muted)' }} />}
       />

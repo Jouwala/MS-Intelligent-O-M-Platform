@@ -1,7 +1,7 @@
 /* ============================================================================
  * OLIB FO 网络拓扑 —— 站点查询（搜索 / 区域 / 快捷筛选 / 结果列表）
  * ============================================================================
- * 结果在页面层过滤（553 条静态数据，无需接口）；这里只负责展示与回调。
+ * 结果在页面层过滤（667 条静态数据，无需接口）；这里只负责展示与回调。
  * 列表最多渲染 300 行并在超出时明确提示，不做静默截断。
  * ========================================================================== */
 import { Empty, Input, Select, Tag } from 'antd'
@@ -65,6 +65,7 @@ export default function SiteSearch({
         allowClear
         value={query}
         onChange={e => onQuery(e.target.value)}
+        onPressEnter={() => { if (results[0]) onPick(results[0]) }}
         prefix={<SearchOutlined style={{ color: WH.textDim }} />}
         placeholder={t('olibTopo.search.placeholder')}
         aria-label={t('olibTopo.search.placeholder')}

@@ -3316,6 +3316,14 @@ eFlow 处理」。明细见 <code>suspect_ttstatus_samples</code>。在 eFlow �
 拿它去 cmdb 比对命名。若只是拼写差异（且不是等长元音互换），近似匹配<strong>不会</strong>兜底，
 应修 ME 命名或 cmdb 站名，而不是调低 <code>site_fuzzy_threshold</code>（调低只会把它变成错派风险）。
 这类告警<strong>不静默</strong>：群里会收到一条「需人工在 eFlow 处理」通报（同一条只发一次）。</li>
+<li><code>status=pending_cmdb</code>（结果 <code>message</code> 里写着「cmdb 站点缺档」）→ <strong>不是任务失败</strong>：
+本轮所有失败都是「ME/站名在 cmdb 找不到站点」，且 cmdb 索引本身是健康拉到的
+（<code>cmdb_site_count&gt;0</code>）。这属于 cmdb 配置待补，<code>success=true</code>，Run History 显示
+橙色「待补 cmdb」提示而不是红色 ❌ Error（2026-11-17 如意要求：提示照旧可见，
+但不能报错）。补齐 cmdb 站点或 ME 命名后下一轮自动派单。
+判据在 <code>fiber_assign_service.py:apply_outcome</code>（pending_cmdb 分支）：
+<strong><code>cmdb_site_count=0</code>（cmdb 没拉到）或混有建单失败时仍判 <code>failed</code></strong> —— 前者是系统
+故障，后者是 eFlow 侧真失败，都不能当「配置待补」放过。</li>
 <li><code>merged&gt;0</code> → 有告警被合并进组长告警的 TT（同一次光纤中断），这是<strong>预期行为</strong>，不是漏派。
 核对方法：拿 <code>skip_reason</code> 里的组长 alarm_key 去状态表查它的 <code>tt_no</code>，
 确认这个单号确实建出来了；若组长那条失败（<code>N</code>），成员<strong>不会被合并</strong>
@@ -5578,26 +5586,52 @@ Network 取 <code>ms_sla_kpi</code> 快照原值不重算；PS_* = 阈值达标�
 </ul>
 <p><a id="ch-11-s14"></a></p>
 <h3>8c. OLIB 光纤拓扑（<code>?page=olibTopo</code>，2026-11-16 新增）</h3>
-<p>Orange Liberia 全国光纤网络拓扑的<strong>静态参考页</strong>：把《Orange_network_topology_20251226.pdf》第 1 页物理图、第 2 页逻辑图原样嵌入，并在物理图上叠加 553 个提取站点。<strong>不连后端、不写库</strong>，所有数据都是源级静态文件。</p>
+<p>Orange Liberia 全国光纤网络拓扑的<strong>静态参考页</strong>：把《Orange network topology_20260623.pdf》（2026-11-17 换版，旧版是 20251226）第 1 页物理图、第 2 页逻辑图原样嵌入，并在物理图上叠加 667 个提取站点。<strong>不连后端、不写库</strong>，所有数据都是源级静态文件。</p>
 <ul>
-<li><strong>数据与资源</strong>：站点名单 / 坐标 / 骨干节点与链路在 <code>frontend/src/pages/networkTopology/topologyData.ts</code>；两张图是<strong>由 PDF 矢量导出的 SVG</strong>（<code>frontend/public/topology/physical.svg</code>、<code>logical.svg</code>，构建后落到 <code>_fe_dist/topology/</code>，经 vite base <code>/myapp/</code> 加载），不是位图截图 —— 放大到任意倍率线条与文字都保持清晰。坐标口径、已知限制写在 <code>topologyData.ts</code> 文件头与本页可展开的口径说明里。</li>
-<li><strong>三个视图</strong>（<code>TopologyViewer.tsx</code>）：「原图 · 物理拓扑」叠加全部站点点位；「原图 · 逻辑拓扑」只看第 2 页原图；「骨干示意」按第 2 页逻辑图重绘 13 个节点、18 条链路（<code>CoreSchematic.tsx</code>）。<strong>「站点分布」散点视图已于 2026-11-16 按用户要求移除</strong>（<code>ScatterView.tsx</code>、<code>SECTOR_COLORS</code> 与 <code>view/hint/detail.scatter</code> 三个 i18n 键一并删除，不留死代码）。</li>
-<li><strong>交互</strong>：滚轮以光标为中心缩放、拖动平移、工具条缩放/重置/全屏/显示隐藏点位；右下角缩略图（仅物理图）显示当前视野并可点击跳转。画布按「原图尺寸 × 倍率」重新渲染 SVG（不是 CSS transform 拉伸），所以放大后文字、链路仍清晰；点位半径按 <code>1/scale</code> 反向补偿，放大后仍是细小圆点；选中站点画十字虚线 + 橙色脉冲光圈 + 名称标签。</li>
-<li><strong>布局与高度自适应</strong>（2026-11-16 用户要求「下面不要一大块空白」）：画布卡片不再固定 <code>62vh</code>，改为<strong>认领内容区剩余高度</strong>——embed 下 <code>#main-content</code> 是定高 <code>100vh</code>，直链下按内容高度；左画布 : 右栏 = 3 : 1。右栏（站点查询 / 详情 / 图例）内容比画布高时<strong>在自己容器里滚动</strong>，子卡片必须 <code>flex-shrink:0</code>，否则会被压扁、内容被 <code>overflow:hidden</code> 裁掉且滚不到（实测图例底部就是这样消失的）。窄屏（<code>&lt;1000px</code>）换行堆叠，回到按内容高度排布。左右两栏用普通 flex 而非 antd <code>Row/Col</code>：Row 的 flex 行高在内容高于可用高度时不参与收缩，<code>Col</code> 会被内容撑到 1010px 再溢出视野。骨架见 <code>NetworkTopology.tsx</code> 的 <code>PAGE_CSS</code>。</li>
-<li><strong>站点查询与详情</strong>：站名/区域<strong>模糊搜索</strong>（忽略大小写与标点；多词都要出现；允许打错一个字母或漏写少量字母，见 <code>networkTopology/siteMatch.ts</code>）+ 区域下拉 +「全部 / 5G / ISP / 骨干核心」快捷筛选（<code>SiteSearch.tsx</code>）；结果超过 300 条时只渲染前 300 条并显示明确提示，不静默截断。点结果会放大到该站。点位后详情卡显示区域、原图相对位置（近似值，不是 GPS）与类型，并提供「全图定位 / 放大看周边链路」两个操作（<code>SiteDetail.tsx</code>；「在分布图上查看」随散点视图一起移除）。</li>
-<li><strong>门户入口</strong>（2026-11-16）：<code>/v3/olbrportal/</code> 以及勾了 IP 页签的团队门户（fo / bo / flm）的 GIS Map「IP」页签，内嵌 <code>?page=olibTopo&amp;view=physical&amp;maponly=1</code>。只留物理图，左上角搜索框做同样的模糊匹配，点一条结果放大到该站。Open Link 去掉 <code>maponly</code>，新窗口是完整页并停在物理图。直开不带 <code>maponly</code> 时三个视图都在。smc / cxo 按矩阵不显示这一页。</li>
-<li><strong>口径与数字</strong>：顶部<strong>不再有统计卡</strong>（2026-11-16 用户要求去掉 553 站点 / 9 个骨干核心 / 40G·10G 骨干光纤 / 2 个 AML 数据中心四张卡 —— 数字都在图例与说明里，卡只占首屏）。整页口径与来源走 <code>CalcChainNote</code>，以 <strong>页面最下面一个问号</strong>（<code>trigger=&quot;icon&quot;</code>，点开气泡、不占一行）承载：数据来源、坐标口径、骨干核心与链路、已知限制四节。站点数等静态事实仍取 <code>SITES.length</code> / <code>CORE_SITE_COUNT</code> / <code>AML_DC_COUNT</code>（<code>topologyData.ts</code>），不在前端重算。</li>
-<li><strong>刷新</strong>：<code>AR_PAGE_DEFAULTS.olibTopo = 1800</code>。页面本身没有接口可重取，自动刷新只走外壳默认重挂载（会回到初始视图），不会产生新数据。</li>
+<li>
+<p><strong>换版与重抽</strong>：PDF 换版时跑 <code>python backend/scripts/gen_olib_topo.py &quot;&lt;新 PDF 路径&gt;&quot; --write</code> —— 整表重抽站名/坐标/5G 标记，并同步 <code>TOPO_PAGE_SIZE</code>；<strong>不要手改单条坐标</strong>。脚本口径：站点名取第 1 页物理图的文字对象（同一基线的碎片合并、断行续写合并），红色独立 <code>5G</code> 文字对象就近归属站点（&gt;20pt 不认），<code>ISP</code> 取站名中的 ISP；图例（Backbone fiber / ON going IPRAN link / DWDM / 5G SITE / P26A-D）、里程与国名等说明文字按白名单剔除。本次换版实测：667 条（旧版 553 条）、5G 27 条、ISP 10 条；<strong>画布从 4818.5×4159.5 变成 6491×4818.5，旧坐标与新图不同源，所以整表替换而不是平移</strong>。</p>
+</li>
+<li>
+<p><strong>数据与资源</strong>：站点名单 / 坐标 / 骨干节点与链路在 <code>frontend/src/pages/networkTopology/topologyData.ts</code>；两张图是<strong>由 PDF 矢量导出的 SVG</strong>（<code>frontend/public/topology/physical.svg</code>、<code>logical.svg</code>，构建后落到 <code>_fe_dist/topology/</code>，经 vite base <code>/myapp/</code> 加载），不是位图截图 —— 放大到任意倍率线条与文字都保持清晰。坐标口径、已知限制写在 <code>topologyData.ts</code> 文件头与本页可展开的口径说明里。</p>
+</li>
+<li>
+<p><strong>三个视图</strong>（<code>TopologyViewer.tsx</code>）：「原图 · 物理拓扑」叠加全部站点点位；「原图 · 逻辑拓扑」只看第 2 页原图；「骨干示意」按第 2 页逻辑图重绘 13 个节点、18 条链路（<code>CoreSchematic.tsx</code>）。<strong>「站点分布」散点视图已于 2026-11-16 按用户要求移除</strong>（<code>ScatterView.tsx</code>、<code>SECTOR_COLORS</code> 与 <code>view/hint/detail.scatter</code> 三个 i18n 键一并删除，不留死代码）。</p>
+</li>
+<li>
+<p><strong>交互</strong>：滚轮以光标为中心缩放、拖动平移、工具条缩放/重置/全屏/显示隐藏点位；右下角缩略图（仅物理图）显示当前视野并可点击跳转。画布按「原图尺寸 × 倍率」重新渲染 SVG（不是 CSS transform 拉伸），所以放大后文字、链路仍清晰；点位半径按 <code>1/scale</code> 反向补偿，放大后仍是细小圆点；选中站点画十字虚线 + 橙色脉冲光圈 + 名称标签。</p>
+</li>
+<li>
+<p><strong>布局与高度自适应</strong>（2026-11-16 用户要求「下面不要一大块空白」）：画布卡片不再固定 <code>62vh</code>，改为<strong>认领内容区剩余高度</strong>——embed 下 <code>#main-content</code> 是定高 <code>100vh</code>，直链下按内容高度；左画布 : 右栏 = 3 : 1。右栏（站点查询 / 详情 / 图例）内容比画布高时<strong>在自己容器里滚动</strong>，子卡片必须 <code>flex-shrink:0</code>，否则会被压扁、内容被 <code>overflow:hidden</code> 裁掉且滚不到（实测图例底部就是这样消失的）。窄屏（<code>&lt;1000px</code>）换行堆叠，回到按内容高度排布。左右两栏用普通 flex 而非 antd <code>Row/Col</code>：Row 的 flex 行高在内容高于可用高度时不参与收缩，<code>Col</code> 会被内容撑到 1010px 再溢出视野。骨架见 <code>NetworkTopology.tsx</code> 的 <code>PAGE_CSS</code>。</p>
+</li>
+<li>
+<p><strong>站点查询与详情</strong>：站名/区域<strong>模糊搜索</strong>（忽略大小写与标点；多词都要出现；允许打错一个字母或漏写少量字母，见 <code>networkTopology/siteMatch.ts</code>）+ 区域下拉 +「全部 / 5G / ISP / 骨干核心」快捷筛选（<code>SiteSearch.tsx</code>）；结果超过 300 条时只渲染前 300 条并显示明确提示，不静默截断。点结果会放大到该站。点位后详情卡显示区域、原图相对位置（近似值，不是 GPS）与类型，并提供「全图定位 / 放大看周边链路」两个操作（<code>SiteDetail.tsx</code>；「在分布图上查看」随散点视图一起移除）。</p>
+</li>
+<li>
+<p><strong>门户入口</strong>（2026-11-16）：<code>/v3/olbrportal/</code> 以及勾了 IP 页签的团队门户（fo / bo / flm）的 GIS Map「IP」页签，内嵌 <code>?page=olibTopo&amp;view=physical&amp;maponly=1</code>。只留物理图，左上角搜索框做同样的模糊匹配，点一条结果放大到该站。Open Link 去掉 <code>maponly</code>，新窗口是完整页并停在物理图。直开不带 <code>maponly</code> 时三个视图都在。smc / cxo 按矩阵不显示这一页。</p>
+</li>
+<li>
+<p><strong>口径与数字</strong>：顶部<strong>不再有统计卡</strong>（2026-11-16 用户要求去掉 提取站点 / 9 个骨干核心 / 40G·10G 骨干光纤 / 2 个 AML 数据中心四张卡 —— 数字都在图例与说明里，卡只占首屏）。整页口径与来源走 <code>CalcChainNote</code>，以 <strong>页面最下面一个问号</strong>（<code>trigger=&quot;icon&quot;</code>，点开气泡、不占一行）承载：数据来源、坐标口径、骨干核心与链路、已知限制四节。站点数等静态事实仍取 <code>SITES.length</code> / <code>CORE_SITE_COUNT</code> / <code>AML_DC_COUNT</code>（<code>topologyData.ts</code>），不在前端重算。</p>
+</li>
+<li>
+<p><strong>刷新</strong>：<code>AR_PAGE_DEFAULTS.olibTopo = 1800</code>。页面本身没有接口可重取，自动刷新只走外壳默认重挂载（会回到初始视图），不会产生新数据。</p>
+</li>
 </ul>
 <p><a id="ch-11-s15"></a></p>
 <h3>8d. OLIB 地理网络拓扑（<code>?page=olibTopo_v2</code>，2026-11-16 新增）</h3>
 <p>v1（8c）的升级版，<strong>v1 页面与它的三个文件完全不动</strong>：v2 默认把 OLIB 站点画到真实的 Liberia 地理底图上，PDF 原图降级为参考视图。解决的核心问题是 v1「无论怎么缩放都还像一张拓扑图片」——v2 的站点用 <code>master_site_db</code> 的真实经纬度定位，县界、道路、海岸线来自自托管 PMTiles 底图。</p>
 <ul>
 <li><strong>四种视图</strong>：<code>地理地图</code>（默认）/ <code>物理拓扑</code> / <code>逻辑拓扑</code> / <code>骨干核心</code>。后三种直接复用 v1 的 <code>TopologyViewer</code>（只读引用，不改 v1 文件），页面级 tabs 与它的内部 tabs 状态同步；v2 用 CSS 隐藏内部重复 tabs。</li>
-<li><strong>数据与资源</strong>：553 条站名/相对坐标仍来自 <code>frontend/src/pages/networkTopology/topologyData.ts</code>；GPS 映射表是 <code>frontend/public/olib/olib-site-geo.json</code>，由 <code>frontend/scripts/gen-olib-site-geo.mjs</code> 从 <code>GET /api/gis/sites</code> 生成，人工别名表在 <code>frontend/scripts/olib-site-aliases.json</code>。<strong>页面不直连 GIS 接口</strong>，映射口径可 diff、可复查。</li>
-<li><strong>定位口径（宁缺勿错）</strong>：站名规范化后唯一命中 → <code>name-exact</code>；拼写差异走人工别名 → <code>alias</code>；同名多坐标 → <code>ambiguous</code>；无同名 → <code>unmatched</code>，一律不上图。<strong>不做自动模糊匹配</strong>（避免 <code>6th Street → 16th Street</code> 这类错配）。实测 553 条中 <strong>463 条已定位（418 精确 + 45 别名）、88 条未匹配、2 条同名歧义</strong>；未定位名单可在右侧「未定位 N」弹窗逐条查看原因。映射表按站点下标对齐并复核站名，<code>topologyData.ts</code> 增删站点后不一致会自动判为未定位。</li>
+<li><strong>数据与资源</strong>：667 条站名/相对坐标来自 <code>frontend/src/pages/networkTopology/topologyData.ts</code>（由第 1 页物理图重抽，见上一条）；GPS 映射表是 <code>frontend/public/olib/olib-site-geo.json</code>，由 <code>frontend/scripts/gen-olib-site-geo.mjs</code> 从 <code>GET /api/gis/sites</code> 生成，人工别名表在 <code>frontend/scripts/olib-site-aliases.json</code>。<strong>页面不直连 GIS 接口</strong>，映射口径可 diff、可复查。</li>
+<li><strong>定位口径（宁缺勿错）</strong>：站名规范化后唯一命中 → <code>name-exact</code>；拼写差异走人工别名 → <code>alias</code>；同名多坐标 → <code>ambiguous</code>；无同名 → <code>unmatched</code>，一律不上图。<strong>不做自动模糊匹配</strong>（避免 <code>6th Street → 16th Street</code> 这类错配）。2026-11-17 换版后实测 667 条中 <strong>541 条已定位（504 精确 + 37 别名）、124 条未匹配、2 条同名歧义</strong>；未定位名单可在右侧「未定位 N」弹窗逐条查看原因。映射表按站点下标对齐并复核站名，<code>topologyData.ts</code> 增删站点后不一致会自动判为未定位。</li>
 <li><strong>地图交互</strong>：Leaflet + 自托管 PMTiles（与 <code>?page=gis</code> 同一套，不依赖公网瓦片）；站点按屏幕像素网格聚合（zoom&lt;11.5），点击聚合圈 <code>fitBounds</code> 展开；站点形状区分核心/ISP/5G/普通，只有选中站点有脉冲光环；名称分级显示（zoom≥9 显示重点站点、≥11 显示全部、悬浮 tooltip 兜底）；县界虚线 + 县名（zoom≥8.5）；点击站点看详情，搜索/详情「地图定位」用 <code>flyTo</code> 落到站点。</li>
-<li><strong>链路</strong>：只画 PDF 第 2 页人工梳理的骨干链路（<code>CORE_LINKS</code>）中<strong>两端都有 GPS</strong> 的 11 条（共 18 条，另 7 条因 HQ/ODC/AML/Danane 等端点无坐标跳过，图例报数）。同端点多条链路平行错开；线型按「现有 / DWDM / 铁路 / P25A」区分。<strong>直线只表示连接关系，不是光缆实际走向</strong>，这一点在图例与页面口径说明里都写明。</li>
+<li><strong>链路</strong>：分两层。
+<ul>
+<li><strong>骨干层</strong>：只画 PDF 第 2 页人工梳理的 <code>CORE_LINKS</code> 中<strong>两端都有 GPS</strong> 的 11 条（共 18 条，另 7 条因 HQ/ODC/AML/Danane 等端点无坐标跳过，图例报数）。同端点多条链路平行错开；线型按「现有 / DWDM / 铁路 / P25A」区分。</li>
+<li><strong>PDF 链路层</strong>（2026-11-17 新增）：<code>public/olib/olib-fiber-links.json</code>，由 <code>backend/scripts/gen_olib_fiber_links.py</code> 从第 1 页矢量对象抽取，实测 <strong>592 条站点对边、涉及 411 个已定位站点</strong>，按 40G / 10G / IPRAN·DWDM / P26A–D / 在建规划 / 基础链路（原图黑色细线）分组，工具条「PDF 链路」开关可显隐，单独用 zIndex 390 的 pane 压在骨干线与站点之下。</li>
+<li>两层都<strong>不是光缆实际走向</strong>：骨干是站到站关系，PDF 层是「原图折线的示意投影」。</li>
+</ul>
+</li>
+<li><strong>PDF 链路怎么投到经纬度</strong>：第 1 页是<strong>示意图不是比例地图</strong>（蒙罗维亚被放大约 10 倍），所以用 541 个已定位站点的 PDF 坐标做**薄板样条（TPS）**拟合 → 经纬度（仿射不行：残差中位数 43km、只取主图仍有 14km），再把每段端点吸附到 4km 内最近站点（p50 吸附误差 0.7km）；吸附不上的段落丢弃并在脚本里计数（本次 133/814）。留一验证误差中位数约 8km、p90 约 20km，密集区可能吸到邻站 —— 所以这一层只在图例与口径说明里承诺「原图上画了哪些站到站链路」。换 PDF 版后重跑脚本即可（<code>python backend/scripts/gen_olib_fiber_links.py &quot;&lt;pdf&gt;&quot; --write</code>，依赖 PyMuPDF/numpy，不进 requirements）。</li>
 <li><strong>布局</strong>：左地图 : 右栏 ≈ 3 : 1；右栏 = 站点查询（模糊搜索 + 区域下拉 + 全部/5G/ISP/核心 + 未定位入口）、站点详情（PDF 区域、GPS、主数据站点 ID、县、匹配方式与核验状态、相连链路）、图例；右栏内容超长时在自己的容器里滚动。窄屏（&lt;1000px）堆叠，地图至少 62vh。</li>
 <li><strong>刷新</strong>：<code>AR_PAGE_DEFAULTS.olibTopo_v2 = 1800</code>。页面只读一份静态映射表 + 县界（前端缓存 30 分钟），没有可实时变化的内容。</li>
 <li><strong>生效位置</strong>：<code>https://localhost/myapp/?page=olibTopo_v2</code>（直链）；v1 仍为 <code>?page=olibTopo</code>，未做任何修改。</li>
@@ -6835,7 +6869,11 @@ KPI 卡讲 <strong>FE 人群</strong> —— 32 名 FE（<code>isfe=Yes</code>�
 <p><strong>地图图例移到左下角（2026-11-16 用户要求）</strong>：状态图例原先挤在地图下方控制行的 Layers / Show OK sites 那一带，现<strong>移进地图、贴左下角</strong>，直接复用 <code>pages/gismap/MapLegendOverlay.tsx</code>（与 GIS / 人员地图同一份浮层；位置、置灰删除线、点击隐藏都在那边，本页只喂行数据，<code>PacketLossDashboard.tsx</code> 只多一个 <code>MapLegendOverlay</code> 引用与 <code>legendRows</code>）。为了让浮层有定位父级，地图外面包了一层 <code>position:relative</code> 的 flex 容器（<code>:777-800</code>，画布高度与改造前一致）。三处口径必须记住：① 行数字取 <code>status_counts</code>，与顶部状态卡 / 饼图同源，<strong>含无坐标站点</strong>，地图圆点只画有坐标站点（实测 Critical 230 vs 红点 228），这句写进 <code>pl.legendNote</code> 的 ⓘ；② 点某行 = 客户端 <code>hiddenStatuses</code> 显隐（即刻生效，县名数字联动），不触发取数；③ OK 行同时受 <code>include_ok</code> 开关控制 —— 开关关闭时后端不返回 OK 站点（<code>toggleLegendStatus</code> 会先把它重新打开），图例据此置灰，避免「图例显示 438、地图一个绿点都没有、点了还没反应」。控制行因此只剩 Layers（地名 / 道路）· Topology · Show OK sites · Map Controls。另：页面根节点加了 <code>flexShrink: 0</code> —— <code>?embed=1</code>（门户 iframe 与直开内嵌地址）时 App 的 Content 被钉成 <code>height:100%</code>，根节点默认 <code>flex-shrink:1</code>，内容高于视口时整页被<strong>压进一屏</strong>而不是滚动：头部横幅压到 5px、Top Sites 卡只剩 31px（卡片 <code>overflow:hidden</code> 裁掉 380px 画布），看起来就是「Top Sites 只有一行数据」（2026-11-16 用户反馈）。固定为不可收缩后按内容高度排版、由 <code>main</code> 滚动；门户的 PL_MAP_ONLY_CSS 用 <code>!important</code> 把高度改回 100%，不受影响。</p>
 </li>
 <li>
-<p><strong>站点类型过滤（2026-11-17 用户要求「在 Packet Loss Status 添加站点类型过滤，如 ERA / NORMAL / COOL」）</strong>：Packet Loss Status 横幅右侧新增 <code>Select</code>，档位取主数据 <code>eflow_site.site_type</code>（<strong>ERA / COOL / NORMAL</strong>，与 GIS / 人员页的「站点等级」同一列同一口径；用户口述的 <code>COOLI</code> 在库里就是 <code>COOL</code>），选项与计数由 <code>overview</code> 的 <code>site_type_counts</code> 下发。<strong>一参到底</strong>：同一个 <code>site_type</code> 同时过滤状态卡 / 饼图 / 区域分布 / 每日趋势 / Top 站点 / 地图圆点，<code>/overview</code>、<code>/map-sites</code>、<code>/drilldown</code> 三个端点都吃这个参数，下钻弹窗透传同一档位并在标题里写明档位 —— <strong>不做「只筛状态卡」</strong>，否则同一页一半数字筛过、一半没筛，用户对不上账只会当成 bug（与「下钻 WHERE 必须与概览一致」同一条纪律）。四处实测事实：① 站点类型<strong>现取主库实时表</strong>（<code>packet_loss_dashboard.py::_site_type_index</code>，TTL 600s）而不是 <code>site_pl_summary</code> —— 那张表每天 06:30 才整表重写，靠同步落库要等到次日早上才有值，当天打开下拉会是空的；② 721 个丢包站 = ERA 197 + NORMAL 520 + 未匹配主数据 4（按 <code>Site_Code</code>、再按站点名小写回连 <code>eflow_site</code>）；③ 主数据 64 个 <code>COOL</code> 站<strong>没有任何丢包读数</strong>（SDR / IPRAN 的 IPPD 模板里没有它们），故下拉里不出现 COOL —— 给一个点了必然是空页的选项只会被当成 bug，这条与「COOL 缺席」「未匹配主数据」的含义都写进 <code>pl.explain.siteType</code> 的 ⓘ；④ 每日趋势与 Top 站点是按 <code>Managed Element</code> 末尾 <code>(CODE)</code> / 站点名回连到选中档位后再聚合的（<code>_me_in_site_type</code>），不是只筛站点汇总表，否则趋势里的「受影响站点」会比顶部站点数还大。另有两条实现约束：缓存键必须带档位（<code>overview:{档位}</code>），否则切档会命中全量缓存、表现为「下拉变了、数字没变」；<code>warmup()</code> 调 <code>pl_overview()</code> 必须显式传 <code>site_type=&quot;&quot;</code> —— 直接调用省略参数拿到的是 FastAPI 的 <code>Query</code> 默认对象，会被当成一个真实（不存在）的档位，预热就落到「0 站点」的缓存键上。</p>
+<p><strong>站点类型过滤（2026-11-17 用户要求「在 Packet Loss Status 添加站点类型过滤，如 ERA / NORMAL / COOL」；同日按用户追问两度改版：① COOLI 必须在列表里可见 ② 默认档位改成 NORMAL）</strong>：Packet Loss Status 横幅右侧新增 <code>Select</code>，档位取主数据 <code>eflow_site.site_type</code>（<strong>ERA / COOL / NORMAL</strong>，与 GIS / 人员页的「站点等级」同一列同一口径；用户口述的 <code>COOLI</code> 在库里就是 <code>COOL</code>）。选项由 <code>overview</code> 的 <code>site_type_counts</code> + <code>site_type_totals</code> 下发，显示成 <code>档位 (被丢包监控数 / 主数据总数)</code>，实测 <code>All (721/880)</code>、<code>ERA (197/216)</code>、<code>COOL (0/64)</code>、<code>NORMAL (520/600)</code>、<code>Unmapped site (4/4)</code>；分子为 0 的档位 <code>disabled</code> 置灰（<code>0/64</code> 本身就是答案：这类站点存在、但没被丢包模板采集到）。
+<strong>默认档位 = <code>NORMAL</code></strong>（2026-11-17 用户明确要求「默认要显示 Normal」），常量 <code>DEFAULT_SITE_TYPE</code>；若 NORMAL 某天真的变成 0 个被监控站点（主数据改名、上游停采），<code>useEffect</code> 会自动退回「全部」并在控制台留一行原因 —— 默认值跟着数据静默漂移比空页更难排查。
+<strong>为什么 COOLI 是 0（2026-11-17 实查，不是筛选 bug）</strong>：主数据 64 个 COOL 站在 UME 网元清单 <code>app.ran_element_management</code> 里<strong>全部存在</strong>（<code>moc=SDR</code>、<code>nbi_id</code> 即站点编码），丢包数据来自 <code>SDR_IPPD</code> / <code>ITRAN_IPPD</code> 两个 IP 承载模板，而这 64 站在源表 <code>lte_pl.packet_loss_data</code>（143 万行、724 个 ME）里<strong>按编码、按站名全文模糊查都是 0 条</strong>。也就是说：站点存在 → 只是没有 IP PD 承载的 PM 读数。若业务上认为 COOLI 该有丢包，需在 UME 侧确认这些站是否配了 IP PD 承载，本仓库侧没有可改的关联逻辑。
+<strong>一参到底</strong>：同一个 <code>site_type</code> 同时过滤状态卡 / 饼图 / 区域分布 / 每日趋势 / Top 站点 / 地图圆点，<code>/overview</code>、<code>/map-sites</code>、<code>/drilldown</code> 三个端点都吃这个参数，下钻弹窗透传同一档位并在标题里写明档位 —— <strong>不做「只筛状态卡」</strong>，否则同一页一半数字筛过、一半没筛，用户对不上账只会当成 bug（与「下钻 WHERE 必须与概览一致」同一条纪律）。
+<strong>实现约束（都踩过）</strong>：① 站点类型取主库实时表（<code>packet_loss_dashboard.py::_site_type_index</code>，TTL 600s）而不是 <code>site_pl_summary</code> —— 那张表每天 06:30 才整表重写，靠同步落库要等到次日早上才有值；② 「全部」的哨兵值是 <strong><code>'all'</code> 而不是空串</strong>：空串会被 antd Select 当成「没有值」，下拉显示<strong>空白</strong>（2026-11-17 用户反馈「默认显示 Normal 站点的统计」第一版实为此：空白框 + 最大的那组数字），换成 <code>'all'</code> 后正常回显 <code>All (721/880)</code>，而后端 <code>_site_type_want()</code> 本来就认 <code>'all'</code> 为不过滤；③ 每日趋势与 Top 站点按 <code>Managed Element</code> 末尾 <code>(CODE)</code> / 站点名回连到选中档位后再聚合（<code>_me_in_site_type</code>），不是只筛站点汇总表，否则趋势里的「受影响站点」会比顶部站点数还大；④ 缓存键必须带档位（<code>overview:{档位}</code>），否则切档会命中全量缓存、表现为「下拉变了、数字没变」；⑤ <code>warmup()</code> 调 <code>pl_overview()</code> 必须显式传 <code>site_type=&quot;&quot;</code> —— 直接调用省略参数拿到的是 FastAPI 的 <code>Query</code> 默认对象，会被当成一个真实（不存在）的档位。</p>
 </li>
 <li>
 <p>口径与 Excel 报告 <code>Packet_Loss_Status_Output Automation</code> <strong>完全一致</strong>：<code>STATUS</code> 是 0~23 的标志块，最近 3 天同整点丢包均 &gt;0.5% 记 1，全 0 为 OK；<code>FINAL_STATUS</code> 在 OK 时强制 <code>No Packet loss[&lt;0.1]</code>，否则按 Last 1 day Max PL 五级分类（:3-5）。</p>
@@ -17750,6 +17788,7 @@ shared <code>auth_cache</code> 里 admin 的 token 明明还有 14.6 小时有�
 <li>默认 dry_run 演练（只匹配记录不真派单），核对无误后到「任务配置」关掉</li>
 <li>关联 99933 无法判定时（fiber 只有 ME 推导站名、与 cmdb 写法不同，如 luogan/luogon）按「没有关联」继续派单并记 correlation_undetermined 留痕——不能因为站名匹配不到就长期漏派</li>
 <li>站点解析失败（cmdb 无此站点，如实测 Tokadeh）时自动派不了：记 N 并在群里发一条「需人工在 eFlow 处理」通报，同一条只发一次（send_status 抑制），不静默漏派</li>
+<li>站点解析失败是 cmdb 缺档（ME/站名在 cmdb 里找不到站点），不是任务错误（2026-11-17）：本轮失败全是这一类、且 cmdb 索引本身拉到了时，结果记 pending_cmdb（success=true，提示文案留在 message），执行历史显示橙色「待补 cmdb」提示而不是红色 Error；补齐 cmdb 站点/ME 命名后下一轮自动派单。cmdb 索引为空（没拉到）或混有建单失败时仍判 failed</li>
 <li>Fiber 派单必须带数字站点 ID + 站点名，只传 ME 名接口回 success 却不建 TT（实测教训）</li>
 <li>Fiber 派单时灵时不灵，故内置重试，且以回查到 ttid 才判成功（不信接口的 status:true）</li>
 <li>告警上游已有 ttid 时直接跳过：eFlow 自己的派单规则会先建 TT，不跳过就会重复建单（实测 Zardun 两条）</li>
@@ -19478,7 +19517,7 @@ shared <code>auth_cache</code> 里 admin 的 token 明明还有 14.6 小时有�
 </ul>
 <p><a id="ch-15-s120"></a></p>
 <h5>olibTopo（<code>olibTopo</code>）</h5>
-<p>OLIB FO 全国光纤网络拓扑（静态参考页）：把 Orange Liberia 网络拓扑 PDF 的第 1 页物理图、第 2 页逻辑图原样嵌入，并在物理图上叠加 553 个提取站点。支持缩放 / 平移 / 站点搜索 / 骨干核心与 5G·ISP 筛选，点站点可看区域、原图相对位置和类型，并可全图定位或放大看周边链路。</p>
+<p>OLIB FO 全国光纤网络拓扑（静态参考页）：把 Orange Liberia 网络拓扑 PDF 的第 1 页物理图、第 2 页逻辑图原样嵌入，并在物理图上叠加 667 个提取站点。支持缩放 / 平移 / 站点搜索 / 骨干核心与 5G·ISP 筛选，点站点可看区域、原图相对位置和类型，并可全图定位或放大看周边链路。</p>
 <ul>
 <li>三个视图：「原图 · 物理拓扑」（叠加站点点位）/「原图 · 逻辑拓扑」/「骨干示意」（按第 2 页逻辑图梳理的 9 个核心节点与链路）</li>
 <li>物理图点位：灰=普通、红=5G、蓝=ISP、紫=骨干核心；半径随缩放反向补偿，放大后仍是细小圆点。滚轮缩放、拖动平移，右下角缩略图可点击跳转，工具条可重置 / 全屏 / 隐藏点位</li>
@@ -19489,13 +19528,14 @@ shared <code>auth_cache</code> 里 admin 的 token 明明还有 14.6 小时有�
 </ul>
 <p><a id="ch-15-s121"></a></p>
 <h5>olibTopo_v2（<code>olibTopo_v2</code>）</h5>
-<p>OLIB 光纤网络的<strong>地理版拓扑</strong>：把 PDF 里的 553 个站点按 master_site_db 的真实 GPS 落到 Liberia 地图上（自托管 PMTiles 底图 + 县界），默认就是地理视图；PDF 的物理/逻辑/骨干原图保留为参考视图。右栏可搜索站点、查看 GPS 匹配来源与相连骨干链路。</p>
+<p>OLIB 光纤网络的<strong>地理版拓扑</strong>：把 PDF 里的 667 个站点按 master_site_db 的真实 GPS 落到 Liberia 地图上（自托管 PMTiles 底图 + 县界），默认就是地理视图；PDF 的物理/逻辑/骨干原图保留为参考视图。右栏可搜索站点、查看 GPS 匹配来源与相连骨干链路。</p>
 <ul>
 <li>四种视图：地理地图（默认）/ 物理拓扑 / 逻辑拓扑 / 骨干核心。后三种复用 v1 的 PDF 原图查看器，v1 页面本身没有改动</li>
 <li>地图上站点按类型区分：紫环=骨干核心、蓝菱形=ISP、红点=5G、灰点=普通；密集区自动聚合成圆圈，点圆圈展开。只有选中站点有脉冲光环</li>
 <li>缩放/平移后自动重算聚合；站名在放大后分级出现（重点站点更早），悬浮可看站名、类型与县。县界为虚线，放大后显示县名</li>
-<li>定位口径：站名规范化后唯一命中主数据 → 精确匹配；拼写差异走人工别名表；同名多坐标或无同名站点一律标「未定位」不上图。实测 463/553 已定位，未定位名单从右栏「未定位 N」逐条查看原因</li>
-<li>链路只画 PDF 第 2 页梳理的骨干链路中两端都有 GPS 的 11 条（共 18 条）；直线只表示连接关系，不是光缆实际走向</li>
+<li>定位口径：站名规范化后唯一命中主数据 → 精确匹配；拼写差异走人工别名表；同名多坐标或无同名站点一律标「未定位」不上图。实测 541/667 已定位，未定位名单从右栏「未定位 N」逐条查看原因</li>
+<li>链路分两层：粗线是 PDF 第 2 页梳理的骨干链路中两端都有 GPS 的 11 条（共 18 条）；细线是<strong>PDF 第 1 页链路数字化图层</strong>（592 条站点对边，涉及 411 个已定位站点），可在工具条用「PDF 链路」开关显隐</li>
+<li>PDF 链路图层按原图颜色分组：40G 光缆、10G 光缆、IPRAN/DWDM、P26A–D 项目、在建/规划、基础链路（原图黑色细线）；虚线表示规划中。端点是把 PDF 坐标用薄板样条投到经纬度后吸附到最近站点，<strong>位置误差约 1–10 km</strong>，密集区可能吸到邻站；它只表示「原图上画了这条链路」，不代表光缆走向、容量或时延</li>
 <li>点站点看详情：PDF 区域、GPS、主数据站点与 ID、县/Region、匹配方式和核验状态；「地图定位」「放大」会把地图飞到该站</li>
 <li><strong>静态数据页</strong>：GPS 映射表是 public/olib/olib-site-geo.json（由 scripts/gen-olib-site-geo.mjs 生成），页面不直连 GIS 接口；自动刷新建议 1800 秒，内容不会变化</li>
 </ul>
@@ -19736,7 +19776,7 @@ shared <code>auth_cache</code> 里 admin 的 token 明明还有 14.6 小时有�
 <li>三处最容易核对不上的地方直接写进气泡：<strong>状态饼图含无坐标站点、区域柱图只统计非 OK（含 Minor/Warning）、顶部 Affected Sites 只是 Critical + Major</strong> —— 三个集合不同，数字不该互相对账</li>
 <li>每日趋势的中位数<strong>只取当天 &gt;0 的读数</strong>（逐小时丢包约 59% 是 0，全量取中位会被压成 0 失去意义）；而 Top 站点用的是<strong>含 0 的每站点中位</strong>（否则「半天全断」与「整天全断」同为 100，失去区分度）—— 同名「中位数」两种口径，气泡各写各的</li>
 <li>本页原先有两份自写气泡（复制按钮、主题色、强调渲染各自一套），已删除并统一走 <code>components/MetricExplain</code>；下钻「共 N 行」气泡写明它是搜索框筛过的行数、接口按上限截断</li>
-<li><strong>站点类型过滤（2026-11-17）</strong>：Packet Loss Status 横幅右侧的下拉按主数据站点类型（ERA / NORMAL / …，取 <code>eflow_site.site_type</code>）筛选，<strong>整页数字一起变</strong> —— 站点总数、Affected Sites、六张状态卡、饼图、区域分布、每日趋势、Top 站点、地图圆点与图例、点击下钻的明细全部换成选中档位；下拉里的计数恒为全量分布（切档不变）。主数据里 64 个 COOL 站没有任何丢包读数，故不出现 COOL 选项；在 eflow_site 里按站点编码和名称都找不到的站点归入「未匹配主数据」，保证 ERA + NORMAL + 未匹配 = 全部</li>
+<li><strong>站点类型过滤（2026-11-17）</strong>：Packet Loss Status 横幅右侧的下拉按主数据站点类型（ERA / COOL / NORMAL，取 <code>eflow_site.site_type</code>；口述的 <code>COOLI</code> 在库里就是 <code>COOL</code>）筛选，<strong>整页数字一起变</strong> —— 站点总数、Affected Sites、六张状态卡、饼图、区域分布、每日趋势、Top 站点、地图圆点与图例、点击下钻的明细全部换成选中档位。<strong>默认档位是 NORMAL</strong>（用户口径），需要看全网时切到 <code>All</code>。下拉里的两个数是「被丢包监控的站点数 / 主数据站点总数」，恒为全量分布（切档不变），实测 ERA <code>197/216</code>、NORMAL <code>520/600</code>、COOL <code>0/64</code>。<strong>COOLI 的分子是 0 不是漏做</strong>：64 个 COOL 站在 UME 网元清单里都在，但丢包数据只来自 <code>SDR_IPPD</code> / <code>ITRAN_IPPD</code> 两个 IP 承载模板，这些站在源表 <code>packet_loss_data</code> 里一条读数都没有（按编码、按站名模糊查均为 0），下拉里因此置灰；在 eflow_site 里按编码和名称都找不到的站点归入「未匹配主数据」（4 个），保证 197 + 0 + 520 + 4 = 721 与「全部」对得上</li>
 </ul>
 <p><a id="ch-15-s138"></a></p>
 <h5>电池看板（<code>battery</code>）</h5>

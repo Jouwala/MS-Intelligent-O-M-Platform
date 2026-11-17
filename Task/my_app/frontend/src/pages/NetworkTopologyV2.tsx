@@ -8,15 +8,17 @@
  *   · 保留 PDF 原图作为参考视图（物理 / 逻辑 / 骨干示意），v1 页面完全不动。
  *
  * 数据口径：
- *   · 553 个站名与相对坐标来自 v1 的 networkTopology/topologyData.ts（PDF 提取）；
+ *   · 667 个站名与相对坐标来自 v1 的 networkTopology/topologyData.ts（PDF 提取）；
  *   · GPS 来自 public/olib/olib-site-geo.json（master_site_db 快照，见生成脚本）；
- *   · 骨干链路来自 v1 的 CORE_LINKS（PDF 第 2 页人工梳理），只画两端都有 GPS 的。
+ *   · 骨干链路来自 v1 的 CORE_LINKS（PDF 第 2 页人工梳理），只画两端都有 GPS 的；
+ *   · PDF 链路图层来自 public/olib/olib-fiber-links.json（第 1 页矢量线段数字化，
+ *     见 backend/scripts/gen_olib_fiber_links.py），按站点对画细线，可开关。
  *
  * ⚠ 不修改 v1 的任何文件：本页只 import v1 的数据与 TopologyViewer，
  *   不改 topologyData.ts / TopologyViewer.tsx / NetworkTopology.tsx。
  * ========================================================================== */
 import { useCallback, useMemo, useRef, useState } from 'react'
-import { Alert, Button, Segmented, Spin } from 'antd'
+import { Alert, Button, Segmented, Spin, Switch } from 'antd'
 import { ReloadOutlined } from '@ant-design/icons'
 
 import { useI18n } from '../i18n'
@@ -33,9 +35,10 @@ import V2SiteSearch from './networkTopologyV2/V2SiteSearch'
 import V2SiteDetail from './networkTopologyV2/V2SiteDetail'
 import V2Legend from './networkTopologyV2/V2Legend'
 import V2MatchModal from './networkTopologyV2/V2MatchModal'
-import { buildGeoLinks, buildGeoSites, filterGeoSites, linksOfSite } from './networkTopologyV2/geoData'
+import { buildGeoLinks, buildFiberLinks, buildGeoSites, filterGeoSites, linksOfSite } from './networkTopologyV2/geoData'
 import { siteTypeLabel } from './networkTopologyV2/labels'
 import { useOlibSiteGeo } from './networkTopologyV2/useSiteGeo'
+import { useOlibFiberLinks } from './networkTopologyV2/useFiberLinks'
 import type { GeoViewMode, GeoSite } from './networkTopologyV2/types'
 
 /** 页面的四种视图：01 地理（默认）/ 02 物理 / 03 逻辑 / 04 骨干核心。 */
@@ -70,6 +73,8 @@ const PAGE_CSS = `
   padding:var(--wh-space-sm) var(--wh-space-md);border-bottom:var(--wh-card-border)}
 .olibv2-toolbar-info{font-size:11.5px;color:var(--wh-text-muted);line-height:1.35}
 .olibv2-toolbar-spacer{flex:1 1 auto}
+.olibv2-fiber-toggle{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;
+  color:var(--wh-text-muted);cursor:pointer;white-space:nowrap}
 .olibv2-map-wrap{position:relative;flex:1 1 auto;min-height:0;overflow:hidden}
 .olibv2-map{position:absolute;inset:0}
 .olibv2-map.is-dark .olibv2-name{background:rgba(6,14,28,.78);color:#dfe9fa}
@@ -84,7 +89,10 @@ const PAGE_CSS = `
 .olibv2-ref .topo-views{display:none!important}
 
 /* ---------- Leaflet 覆盖层 ---------- */
-.olibv2-site-icon,.olibv2-cluster-icon,.olibv2-county-icon{background:transparent!important;border:0!important}
+/* iconSize 为 0×0 时必须 overflow:visible，否则站名会被裁掉 */
+.olibv2-site-icon,.olibv2-cluster-icon,.olibv2-county-icon{background:transparent!important;border:0!important;
+  overflow:visible!important}
+.leaflet-marker-icon.olibv2-site-icon{overflow:visible!important}
 .olibv2-site{position:absolute;left:0;top:0;width:0;height:0;overflow:visible;pointer-events:none}
 .olibv2-dot{position:absolute;left:0;top:0;display:block;transform:translate(-50%,-50%);
   border-radius:50%;box-shadow:0 0 0 2px rgba(255,255,255,.9);pointer-events:auto;cursor:pointer}
@@ -101,9 +109,11 @@ const PAGE_CSS = `
 .olibv2-name{position:absolute;left:10px;top:-9px;display:none;max-width:190px;overflow:hidden;
   text-overflow:ellipsis;white-space:nowrap;font-size:11px;line-height:1.25;padding:1px 5px;
   border-radius:4px;background:rgba(225,236,250,.92);color:#1c2c44;pointer-events:none;
-  box-shadow:0 1px 4px rgba(0,0,0,.18)}
+  box-shadow:0 1px 4px rgba(0,0,0,.18);z-index:2}
+/* 骨干核心站名始终显示（数量少，国家尺度也要认得出来） */
+.olibv2-site--core .olibv2-name,
 .olibv2-site.is-selected .olibv2-name{display:block}
-.olibv2-labels-major .olibv2-site--core .olibv2-name,
+/* zoom≥8（默认全国视图）：ISP/5G；zoom≥10：全部站名 */
 .olibv2-labels-major .olibv2-site--isp .olibv2-name,
 .olibv2-labels-major .olibv2-site--5g .olibv2-name{display:block}
 .olibv2-labels-all .olibv2-site .olibv2-name{display:block}
@@ -201,11 +211,18 @@ export default function NetworkTopologyV2() {
   const { t } = useI18n()
   const { isDark } = useTheme()
   const { file, loading, error, reload } = useOlibSiteGeo()
+  const { file: fiberFile, error: fiberError } = useOlibFiberLinks()
 
   const sites = useMemo(() => buildGeoSites(file), [file])
   const { links, skipped: skippedLinks } = useMemo(() => buildGeoLinks(sites), [sites])
+  const { links: fiberLinks } = useMemo(() => buildFiberLinks(sites, fiberFile), [sites, fiberFile])
   const locatedCount = useMemo(() => sites.filter((s) => s.located).length, [sites])
   const unmatched = useMemo(() => sites.filter((s) => !s.located), [sites])
+  const fiberSites = useMemo(() => {
+    const ids = new Set<number>()
+    for (const l of fiberLinks) { ids.add(l.a.index); ids.add(l.b.index) }
+    return ids.size
+  }, [fiberLinks])
 
   const [mode, setMode] = useState<GeoViewMode>(readInitialMode)
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null)
@@ -215,6 +232,7 @@ export default function NetworkTopologyV2() {
   const [filter, setFilter] = useState<SiteFilter>('all')
   const [resetToken, setResetToken] = useState(0)
   const [sitesVisible, setSitesVisible] = useState(true)
+  const [fiberOn, setFiberOn] = useState(true)
   const [matchOpen, setMatchOpen] = useState(false)
   const [matchAnchor, setMatchAnchor] = useState<{ x: number; y: number } | null>(null)
   const tokenRef = useRef(0)
@@ -230,22 +248,33 @@ export default function NetworkTopologyV2() {
 
   const nextToken = () => { tokenRef.current += 1; return tokenRef.current }
 
+  /* 定位一律留在当前页签：地理图飞到 GPS；物理/逻辑/骨干走 TopologyViewer.focusHere */
   const locate = useCallback((site: GeoSite) => {
-    setMode('geo')
     setSelectedIndex(site.index)
-    if (site.located) setFocus({ index: site.index, token: nextToken() })
-  }, [])
+    if (mode === 'geo') {
+      if (site.located) setFocus({ index: site.index, token: nextToken() })
+      return
+    }
+    viewerRef.current?.locate(site)
+  }, [mode])
 
   const zoomTo = useCallback((site: GeoSite) => {
-    setMode('geo')
     setSelectedIndex(site.index)
-    if (site.located) setFocus({ index: site.index, token: nextToken(), zoom: 13 })
-  }, [])
+    if (mode === 'geo') {
+      if (site.located) setFocus({ index: site.index, token: nextToken(), zoom: 13 })
+      return
+    }
+    viewerRef.current?.zoomTo(site)
+  }, [mode])
 
   const pick = useCallback((site: GeoSite) => {
     setSelectedIndex(site.index)
-    if (site.located) locate(site)
-  }, [locate])
+    if (mode === 'geo') {
+      if (site.located) setFocus({ index: site.index, token: nextToken() })
+      return
+    }
+    viewerRef.current?.focusHere(site)
+  }, [mode])
 
   const onSelectIndex = useCallback((index: number) => setSelectedIndex(index), [])
 
@@ -297,9 +326,19 @@ export default function NetworkTopologyV2() {
               />
               <div className="olibv2-toolbar-spacer" />
               {mode === 'geo' && (
-                <span className="olibv2-toolbar-info">
-                  {t('olibV2.map.stats', { sites: mapSites.length, links: links.length })}
-                </span>
+                <>
+                  <span className="olibv2-toolbar-info">
+                    {t('olibV2.map.stats', {
+                      sites: mapSites.length,
+                      links: links.length,
+                      fiber: fiberOn ? fiberLinks.length : 0,
+                    })}
+                  </span>
+                  <label className="olibv2-fiber-toggle">
+                    <Switch size="small" checked={fiberOn} onChange={setFiberOn} />
+                    <span>{t('olibV2.fiber.toggle')}</span>
+                  </label>
+                </>
               )}
               <Button size="small" icon={<ReloadOutlined />} onClick={reset}>
                 {t('olibV2.reset')}
@@ -311,6 +350,7 @@ export default function NetworkTopologyV2() {
                 <GeoTopologyMap
                   sites={mapSites}
                   links={links}
+                  fiberLinks={fiberOn ? fiberLinks : []}
                   selected={selected}
                   focus={focus}
                   resetToken={resetToken}
@@ -378,6 +418,7 @@ export default function NetworkTopologyV2() {
             <V2SiteDetail
               site={selected}
               links={selectedLinks}
+              locateEnabled={mode !== 'geo' || !!selected?.located}
               onLocate={locate}
               onZoom={zoomTo}
               onSelect={onSelectIndex}
@@ -388,6 +429,9 @@ export default function NetworkTopologyV2() {
               totalSites={sites.length}
               drawnLinks={links.length}
               skippedLinks={skippedLinks}
+              fiberLinks={fiberOn ? fiberLinks.length : 0}
+              fiberSites={fiberSites}
+              fiberError={fiberError}
             />
           </div>
         </div>
@@ -414,6 +458,13 @@ export default function NetworkTopologyV2() {
               lines: [
                 t('olibV2.note.links.1', { drawn: links.length, total: CORE_LINKS.length, skipped: skippedLinks }),
                 t('olibV2.note.links.2'),
+              ],
+            },
+            {
+              title: t('olibV2.note.sec.fiber'),
+              lines: [
+                t('olibV2.note.fiber.1', { n: fiberLinks.length, sites: fiberSites }),
+                t('olibV2.note.fiber.2'),
               ],
             },
             {

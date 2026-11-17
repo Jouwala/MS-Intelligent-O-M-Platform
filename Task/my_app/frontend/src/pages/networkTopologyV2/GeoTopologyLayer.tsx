@@ -7,9 +7,9 @@
  *   · 站点按**屏幕像素网格**聚合（缩放/平移结束后重算），避免蒙罗维亚 110 个点
  *     叠成一团；点聚合圈 → fitBounds 展开。
  *   · 站点图标按类型区分：核心=紫色圆环、ISP=蓝色菱形、5G=红色圆点、普通=灰点。
- *     只有选中站点有脉冲光环（不给 553 个点同时跑动画）。
- *   · 站名分级显示：zoom≥9 显示核心/ISP/5G 名称，zoom≥11 显示全部名称，
- *     选中站点始终显示。低倍率下用悬浮 tooltip 看名字。
+ *     只有选中站点有脉冲光环（不给 667 个点同时跑动画）。
+ *   · 站名分级显示：核心站名始终显示；zoom≥8 再显 ISP/5G；zoom≥10 显示全部；
+ *     选中站点始终显示。更低倍率用悬浮 tooltip 看名字。
  *   · 链路是**连接关系示意直线**（见 geoData.ts 顶部说明），同端点多条链路
  *     做垂直偏移；点线可看两端站点与链路类型。
  *   · 所有 addTo 之前过 isMapAlive()：地图销毁后 appendChild(undefined) 会打崩整页。
@@ -19,7 +19,8 @@ import L from 'leaflet'
 import { isMapAlive, useMap } from '../../components/LeafletMap'
 import type { CoreLinkType } from '../networkTopology/topologyData'
 import { siteKind } from './geoData'
-import type { GeoLink, GeoSite } from './types'
+import { FIBER_STYLES } from './fiberMeta'
+import type { FiberLink, GeoLink, GeoSite } from './types'
 
 const esc = (s: string) => s
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -44,6 +45,8 @@ function bucketSizeOf(zoom: number): number {
 export interface GeoTopologyLayerProps {
   sites: GeoSite[]
   links: GeoLink[]
+  /** PDF 第 1 页数字化出来的链路（背景网，细线） */
+  fiberLinks: FiberLink[]
   selected: GeoSite | null
   focus: { index: number; token: number; zoom?: number } | null
   onSelect: (index: number) => void
@@ -53,9 +56,41 @@ export interface GeoTopologyLayerProps {
 }
 
 export default function GeoTopologyLayer({
-  sites, links, selected, focus, onSelect, typeLabel, clusterLabel, linkTypeLabel,
+  sites, links, fiberLinks, selected, focus, onSelect, typeLabel, clusterLabel, linkTypeLabel,
 }: GeoTopologyLayerProps) {
   const map = useMap()
+
+  /* ---------- PDF 链路（第 1 页数字化，细线背景网） ----------
+     单独一个 pane（zIndex 390）压在 overlayPane(400) 之下：这一层是底衬，
+     既不能盖住站点圆点，也不能因为开关重建而跑到粗骨干线上面去。 */
+  useEffect(() => {
+    if (!isMapAlive(map)) return
+    if (!map.getPane('olibFiberPane')) {
+      const pane = map.createPane('olibFiberPane')
+      pane.style.zIndex = '390'
+    }
+    const group = L.layerGroup().addTo(map)
+    for (const link of fiberLinks) {
+      const style = FIBER_STYLES[link.group] ?? FIBER_STYLES.base
+      const line = L.polyline(
+        [[link.a.lat as number, link.a.lng as number], [link.b.lat as number, link.b.lng as number]],
+        {
+          pane: 'olibFiberPane',
+          color: style.color,
+          weight: style.weight,
+          opacity: style.opacity,
+          dashArray: link.dash ? (style.dash ?? '6 5') : undefined,
+          lineCap: 'round',
+        },
+      )
+      line.bindTooltip(
+        `<strong>${esc(link.a.name)}</strong> ↔ <strong>${esc(link.b.name)}</strong><br/>${esc(link.type)}`,
+        { sticky: true, className: 'olibv2-tip', opacity: 0.96 },
+      )
+      line.addTo(group)
+    }
+    return () => { group.remove() }
+  }, [map, fiberLinks])
 
   /* ---------- 站点 + 聚合 ---------- */
   useEffect(() => {
@@ -111,8 +146,9 @@ export default function GeoTopologyLayer({
       if (!isMapAlive(map)) return
       group.clearLayers()
       const zoom = map.getZoom()
-      container.classList.toggle('olibv2-labels-major', zoom >= 9)
-      container.classList.toggle('olibv2-labels-all', zoom >= 11)
+      /* 默认全国视图 LB_ZOOM=8 就要能看到 ISP/5G；再放大到 10 显示全部站名 */
+      container.classList.toggle('olibv2-labels-major', zoom >= 8)
+      container.classList.toggle('olibv2-labels-all', zoom >= 10)
 
       const size = bucketSizeOf(zoom)
       if (!size) {

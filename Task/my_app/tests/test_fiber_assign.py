@@ -891,3 +891,44 @@ def test_outcome_pending_manual_does_not_mask_real_failures():
     r = _outcome(due=2, failed=2, pending_manual=5,
                  fail_reasons=["A1: 建单失败"])
     assert r["status"] == "failed" and r["success"] is False
+
+
+# ==========================================================
+# cmdb 站点缺档 ≠ 任务错误（2026-11-17 如意要求）
+# ==========================================================
+# 现场：一条 4758 告警的 ME 名在 cmdb 查不到站点，每 5 分钟一轮都记成红色
+# 「❌ Error」。如意要求「这种提示就行了，不能报错 —— 不算错误，是 cmdb 配置的问题」。
+# 判据：失败**全部**是站点解析失败 + cmdb 索引本身拉到了 → pending_cmdb（success=True）。
+def test_outcome_cmdb_site_gap_is_not_failure():
+    r = _outcome(due=1, failed=1, failed_site_unresolved=1, cmdb_site_count=830,
+                 fail_reasons=[
+                     "zte-ume-mwffb84411-f816-4e23-a161-4b8814360ec5,7925,4758: 站点解析失败"])
+    assert r["status"] == "pending_cmdb"
+    assert r["success"] is True
+    # 不能写 error：写了 Run History 又会显示成红色 ❌ Error
+    assert not r.get("error")
+
+
+def test_outcome_cmdb_site_gap_ignores_failure_ratio():
+    """即使本轮 100% 派不出去，只要全是 cmdb 站点缺档，就仍属提示而不是大面积失败。"""
+    r = _outcome(due=3, failed=3, failed_site_unresolved=3, cmdb_site_count=830,
+                 fail_reasons=["A1: 站点解析失败", "A2: 站点解析失败", "A3: 站点解析失败"])
+    assert r["status"] == "pending_cmdb" and r["success"] is True
+
+
+def test_outcome_empty_cmdb_index_is_still_failure():
+    """cmdb 索引 0 条（没拉到）时，站点解析失败是系统故障，仍判 failed。
+
+    否则 cmdb 一挂，整个任务全绿，真正的故障被藏起来。
+    """
+    r = _outcome(due=1, failed=1, failed_site_unresolved=1, cmdb_site_count=0,
+                 fail_reasons=["A1: 站点解析失败"])
+    assert r["status"] == "failed" and r["success"] is False
+    assert "全部未能派单" in r["error"]
+
+
+def test_outcome_mixed_site_gap_and_assign_failure_is_failure():
+    """混入建单失败（eFlow 侧真失败）→ 不能当成 cmdb 缺档，仍判 failed。"""
+    r = _outcome(due=2, failed=2, failed_site_unresolved=1, cmdb_site_count=830,
+                 fail_reasons=["A1: 站点解析失败", "A2: 建单失败"])
+    assert r["status"] == "failed" and r["success"] is False

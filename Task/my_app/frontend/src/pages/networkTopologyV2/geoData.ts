@@ -13,7 +13,7 @@ import {
   type CoreLinkType, type CoreNode, type SiteFilter, type TopoSite,
 } from '../networkTopology/topologyData'
 import { siteFuzzyScore } from '../networkTopology/siteMatch'
-import type { GeoFile, GeoLink, GeoRecord, GeoSite } from './types'
+import type { FiberFile, FiberLink, GeoFile, GeoLink, GeoRecord, GeoSite } from './types'
 
 /** 合并站点清单与 GPS 记录。file 为空（加载中）时全部标为未定位。 */
 export function buildGeoSites(file: GeoFile | null): GeoSite[] {
@@ -103,6 +103,51 @@ export function buildGeoLinks(sites: GeoSite[]): { links: GeoLink[]; skipped: nu
 export function linksOfSite(site: GeoSite | null | undefined, links: GeoLink[]): GeoLink[] {
   if (!site) return []
   return links.filter((l) => l.a.index === site.index || l.b.index === site.index)
+}
+
+/* ---------------------------------------------------------------------------
+ * PDF 链路图层（第 1 页数字化）
+ *
+ * 边来自 olib-fiber-links.json，a/b 是 SITES 下标。两道防线：
+ *   1. 两端站点都必须已定位，否则画不出来（与骨干链路同口径）；
+ *   2. 文件里带 sites 映射（下标 → 站名），与当前站点表对不上就整条作废 ——
+ *      站点表增删后 PDF 链路会错位，宁可少画，不能把链路接到别的站上。
+ * ------------------------------------------------------------------------- */
+export function buildFiberLinks(
+  sites: GeoSite[],
+  file: FiberFile | null,
+): { links: FiberLink[]; skipped: number; stale: boolean } {
+  if (!file || !Array.isArray(file.edges)) return { links: [], skipped: 0, stale: false }
+  const byIndex = new Map<number, GeoSite>()
+  for (const s of sites) byIndex.set(s.index, s)
+
+  const links: FiberLink[] = []
+  let skipped = 0
+  let stale = false
+  for (const e of file.edges) {
+    const a = byIndex.get(e.a)
+    const b = byIndex.get(e.b)
+    const nameA = file.sites?.[String(e.a)]
+    const nameB = file.sites?.[String(e.b)]
+    if (!a || !b || nameA !== a.name || nameB !== b.name) {
+      stale = true
+      skipped++
+      continue
+    }
+    if (!a.located || !b.located || a.index === b.index) {
+      skipped++
+      continue
+    }
+    links.push({
+      id: `${e.a}-${e.b}-${e.c}`,
+      a,
+      b,
+      group: e.c,
+      type: e.t,
+      dash: e.d === 1,
+    })
+  }
+  return { links, skipped, stale }
 }
 
 /** 链路另一端。 */
