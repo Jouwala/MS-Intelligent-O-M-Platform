@@ -47,6 +47,12 @@ param(
     [switch]$ForceFeBuild,
     [string]$BaseRef = '',
     [int]$FeBuildTimeoutSec = 600,
+    # 已知失败基线（#111，2026-11-17）：以下两条 NUR 用例按 2026-10-06
+    # 快照校准（名单 46 单 / 名单周全量 1107），D:\02 的名单（库表
+    # tt_exclude，人工上传维护）或 eflow_tt 数据漂移后与快照不符而失败，
+    # 非代码回归（同期 nur_calc 无语义改动）。移除条件：D:\02 侧提供
+    # 冒烟 pytest 实际值并按现状重新校准数据/名单后，两条在 D:\02 连跑
+    # 通过，即从本清单删除。其余失败一律判 FAIL。
     [string[]]$KnownFailures = @(
         'tests/test_nur_exclude_semantics.py::test_Y_subtracts_the_list',
         'tests/test_nur_exclude_semantics.py::test_Y_is_not_the_list_itself'

@@ -49,3 +49,9 @@ agent/task-111-pytest-baseline
 ## 下一步
 
 在本分支提交代码，草稿 PR 转正式后按 agent-protocol 发 TASK_COMPLETED / PR_CREATED 评论。
+
+## 进度（muse-3，2026-11-17）
+- (b) 已修：test_warning_text_distinguishes_failure_from_empty 内 stub 三个 loader（load_master_sites / load_month_availability / _load_month_tt）为中性空结果，只验证「登记表→文案」契约；断言未改。机理已隔离复现（loader 先失败后成功时原用例 diff 为空必 FAIL；stub 后确定性 PASS），反向验证通过（_mark_load_error 改 no-op 时用例如期失败），连跑 5 次全过。
+- (a) 仓库侧根因确认：断言按 2026-10-06 快照校准，名单真相源为库表 app.tt_exclude（人工上传维护）；同期 nur_calc 仅目录重组/日志改造、无语义改动。两项同时失败 = 名单/数据已漂移、非代码回归。已在测试文件头补记本结论与再校准口径。最终定案仍需 D:\02 提供 TMP\smoke_pytest_106_d5c3ff2.out 的逐断言实际值（及当前 tt_exclude 名单单数、2026-08-03~09 周 N/Y 实际总量），数据重新校准后从 KnownFailures 移除。
+- (c) ops/smoke/smoke.ps1 的 KnownFailures 默认清单本已含 NUR 两项，本次补根因注释与移除条件；(b) 修复后冒烟失败集只剩这两项已知失败，纯文档 PR 不再被阻塞。
+- 自检：agent-done-check --full 除 my_app pytest 外全过；pytest 报的 4 条失败为沙箱既有失败（已在 pristine main 02b148e 同日复核一致，非本次引入，未记基线）。
