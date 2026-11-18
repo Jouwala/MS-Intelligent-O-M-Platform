@@ -125,3 +125,29 @@ preview 就从那里提供服务），geojson 刷新是目前唯一已知的运�
 
 不在 P1-7 内：`battery_dashboard.py:39` 的 `d:\01_RPA\...` 硬编码路径是历史遗留，
 `env_template.txt` 已有警告，另立事项处理。
+
+## 6. Linux 编排器（P1-4）：`start.sh` / `stop.sh`
+
+Linux 侧对标 `start_all.ps1` / `stop_all.ps1` 的编排器，入口为副本根的
+`start.sh` / `stop.sh`（薄壳），逻辑在 `ops/deploy/start.sh` / `stop.sh`，
+目录解析在 `ops/deploy/noc-paths.sh`（与 `noc-paths.ps1` 同一套模式/变量/断言）。
+
+| Windows（`.ps1`） | Linux（`.sh`） |
+| --- | --- |
+| 六步：PG → nginx 配置 → 后端 → 前端 → 门户 → nginx | 相同六步、相同顺序、相同参数 |
+| pid 文件 `pid\|进程名\|ticks` | pid 文件 `pid\|comm\|starttime`（`/proc/<pid>/comm` + `/proc/<pid>/stat` 字段 22） |
+| 端口熔断（生产端口集 + 去重） | 相同端口集与规则 |
+| `Test-PortListening`（TcpClient） | Python socket 直连探测（用副本 Python） |
+| `Start-Process` 脱离 | 子 shell + `exec`，`trap '' HUP` 使子进程忽略挂起信号 |
+| `write_nginx_conf.ps1` 展开配置 + `nginx -t` | 内置 awk 展开器：同一 `nginx.conf.template`、同一 9 个占位符、同一未替换断言，展开后同样跑 `nginx -t` |
+| `Stop-Process -Force` | TERM，5 秒未退再 KILL（安全保证相同：只动 pid 文件校验过的本副本进程） |
+| `node\node.exe`、`python312\python.exe` | `node/bin/node`、`python312/bin/python3`（按 `python3` → `python3.12` → `python` 探测） |
+| `nginx.exe` | `nginx-1.28.0/sbin/nginx` 或 `nginx-1.28.0/nginx` |
+
+可执行位：ZIP 构建时 `.sh` 按后缀置 0o755（`zip-package.mjs`），解压后可直接
+执行；仓库检出后须 `chmod +x` 或用 `sh` 显式调用。
+
+验证状态（2026-11-18，Muse VM 夹具实测，桩程序代替真实 PG/nginx/后端）：
+编排顺序、pid 文件、端口等待、熔断、干跑、外部模式零写入均已验证；真实
+PG/nginx/后端在 Linux 上的行为、真实 `nginx -t`、wa_analysis/bot 路径未验证，
+待 P1-8 在 Linux 目标机上实测（Phase 0 附录 B 第 2、14 项）。
