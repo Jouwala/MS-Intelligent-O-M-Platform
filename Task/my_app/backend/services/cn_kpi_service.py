@@ -147,13 +147,14 @@ WIDGETS: List[Dict[str, Any]] = [
         "id": "c1",
         "title": "VLR Subscribers",
         "chart": "line",
-        # ⚠ EMS 与 UME 是**同一个量在两套网管里的两次测量**，绝不可相加，也不该
-        # 合成一条线（2026-11-18 用户要求改成分源显示）：
-        #   · 旧写法「同日优先 EMS、缺日取 UME」在换源日会出现台阶
-        #     （10-18 UME 1,002,263 → 10-19 EMS 1,231,875，+22.9%），
-        #     用户无法判断是业务突变还是换表；
-        #   · 现在用**日历骨架 + 两源各一条线**：只在各自有数据的日期有点，
-        #     缺数即断线（不用另一来源顶替、不插值）。哪条线短、哪里断，一眼可见。
+        # 2026-11-18 业务口径（用户确认）：EMS 表 = **HQ** 站点，UME 表 = **ODC** 站点
+        # （UME 侧只有 MSC71，语音另含 MGCF76，正是一个站点的网元集合）。
+        # 所以两张表是**两个站点的同一 KPI**，可以相加得全网 Total；页面按
+        # HQ / ODC / Total 三条线显示（EMS→HQ、UME→ODC 的改名是用户要求）。
+        #   · 旧写法「同日优先 EMS、缺日取 UME」把两个站点压成一条线，换源日
+        #     出现台阶（10-18 UME 1,002,263 → 10-19 EMS 1,231,875，+22.9%）；
+        #   · 现在用**日历骨架 + 三条线**：只在各自有数据的日期有点，缺数即断线
+        #     （不用另一来源顶替、不插值）；Total 只在两站都有数的日期成立。
         # 日历骨架同时保证「没有数据的日期」也有一行（值为 NULL），ECharts 才能断线。
         # 递归 CTE 是 SQLite 内置能力（远端 3.50.4），无额外版本依赖。
         "source_table": "VLR_SUBSCRIBERS_TEMPLATE_OSS_EMS",
@@ -175,7 +176,10 @@ WIDGETS: List[Dict[str, Any]] = [
             ', ume AS (SELECT substr("End Time",1,10) AS d, '
             'SUM("Number of Subscribers in VLR") AS v '
             'FROM "VLR_SUBSCRIBERS_TEMPLATE_OSS_UME" GROUP BY 1)\n'
-            'SELECT cal.d AS t, ems.v AS "EMS", ume.v AS "UME" FROM cal\n'
+            'SELECT cal.d AS t, ems.v AS "HQ", ume.v AS "ODC",\n'
+            # 只有两站都有数时才成立；任一缺失给 NULL（前端断线，不画半截总和）
+            'CASE WHEN ems.v IS NULL OR ume.v IS NULL THEN NULL '
+            'ELSE ems.v + ume.v END AS "Total" FROM cal\n'
             "LEFT JOIN ems ON ems.d = cal.d\n"
             "LEFT JOIN ume ON ume.d = cal.d\n"
             "ORDER BY cal.d"
@@ -185,9 +189,10 @@ WIDGETS: List[Dict[str, Any]] = [
         "id": "c4",
         "title": "Voice Traffic(Erl)",
         "chart": "line",
-        # 同 c1：改为日历骨架 + EMS / UME 两条线，缺数即断线（不再合并、不再相加）。
+        # 同 c1：日历骨架 + HQ（EMS 表）/ ODC（UME 表）/ Total 三条线。
         # 2026-11-18 回补后 UME 覆盖 08-31~11-18（含 9 月），EMS 仍只有人工导出的
-        # 10-19~11-18 —— 两条线的长短本身就是「谁缺数」的直接证据。
+        # 10-19~11-18 —— 两条线的长短本身就是「谁缺数」的直接证据；
+        # Total 只在两站都有数的日期成立（断档/单站日期不画总和的半截值）。
         "source_table": "VOICE_TRAFFIC_TEMPLATE_OSS_EMS",
         "self_contained": True,
         "source_split": {
@@ -205,7 +210,9 @@ WIDGETS: List[Dict[str, Any]] = [
             ', ume AS (SELECT substr("End Time",1,10) AS d, '
             'SUM("Seized Traffic(Erl)") AS v '
             'FROM "VOICE_TRAFFIC_TEMPLATE_OSS_UME" GROUP BY 1)\n'
-            'SELECT cal.d AS t, ems.v AS "EMS", ume.v AS "UME" FROM cal\n'
+            'SELECT cal.d AS t, ems.v AS "HQ", ume.v AS "ODC",\n'
+            'CASE WHEN ems.v IS NULL OR ume.v IS NULL THEN NULL '
+            'ELSE ems.v + ume.v END AS "Total" FROM cal\n'
             "LEFT JOIN ems ON ems.d = cal.d\n"
             "LEFT JOIN ume ON ume.d = cal.d\n"
             "ORDER BY cal.d"
