@@ -287,7 +287,8 @@ def _ensure_proxy_locked(cfg: dict, timeout: int) -> dict:
                 "error": f"缺少 {cfg['script']}（脚本未部署）"}
 
     py = _find_python()
-    log_dir = _ROOT / "log"
+    # P1-7：MYAPP_LOG_DIR 覆盖日志根（ZIP 外部日志目录；未设置时默认不变）。
+    log_dir = Path(os.environ.get("MYAPP_LOG_DIR", "") or _ROOT / "log")
     log_dir.mkdir(parents=True, exist_ok=True)
     # 2026-09-11：文件名加启动日期，配合 log_cleanup 定时任务做 7 天保留。
     # 另外：代理是 DETACHED 拉起的（生命周期与拉起者不同），不能改用 pipe 泵
