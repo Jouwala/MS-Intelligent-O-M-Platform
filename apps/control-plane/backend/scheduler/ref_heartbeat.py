@@ -16,6 +16,7 @@ HWM/lease 同一机制：状态只看 ref 名，不读评论、不读 commit。
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -90,6 +91,18 @@ def parse_heartbeat_ref(ref: str) -> Optional[HeartbeatBeat]:
         state=match.group("state"),
         ref=ref,
     )
+
+
+def ref_instance_id(instance: str) -> str:
+    """Linux Worker 的租约身份：人类 instance 名 → ref 名里的 hex instance。
+
+    与 `apps/agent-worker-linux/linux_config.py` 的
+    `LinuxWorkerConfig.ref_instance` 同一公式（`sha256(instance.lower())[:16]`）；
+    两处必须保持一致——认领侧（lease ref）只接受 hex，注册/心跳侧用人类名，
+    `list_workers` 靠本函数把租约键归一回人类身份（见 ref_workers.py）。
+    跨应用无法共享 import，故公式在此与 linux_config 各写一份，以本函数为准。
+    """
+    return hashlib.sha256(str(instance).lower().encode("utf-8")).hexdigest()[:16]
 
 
 def epoch_ms_of(moment: datetime) -> int:
@@ -223,4 +236,5 @@ __all__ = [
     "post_heartbeat",
     "prune_heartbeats",
     "read_heartbeats",
+    "ref_instance_id",
 ]

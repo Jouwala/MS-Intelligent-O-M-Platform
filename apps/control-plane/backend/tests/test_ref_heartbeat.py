@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -297,3 +298,88 @@ def test_comment_facts_and_beat_facts_merge(
     comments = len(fake_github.comment_bodies(99))
     assert authority.heartbeat_worker(AGENT, INSTANCE, state="idle") is True
     assert len(fake_github.comment_bodies(99)) == comments
+
+
+# ---------------------------------------------------------------------------
+# #141 复审回归（P0-1 / P1-2 / P1-3 / P2-4）：复现脚本改写为正式测试
+# ---------------------------------------------------------------------------
+
+
+def test_linux_ref_identity_lease_makes_worker_working(
+    fake_github, ref_store, ref_transport, ref_clock
+):
+    """P0-1：Linux Worker 认领用租约身份 (agent, sha256(instance)[:16])，
+    注册/心跳用人类身份 (agent, instance)——list_workers 必须把租约键归一，
+    否则长任务的 Linux Worker 永远拿不到 working，会被误判 offline。"""
+    fake_github.add_issue(1)
+    authority = scheduler(ref_store, ref_transport, ref_clock)
+    authority.register_worker("muse-1", "muse-1-linux", hostname="h", platform="linux")
+    ref_instance = hashlib.sha256("muse-1-linux".encode()).hexdigest()[:16]
+    assert ref_instance == ref_heartbeat.ref_instance_id("muse-1-linux")
+    authority.claim(
+        "issue-1", agent_id="muse-1", instance_id=ref_instance, attempt_id=ATTEMPT
+    )
+    assert ("muse-1", ref_instance) in authority._live_lease_keys(authority.now())
+    workers = authority.list_workers(stale_after=timedelta(seconds=90))
+    assert [(w.agent_id, w.instance_id) for w in workers] == [
+        ("muse-1", "muse-1-linux")
+    ]
+    assert workers[0].state == "working"
+
+
+def test_list_workers_does_not_pollute_local_registry(
+    fake_github, ref_store, ref_transport, ref_clock
+):
+    """P1-2：list_workers 是读方法，不得把外来 beat 身份写进本进程 _workers，
+    否则“心跳前必须先注册”的守卫会被一次 list_workers 绕过。"""
+    a1 = scheduler(ref_store, ref_transport, ref_clock)
+    a1.register_worker("muse-2", "1a2b3c4d")
+    a2 = scheduler(ref_store, ref_transport, ref_clock)
+    a2.register_worker("muse-9", "other-vm")
+    assert ("muse-9", "other-vm") not in a1._workers
+    assert a1.heartbeat_worker("muse-9", "other-vm") is False
+    a1.list_workers(stale_after=timedelta(seconds=90))
+    assert ("muse-9", "other-vm") not in a1._workers
+    assert a1.heartbeat_worker("muse-9", "other-vm") is False
+
+
+def test_comment_failure_does_not_block_refs_beat(
+    fake_github, ref_store, ref_transport, ref_clock
+):
+    """P1-3：评论通道失败不得阻塞 refs 主通道——beat 先写，评论失败只记日志。"""
+    fake_github.add_issue(99)
+    authority = scheduler(ref_store, ref_transport, ref_clock, registry_issue=99)
+    authority.register_worker(AGENT, INSTANCE)
+    before = ref_heartbeat.read_heartbeats(ref_store)[(AGENT, INSTANCE)]
+    ref_clock.advance(61)
+    real_add = authority.transport.add_comment
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("评论接口限流")
+
+    authority.transport.add_comment = boom
+    try:
+        assert authority.heartbeat_worker(AGENT, INSTANCE, state="idle") is True
+    finally:
+        authority.transport.add_comment = real_add
+    after = ref_heartbeat.read_heartbeats(ref_store)[(AGENT, INSTANCE)]
+    assert after.epoch_ms > before.epoch_ms and after.state == "idle"
+
+
+def test_beat_write_failure_returns_false(
+    fake_github, ref_store, ref_transport, ref_clock
+):
+    """P2-4：beat 写失败时 heartbeat_worker 不得谎报 True。"""
+    authority = scheduler(ref_store, ref_transport, ref_clock)
+    authority.register_worker(AGENT, INSTANCE)
+    ref_clock.advance(61)
+    real_create = ref_store.create
+
+    def boom(ref, sha):
+        raise RuntimeError("断网")
+
+    ref_store.create = boom
+    try:
+        assert authority.heartbeat_worker(AGENT, INSTANCE, state="idle") is False
+    finally:
+        ref_store.create = real_create

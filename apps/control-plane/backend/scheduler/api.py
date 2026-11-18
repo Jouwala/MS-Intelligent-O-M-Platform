@@ -321,7 +321,7 @@ class Scheduler(Protocol):
     ) -> WorkerSnapshot:
         ...
 
-    def heartbeat_worker(self, agent_id: str, instance_id: str) -> bool:
+    def heartbeat_worker(self, agent_id: str, instance_id: str, state: str = "online") -> bool:
         ...
 
     def list_workers(self, stale_after: timedelta = DEFAULT_HEARTBEAT_TTL) -> list[WorkerSnapshot]:

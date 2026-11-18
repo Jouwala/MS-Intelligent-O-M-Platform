@@ -298,6 +298,13 @@ class AgentWorker:
                     "Worktree 钩子校验未通过，任务阻塞：\n- " + "\n- ".join(hooks.problems),
                     S,
                 )
+                # 阻塞也要上报心跳（best-effort：节流窗口内可能写不出，见 #141 复审 P2-5）。
+                try:
+                    self.scheduler.heartbeat_worker(
+                        cfg.agent_id, cfg.instance_id, state="blocked"
+                    )
+                except Exception:  # noqa: BLE001 - 心跳失败不影响主流程
+                    pass
                 outcome = "blocked-hooks"
                 return outcome
 
@@ -315,6 +322,13 @@ class AgentWorker:
                     "Issue 未提供「执行命令」，且未注入 runner，任务阻塞。",
                     S,
                 )
+                # 阻塞也要上报心跳（best-effort：节流窗口内可能写不出，见 #141 复审 P2-5）。
+                try:
+                    self.scheduler.heartbeat_worker(
+                        cfg.agent_id, cfg.instance_id, state="blocked"
+                    )
+                except Exception:  # noqa: BLE001 - 心跳失败不影响主流程
+                    pass
                 outcome = "blocked-no-command"
                 return outcome
 

@@ -162,7 +162,13 @@ class LinuxWorkerConfig:
 
     @property
     def ref_instance(self) -> str:
-        """ref 名里的 instance 段：稳定十六进制（契约只接受 hex）。"""
+        """ref 名里的 instance 段：稳定十六进制（契约只接受 hex）。
+
+        公式与 control-plane 的 `scheduler.ref_heartbeat.ref_instance_id`
+        相同（`sha256(instance.lower())[:16]`），两处必须保持一致——
+        `list_workers` 靠同一公式把租约键归一回人类身份（#141 复审 P0-1）。
+        跨应用无法共享 import，故各写一份，以 ref_heartbeat 为准。
+        """
         return hashlib.sha256(self.instance.lower().encode("utf-8")).hexdigest()[:16]
 
     @property

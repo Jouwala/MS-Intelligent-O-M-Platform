@@ -84,6 +84,12 @@ refs/heads/agent-heartbeat/<agent>/<instance>/<epoch_ms:013d>/<state>
 - **有效租约优先于心跳新鲜度**：租约由活着的进程定期续租，是比心跳更强的
   存活证据——长任务执行中超 90s 未写 beat 仍算 working，不误判 offline；
   但自报 failed / blocked 是更具体的状态，优先于租约；
+- **身份归一（#141 复审 P0 教训）**：Linux Worker 认领用租约身份
+  `(ref_agent_id, ref_instance)`，其中 `ref_instance =
+  sha256(instance.lower())[:16]`（`linux_config.py`），注册/心跳用人类身份
+  `(worker_id, instance)`。`list_workers` 判 working 时，对每个事实键同时查
+  原始键与派生租约键，任一持有有效租约即算 working；派生公式的 canonical
+  实现是 `ref_heartbeat.ref_instance_id()`，linux_config 各写一份，须保持一致；
 - 注册表 Issue 评论心跳通道保留作兼容（`registry_issue` 非空时双通道同写），
   但 `registry_issue` 全仓库默认是 None，refs 是实际生效的通道。
   注册表文档里“最近 GitHub 活动 = 心跳、90 分钟判失联”的旧口径已废止。

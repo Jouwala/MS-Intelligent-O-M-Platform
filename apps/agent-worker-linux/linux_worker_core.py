@@ -297,6 +297,13 @@ class LinuxWorker:
                 if not state["stale"]:
                     self._release_quietly(state)
                 self._set_state_label(int(issue.number), "state:blocked")
+                # 阻塞也要上报心跳（best-effort：节流窗口内可能写不出，见 #141 复审 P2-5）。
+                try:
+                    self.scheduler.heartbeat_worker(
+                        self.config.worker_id, self.config.instance, state="blocked"
+                    )
+                except Exception as exc:  # noqa: BLE001 - 心跳失败不影响主流程
+                    self.log(f"worker heartbeat failed: {type(exc).__name__}: {exc}")
                 return "blocked"
 
             result = self._execute(state, command)
