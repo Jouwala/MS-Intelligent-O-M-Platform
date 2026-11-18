@@ -215,14 +215,21 @@ def test_blocked_pr_is_excluded(fake: FakeGitHub) -> None:
 
 
 def test_blocked_repeat_run_does_not_duplicate(fake: FakeGitHub) -> None:
+    """时间前进的重复扫描也不重复：正文时间戳取阻塞事件时间（blocked_since），
+    不是扫描时间（复审 P1：原实现用扫描时间，每 5 分钟重写一次评论）。"""
     _blocked_issue(fake, 15, priority="P2", blocked_minutes_ago=45)
     first = escalate_blocked_tasks(fake, REPO, now=NOW)
-    second = escalate_blocked_tasks(fake, REPO, now=NOW)
+    second = escalate_blocked_tasks(
+        fake, REPO, now=NOW + timedelta(minutes=5)
+    )
     assert first == [15]
     assert second == []  # 正文相同，post_alert 直接跳过
     inbox = find_inbox(fake, REPO)
     assert inbox is not None
-    assert len(fake.comments_for(inbox)) == 1
+    bodies = fake.comments_for(inbox)
+    assert len(bodies) == 1
+    # 发生时间是阻塞打上时间（NOW 前 45 分钟），不是两次扫描时间。
+    assert "发生时间：2026-11-18T11:15:00Z" in bodies[0]
 
 
 def test_cli_ci_failure_uses_injected_client(fake: FakeGitHub) -> None:

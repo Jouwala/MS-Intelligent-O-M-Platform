@@ -107,6 +107,8 @@ auto-dispatch / dispatch-check）的内嵌 Python 已抽成
 `no-progress` 与阻塞升级的告警发送失败只记日志、不让 Reaper 整轮变红
 （认领过期的 CLAIM_EXPIRED 评论与标签收敛已经完成，信息仍在任务 Issue 上；
 阻塞扫描下一轮会重新推导）。
+Reaper 失败告警的 `failure()` 步依赖检出：检出失败时退化为直接往收件箱追加
+一条最小告警（同 marker），下一轮 CLI 成功时会就地更新它。
 
 已知遗留：`lease-reaper.yml` 的无负责人任务告警（ownerless-alert）仍走单独的
 同名告警 Issue，未并入收件箱——后续可顺手迁移，不在本 Issue 范围内。

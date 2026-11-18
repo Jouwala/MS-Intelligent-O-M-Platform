@@ -340,7 +340,11 @@ def escalate_blocked_tasks(
                     f"（优先级 {priority or '未注明'}，阻塞于 {since_text}），跳过"
                 )
                 continue
-            at = current.strftime("%Y-%m-%dT%H:%M:%SZ")
+            at = (
+                blocked_since.strftime("%Y-%m-%dT%H:%M:%SZ")
+                if blocked_since is not None
+                else current.strftime("%Y-%m-%dT%H:%M:%SZ")
+            )
             since_text = (
                 blocked_since.strftime("%Y-%m-%dT%H:%M:%SZ")
                 if blocked_since is not None
