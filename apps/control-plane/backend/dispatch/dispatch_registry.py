@@ -40,6 +40,8 @@ SOURCE_AUTO_DISPATCH = "pr-merged"
 SOURCE_QA = "qa-trigger"
 #: 每小时 :17 的定时巡检（没有 PR 合入时的兜底分派）。
 SOURCE_CRON_SWEEP = "cron-sweep"
+#: Issue 事件触发（新 Issue 创建 / 依赖 Issue 关闭）：即时分派，不等巡检。
+SOURCE_ISSUE_EVENT = "issue-event"
 
 REF_ROOT = "dispatch"
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
