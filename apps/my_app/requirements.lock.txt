@@ -11,6 +11,12 @@
 #   缺 alembic 则无法迁移、缺 psycopg2-binary 则 MY_APP_DB_MODE=pg 直接失败、
 #   缺 playwright 则 site_outage / whatsapp / kpi_email_report 三条截图链路全断。
 #   版本取自当前实际可用环境（Python 3.12），8 个包均已实测 import 通过。
+# 2026-11-18（#121）：补入 paramiko==5.0.0 及其传递依赖 invoke / PyNaCl——
+#   requirements.txt 早已声明 paramiko，lock 缺失导致按 lock 新建的 venv
+#   缺包（SP 同步、sp_dashboard 起不来）。paramiko 版本与仓库
+#   docs/THIRD-PARTY-NOTICES.md 的许可核查记录一致（现网环境版本）；
+#   invoke / PyNaCl 版本取自 Python 3.12 环境实测 freeze，并已与 lock
+#   既有 bcrypt==5.0.0 / cryptography==49.0.0 共存验证 import 通过。
 
 alembic==1.19.0
 annotated-doc==0.0.4
@@ -41,6 +47,7 @@ httptools==0.8.0
 httpx==0.28.1
 idna==3.18
 iniconfig==2.3.0
+invoke==3.0.3
 isodate==0.7.2
 itsdangerous==2.2.0
 Jinja2==3.1.6
@@ -55,6 +62,7 @@ oauthlib==3.3.1
 openpyxl==3.1.5
 packaging==26.2
 pandas==3.0.3
+paramiko==5.0.0
 pillow==12.3.0
 playwright==1.61.0
 pluggy==1.6.0
@@ -66,6 +74,7 @@ pydantic_core==2.46.4
 pyee==13.0.1
 Pygments==2.20.0
 pymysql==1.2.0
+PyNaCl==1.6.2
 pyparsing==3.3.2
 pyspnego==0.12.1
 pytest==9.1.1
