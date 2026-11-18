@@ -142,9 +142,10 @@ jobs:
           ROUND=$((EXISTING + 1))
 
           # 原开发 Agent：认原 Issue 上的任意 agent:muse-N 标签
-          # （muse-2/3/4/5，与分派白名单一致）；取不到时默认派给 muse-2，
+          # （muse-2/3/4/5，与分派白名单一致；muse-1 是协调者不写业务
+          # 代码，排除在外，落到默认 muse-2）；取不到时默认派给 muse-2，
           # 禁止创建无 agent 标签的修复 Issue（P0-3）。
-          AGENT="$(echo "$LABELS" | grep -oE '^agent:muse-[0-9]+$' | head -n 1 | sed 's/^agent://' || true)"
+          AGENT="$(echo "$LABELS" | grep -oE '^agent:muse-[2-9][0-9]*$' | head -n 1 | sed 's/^agent://' || true)"
           DEFAULTED=""
           if [ -z "$AGENT" ]; then
             AGENT="muse-2"

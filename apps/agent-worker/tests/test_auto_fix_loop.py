@@ -88,13 +88,38 @@ def test_agent_assignment_rules(wf: str) -> None:
     """回派原 Issue 上的任意 agent:muse-N 标签（muse-2/3/4/5）；
     取不到时默认派给 muse-2（正文注明请 Muse 1 复核），禁止创建
     无 agent 标签的修复 Issue（P0-3）。"""
-    assert "grep -oE '^agent:muse-[0-9]+$'" in wf
+    assert "grep -oE '^agent:muse-[2-9][0-9]*$'" in wf
     assert 'AGENT="muse-2"' in wf  # 无 agent 标签时的默认负责人
     assert "默认指派" in wf
     assert "请 Muse 1 复核" in wf
     assert '\\"agent:$AGENT\\"' in wf  # 修复 Issue 的 agent 标签来自判定结果
     assert "未派给任何人" not in wf  # 不再有无负责人分支
     assert "待 Muse 1 指派" not in wf
+
+
+def _extract_agent(labels: str) -> str:
+    """与工作流一致的负责人提取管线：grep 抽 agent:muse-N 标签 → 取首个。"""
+    proc = subprocess.run(
+        ["grep", "-oE", r"^agent:muse-[2-9][0-9]*$"],
+        input=labels.encode("utf-8"),
+        capture_output=True,
+        check=False,
+    )
+    first = proc.stdout.decode("utf-8", errors="replace").splitlines()
+    if not first:
+        return ""
+    return first[0].removeprefix("agent:")
+
+
+def test_agent_extraction_excludes_muse_1() -> None:
+    """muse-1 是协调者不写业务代码：原 Issue 带 agent:muse-1 时不回派
+    给 muse-1，应落到默认 muse-2（否则修复 Issue 对分派不可见，P0-3 重现）。"""
+    assert _extract_agent("state:qa-failed\nagent:muse-1") == ""
+    assert _extract_agent("state:qa-failed\nagent:muse-4") == "muse-4"
+    assert _extract_agent("state:qa-failed\nagent:muse-2") == "muse-2"
+    assert _extract_agent("state:qa-failed\nagent:muse-5") == "muse-5"
+    assert _extract_agent("state:qa-failed") == ""
+    assert _extract_agent("state:qa-failed\nagent:muse-2-linux") == ""
 
 
 def test_fix_requested_message_fields(wf: str) -> None:
