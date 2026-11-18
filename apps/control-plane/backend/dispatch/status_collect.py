@@ -8,15 +8,35 @@
 from __future__ import annotations
 
 import re
+import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from statistics import median
 from typing import Any, Optional
 
-from .alert_inbox import parse_iso
-from .github_client import GitHubClient
-from .review_gate import parse_review_markers
-from scheduler import ref_api, ref_heartbeat
-from scheduler.api import DEFAULT_HEARTBEAT_TTL, DEFAULT_LEASE_TTL
+# 以脚本方式运行时（Actions 里的 `python apps/.../status_view.py`）sys.path[0]
+# 是 dispatch/，调度器包不在路径上；把 backend/ 放进去后统一按标准包导入。
+_BACKEND = Path(__file__).resolve().parents[1]
+if str(_BACKEND) not in sys.path:
+    sys.path.insert(0, str(_BACKEND))
+
+from scheduler import ref_api, ref_heartbeat  # noqa: E402
+from scheduler.api import DEFAULT_HEARTBEAT_TTL, DEFAULT_LEASE_TTL  # noqa: E402
+
+try:  # 作为包导入（pytest: dispatch.status_collect）
+    from .alert_inbox import parse_iso  # noqa: E402
+except ImportError:  # 作为脚本直接运行（__package__ 为空）
+    from alert_inbox import parse_iso  # type: ignore[no-redef]  # noqa: E402
+
+try:  # 作为包导入（pytest: dispatch.status_collect）
+    from .github_client import GitHubClient  # noqa: E402
+except ImportError:  # 作为脚本直接运行（__package__ 为空）
+    from github_client import GitHubClient  # type: ignore[no-redef]  # noqa: E402
+
+try:  # 作为包导入（pytest: dispatch.status_collect）
+    from .review_gate import parse_review_markers  # noqa: E402
+except ImportError:  # 作为脚本直接运行（__package__ 为空）
+    from review_gate import parse_review_markers  # type: ignore[no-redef]  # noqa: E402
 
 #: 任务 Issue 的 agent 标签。
 _AGENT_LABEL_RE = re.compile(r"^agent:muse-(\d+)$")
