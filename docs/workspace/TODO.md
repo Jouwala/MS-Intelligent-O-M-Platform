@@ -58,6 +58,20 @@
       `test_nur_exclude_semantics.py` 的「窗口不涉及名单」假设失效，属数据漂移，
       已记入 pytest 基线，**待用户决定是否重新校准用例窗口**。
 
+- [x] **eFlow TT/WO「异步导出未被上游登记」的退路只在 01，02 漏同步（2026-11-18 切后复核实测）。**
+      现象：切换后 `eflow_sync` 每轮 TT/WO 都轮询 8 次 → 空路径下载 HTTP 500，22:00 起连续失败；
+      而 11-16~11-18 21:01 在 01 上 58 次全成功。**根因不是账号**：凭据表 `eflow` 是
+      `dong_ms_tool`，其 secret 哈希与 01 完全一致；01 的 `eflow_data_mapper.py` 有
+      2026-11-13 加的「导出未登记 → base/list 直查」退路，02 缺这两段，且
+      `eflow_order_list.py` 整个文件没有搬过来。
+      已补：`backend/services/eflow/eflow_order_list.py`（import 改子包路径）+
+      mapper 的 TT/WO 两处 fallback；手动触发实测 success（193s，TT 384 / WO 478 走直查，
+      eflow_tt 42140 行落库）。导出任务名改用真实账号 `_export_username()`
+      （原来写死 `USERNAME` 默认值 admin，看起来像换了账户）。
+      核对账号时用管理员提供的 admin 凭据实测：能登录、能查列表，但其异步导出**同样不被
+      上游登记** —— 证明「账号变了」不成立（测试产生的会话缓存已删除，口令未落盘/未入库）。
+      **教训**：切前「内容一致」只看 git 提交不够，01 上后补/未提交的修复要逐文件比大小与关键串。
+
 - [ ] **eFlow 对账删除需在 `n` 组 worker 重启后才自动生效（2026-11-16 立）。**
       代码与文档已落地并通过回归（`backend/services/eflow_reconcile.py` + `sync_from_eflow_api.py::_reconcile_delete`，
       四道闸门见 `docs/manual/03-data-layer.md`「eFlow 工单表的语义」）；**一次性数据清理已完成并核对**：
@@ -81,7 +95,21 @@
 - [ ] **数据层裸连接治理（前置调研，非立即改造）。** 运行期已知存在绕过 `get_raw_connection` 的裸 `sqlite3.connect`（如 `ipran_chart_service.py:233`、`fw_kpi_services.py:488`），是**图表数据源**，改造会静默坏图。当前动作：**不再新增**裸连接，并把已有点位登记成清单。
 - [ ] **`eflow_tt` 双库归属固化。** 明确"同步只写 `app.db`、`eflow.sqlite3` 副本仅作只读快照"，避免后续有人读错库。结论已在 `PROJECT_DOCS.md` §2 Phase 0.5 闭环，待落到代码注释与手册。
 - [ ] **五个关键进程的巡检常态化。** 确认 worker 分组 + 双看门狗在异常退出后确实自愈（步骤见 `docs\manual\13-operations.md`）。
-- [ ] **`?page=cn_kpi` 冷缓存 504 治理（2026-11-16 立，独立老问题，与本轮 UI 修复无关）。**
+- [x] **`?page=cn_kpi` 冷缓存 504 治理（2026-11-16 立，独立老问题，与本轮 UI 修复无关）。**
+      **2026-11-18 已实现（stale-while-revalidate，未做「预聚合到本地 PG」那一步）：**
+      后端 `backend/services/cn/cn_kpi_service.py` 的 `get_overview()` 不再同步跑 18 个组件：
+      热值（<60s）直接返回；有旧值（内存或 `data/cn_kpi/<区间>.json` last-known-good）**立即**
+      返回旧值并带 `meta.stale/refreshing/data_at`，后台单飞线程刷新；连旧值都没有时立即返回
+      `meta.computing=True`（空 widgets）并后台刷新。任何请求都不再阻塞到 nginx 300s → 不再 504。
+      前端 `CnKpi.tsx` 对 `computing / stale+refreshing` 显示明确状态并 4s 轮询（最多 ~96s），
+      出数后自动收起；`check:i18n` 已加中英三条文案。
+      实测：冷缓存首请求 **0.55s** 返回 computing，18.3s 后出 18 个组件；TTL 过期后请求 **186ms**
+      返回 stale（18 组件，`data_at` 可见），后台刷新完成后自动转热；页面换未缓存区间时显示
+      「正在计算这页数据」，约 20s 后图表出现，console 无报错。
+      回归守卫 `apps/my_app/tests/test_cn_kpi_cache.py`（4 例：computing/旧值立即返回/
+      重启后从磁盘恢复/force 不阻塞）。
+      **仍未做**：把结果定时预聚合到本机 PG（原方案 ②）—— 现在的落盘 last-known-good 已能让
+      重启后第一屏有数，预聚合只是把「首次计算」也省掉，等页面使用频率证明有必要再上。
       **现象**：缓存冷时 `GET /api/cn-kpi/overview` 要跑 5 分钟以上，nginx `/api/` 块的 `proxy_read_timeout 300s`
       （`nginx-1.28.0\conf\nginx.conf` 的 `/api/` 段，编辑区 :405 / 副本生成后 :399）先到点 → 浏览器 504，
       `?page=cn_kpi` 只剩空壳；等后台算完、缓存转热后同一请求 0.02s 返回（用户实操复现，非偶发）。

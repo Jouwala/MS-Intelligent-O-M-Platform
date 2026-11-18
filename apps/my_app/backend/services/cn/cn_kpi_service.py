@@ -70,9 +70,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import threading
 import time
+from datetime import datetime
+from pathlib import Path
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -843,39 +846,73 @@ def _fetch_widget(w: Dict[str, Any], start: Optional[str] = None,
 
 
 # ----------------------------------------------------------------------
-# 缓存（按时间区间分行）
+# 缓存（按时间区间分行）—— stale-while-revalidate
+#
+# 2026-11-18 切生产后治理「冷缓存 504」（TODO P1）：
+#   旧行为：TTL 到期后下一个请求**同步**跑 18 个组件（6 并发、单条 60s、三级回退），
+#   冷时超过 nginx `/api/` 的 300s proxy_read_timeout → 浏览器 504，`?page=cn_kpi`
+#   只剩空壳；等后台算完再点一次才 0.02s 出数。
+#   新行为：
+#     · 热（< TTL）：直接返回，与原来完全一致；
+#     · 有旧值（内存或磁盘 last-known-good）：**立即**返回旧值，meta 带
+#       `stale=True / refreshing=True / data_at`，后台单飞线程刷新；
+#     · 连旧值都没有（首次部署/换区间）：立即返回 `meta.computing=True`（空 widgets）
+#       并后台刷新，前端显示「正在计算」，轮询到出数。
+#   刷新结果落盘 `data/cn_kpi/<区间>.json`，进程重启后第一屏也有旧值可用。
+#   这样任何请求都不会再阻塞到 nginx 超时，冷缓存不再是「空壳」而是明确状态。
 # ----------------------------------------------------------------------
+CACHE_TTL = int(os.environ.get("CN_KPI_CACHE_TTL", "60"))
+# 两次后台刷新之间的最小间隔：上游故障时避免「每个请求都起一个线程」的踩踏
+REFRESH_MIN_INTERVAL = int(os.environ.get("CN_KPI_REFRESH_MIN_INTERVAL", "30"))
+LAST_GOOD_DIR = Path(__file__).resolve().parents[3] / "data" / "cn_kpi"
+
 _cache_lock = threading.Lock()
-_cache: Dict[str, Any] = {}
+_cache: Dict[str, Dict[str, Any]] = {}
+_last_good: Dict[str, Dict[str, Any]] = {}
+_inflight: set[str] = set()
+_last_attempt: Dict[str, float] = {}
 
 
-def get_overview(
-    force: bool = False,
-    start: Optional[str] = None,
-    end: Optional[str] = None,
-) -> Dict[str, Any]:
-    """整页数据：18 个组件并发取数 + TTL 缓存（按时间区间分行）。
+def _key_slug(key: str) -> str:
+    return re.sub(r"[^0-9A-Za-z_-]+", "_", key).strip("_") or "all"
 
-    start / end：YYYY-MM-DD；留空表示近 31 天（与原版 FineBI 一致）。
-    返回 {meta:{db,host,count,failed,elapsed_ms,cached,start,end},
-          title, title_html, widgets:[...]}
-    """
-    # 先校验区间（非法直接抛错 → 路由转 400，不进入取数）
-    start_v = _validate_date(start, "start")
-    end_v = _validate_date(end, "end")
-    if start_v and end_v and start_v > end_v:
-        raise ValueError(f"开始日期不能晚于结束日期：{start_v} > {end_v}")
 
-    key = f"{start_v or ''}~{end_v or ''}"
-    now = time.time()
-    if not force:
-        with _cache_lock:
-            hit = _cache.get(key)
-            if hit is not None and (now - hit["at"]) < CACHE_TTL:
-                data = hit["data"]
-                data["meta"] = {**data["meta"], "cached": True}
-                return data
+def _last_good_path(key: str) -> Path:
+    return LAST_GOOD_DIR / f"{_key_slug(key)}.json"
 
+
+def _load_last_good(key: str) -> Optional[Dict[str, Any]]:
+    """读磁盘旧值（每个区间只读一次，之后走内存）。"""
+    if key in _last_good:
+        return _last_good[key]
+    p = _last_good_path(key)
+    if not p.is_file():
+        return None
+    try:
+        entry = json.loads(p.read_text(encoding="utf-8"))
+        if not isinstance(entry, dict) or "data" not in entry or "at" not in entry:
+            return None
+    except Exception as e:  # noqa: BLE001
+        logger.warning("读取 CN KPI 旧缓存失败（%s）：%s", p, e)
+        return None
+    _last_good[key] = entry
+    return entry
+
+
+def _save_last_good(key: str, entry: Dict[str, Any]) -> None:
+    """原子落盘；失败只记日志（缓存写不进去不该影响出数）。"""
+    try:
+        LAST_GOOD_DIR.mkdir(parents=True, exist_ok=True)
+        p = _last_good_path(key)
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(entry, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, p)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("写 CN KPI 旧缓存失败（%s）：%s", key, e)
+
+
+def _compute(key: str, start_v: Optional[str], end_v: Optional[str]) -> Dict[str, Any]:
+    """真正取数（18 个组件并发）。只在后台线程里跑，不直接服务请求。"""
     t0 = time.time()
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
         widgets = list(pool.map(lambda w: _fetch_widget(w, start_v, end_v), WIDGETS))
@@ -889,6 +926,8 @@ def get_overview(
             "failed": failed,
             "elapsed_ms": round((time.time() - t0) * 1000, 1),
             "cached": False,
+            "stale": False,
+            "refreshing": False,
             "start": start_v,
             "end": end_v,
         },
@@ -896,9 +935,101 @@ def get_overview(
         "title_html": TITLE_HTML,
         "widgets": widgets,
     }
+    entry = {"at": time.time(), "data": data}
     with _cache_lock:
-        _cache[key] = {"at": time.time(), "data": data}
+        _cache[key] = entry
+        _last_good[key] = entry
+    _save_last_good(key, entry)
     return data
+
+
+def _refresh_async(key: str, start_v: Optional[str], end_v: Optional[str]) -> bool:
+    """起一个后台刷新线程（同一区间单飞）。返回是否真的起了。"""
+    now = time.time()
+    with _cache_lock:
+        if key in _inflight:
+            return False
+        if now - _last_attempt.get(key, 0.0) < REFRESH_MIN_INTERVAL:
+            return False
+        _inflight.add(key)
+        _last_attempt[key] = now
+
+    def _run() -> None:
+        try:
+            _compute(key, start_v, end_v)
+            logger.info("CN KPI 后台刷新完成 key=%s", key)
+        except Exception:  # noqa: BLE001
+            logger.exception("CN KPI 后台刷新失败 key=%s", key)
+        finally:
+            with _cache_lock:
+                _inflight.discard(key)
+
+    threading.Thread(target=_run, name=f"cn-kpi-refresh-{_key_slug(key)}", daemon=True).start()
+    return True
+
+
+def _with_meta(data: Dict[str, Any], **extra: Any) -> Dict[str, Any]:
+    """浅拷贝 meta 后返回；widgets 不复制（只读）。"""
+    out = dict(data)
+    out["meta"] = {**data.get("meta", {}), **extra}
+    return out
+
+
+def get_overview(
+    force: bool = False,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+) -> Dict[str, Any]:
+    """整页数据：立即返回（热值 / 旧值 / computing），刷新在后台做。
+
+    start / end：YYYY-MM-DD；留空表示近 31 天（与原版 FineBI 一致）。
+    返回 {meta:{db,host,count,failed,elapsed_ms,cached,stale,refreshing,computing?,data_at?,start,end},
+          title, title_html, widgets:[...]}
+    """
+    # 先校验区间（非法直接抛错 → 路由转 400，不进入取数）
+    start_v = _validate_date(start, "start")
+    end_v = _validate_date(end, "end")
+    if start_v and end_v and start_v > end_v:
+        raise ValueError(f"开始日期不能晚于结束日期：{start_v} > {end_v}")
+
+    key = f"{start_v or ''}~{end_v or ''}"
+    now = time.time()
+    with _cache_lock:
+        hit = _cache.get(key)
+
+    if not force and hit is not None and (now - hit["at"]) < CACHE_TTL:
+        return _with_meta(hit["data"], cached=True)
+
+    entry = hit or _load_last_good(key)
+    if entry is not None:
+        # 有旧值：立刻给页面，后台刷新（冷缓存不再阻塞到 504）
+        started = _refresh_async(key, start_v, end_v)
+        with _cache_lock:
+            busy = key in _inflight
+        data_at = datetime.fromtimestamp(entry["at"]).strftime("%Y-%m-%d %H:%M:%S")
+        return _with_meta(entry["data"], cached=True, stale=True,
+                          refreshing=bool(started or busy), computing=False, data_at=data_at)
+
+    # 连旧值都没有：告诉前端「正在计算」，别给空壳
+    _refresh_async(key, start_v, end_v)
+    return {
+        "meta": {
+            "db": REMOTE_DB,
+            "host": get_api_base_url(),
+            "count": 0,
+            "failed": 0,
+            "elapsed_ms": 0.0,
+            "cached": False,
+            "stale": False,
+            "refreshing": True,
+            "computing": True,
+            "start": start_v,
+            "end": end_v,
+        },
+        "title": "CCN_Daily_KPI",
+        "title_html": TITLE_HTML,
+        "widgets": [],
+    }
 
 
 def health() -> Dict[str, Any]:

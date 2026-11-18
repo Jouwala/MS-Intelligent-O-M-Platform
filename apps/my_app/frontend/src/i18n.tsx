@@ -6090,6 +6090,10 @@ const translations: Record<Locale, Record<string, string>> = {
     'cnkpi.noData': '暂无数据',
     'cnkpi.loadFail': '看板数据加载失败',
     'cnkpi.hint': '请确认远端只读 SQL API 可达（系统设置 → 远程主机），或稍后重试。',
+    // 冷缓存治理（2026-11-18）：后端改为立即返回旧值/computing，页面不再 504 空壳
+    'cnkpi.computing': '正在计算这页数据…',
+    'cnkpi.computingHint': '冷缓存首次打开需要取 18 个组件，页面会自动刷新（通常几十秒），无需手动重试。',
+    'cnkpi.staleHint': '当前显示的是 {{at}} 算好的数据，后台正在刷新，完成后自动更新。',
     'cnkpi.footer': '数据源：{{db}}（经远端只读 API {{host}}），统计口径与 FineBI 原版一致。',
     'cnkpi.range': '时间区间',
     'cnkpi.start': '开始日期',
@@ -12997,6 +13001,10 @@ const translations: Record<Locale, Record<string, string>> = {
     'cnkpi.noData': 'No data',
     'cnkpi.loadFail': 'Failed to load dashboard data',
     'cnkpi.hint': 'Check that the remote read-only SQL API is reachable (Settings → Remote Host), or retry later.',
+    // Cold-cache handling (2026-11-18): backend returns stale/computing immediately
+    'cnkpi.computing': 'Computing this dashboard…',
+    'cnkpi.computingHint': 'The first open with a cold cache fetches 18 widgets; the page refreshes automatically (usually tens of seconds), no manual retry needed.',
+    'cnkpi.staleHint': 'Showing data computed at {{at}}; refreshing in the background and will update automatically.',
     'cnkpi.footer': 'Source: {{db}} (via remote read-only API {{host}}); metrics match the original FineBI dashboard.',
     'cnkpi.range': 'Time range',
     'cnkpi.start': 'Start date',

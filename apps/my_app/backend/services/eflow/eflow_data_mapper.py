@@ -40,6 +40,7 @@ from backend.dialect_helpers import list_table_names
 
 
 from backend.config.remote_host import get_ftp_host, get_ftp_port
+
 from backend.services.eflow.eflow_api_client import (  # Phase 4 拆分：共享常量/基础函数
     APP_DB_PATH,
     CR_API_PATH,
@@ -72,6 +73,21 @@ from backend.services.eflow.eflow_api_client import (  # Phase 4 拆分：共享
     ensure_login,
     logger,
 )
+
+
+def _export_username() -> str:
+    """导出任务名里的账号：用**真实登录账号**，不用模块默认值。
+
+    2026-11-18 复核：`USERNAME` 是 `EFLOW_USER` 的默认值 "admin"，而生产凭据是
+    `dong_ms_tool`。于是上游导出任务名写成 `eflow-tt-export-admin-*`，看起来像换了
+    账号（用户据此问过「是不是账户变了」）。实际登录账号以凭据为准，故这里读运行时
+    凭据；读不到才回退默认值。名字只影响上游任务列表，不影响数据。
+    """
+    try:
+        from backend.services.eflow.eflow_api_client import _runtime_credentials
+        return _runtime_credentials()[0] or USERNAME
+    except Exception:  # noqa: BLE001 - 名字取不到不该影响取数
+        return USERNAME
 
 
 TT_FIELDS = "color,woId,procId,opName,pendingStatus,displayName,woNum,woInfo,status,ttSource,ticketType,projectName,templateName,creator,creatorContactInfo,ticketSeverity,createTime,alarmCategory,alarmSubcategory,alarmSeverity,alarmType,alarmId,alarmCode,subAlarmName,subAlarmNeName,subAlarmNeNaIp,appendingAlarmName,appendingAlarmNeName,appendingAlarmNeIp,netWorkType,neName,neId,neIP,impactedServiceOrNo,impactedServiceWireless,siteOutageOrNo,reasonType,slaTotalDuration,slaStatus,remainingTime,targetFinishTime,groupSlaTime,groupSlaStatus,groupSlaRemainsTime,regionLevel1Name,regionLevel2Name,assetName,siteId,assetType,siteClass,lastModifiedTime,candidateOperator,vendor,alarmOccurTime,alarmClearTime,faultDurationTime"
@@ -262,7 +278,7 @@ def _fetch_tt_pipeline(start_ms, end_ms, tmp_dir):
     _set_export_columns(TT_USERHABITS_PATH, TT_REFERER, export_config, "TT")
 
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    file_name = f"eflow-tt-export-{USERNAME}-{timestamp}"
+    file_name = f"eflow-tt-export-{_export_username()}-{timestamp}"
     field_details = {col: {"value": col, "name": f"field.{col}", "checked": True} for col in TT_EXPORT_COLUMNS}
     payload = {
         "fileName": file_name, "type": "xlsx", "createTimeRange": "", "exportType": "0",
@@ -279,6 +295,17 @@ def _fetch_tt_pipeline(start_ms, end_ms, tmp_dir):
     # List path for TT
     tt_list_path = "/api/eflow-ticket/v1/export/list/eflow-tt"
     ftp_file_path, _ = _wait_export_ready(tt_list_path, TT_REFERER, file_name, "TT")
+    if not ftp_file_path:
+        # 2026-11-13：导出记录停在 255 条后，创建接口仍回 200 空体，但文件不再入库，
+        # 接着用空路径下载必 500。列表接口同一过滤条件可用，改走直查。
+        # ⚠ 2026-11-18 切生产事故：这段修复只在 01 上，02 漏同步 → 切换后 TT/WO 每轮
+        # 都卡在「轮询 8 次 → 空路径下载 500」，eflow_sync 连续失败。已随本次复核补齐。
+        logger.warning("TT 异步导出未被上游登记（轮询结束仍无文件），改走 base/list 直查")
+        try:
+            from backend.services.eflow.eflow_order_list import fetch_tt_via_list
+        except ImportError:
+            from services.eflow_order_list import fetch_tt_via_list
+        return fetch_tt_via_list(start_ms, end_ms)
     zip_path = _download_export_zip(TT_DOWNLOAD_PATH, TT_REFERER, file_name, ftp_file_path, "eflow-tt", "TT", tmp_dir)
     rows = _read_export_zip(zip_path, "TT")
     return ("eFlow TT", rows)
@@ -453,7 +480,7 @@ def _fetch_wo_pipeline(start_ms, end_ms, tmp_dir):
     _set_export_columns(WO_USERHABITS_PATH, WO_REFERER, export_config, "WO")
 
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    file_name = f"eflow-wo-export-{USERNAME}-{timestamp}"
+    file_name = f"eflow-wo-export-{_export_username()}-{timestamp}"
     field_details = {}
     for col in WO_EXPORT_COLUMNS:
         meta = {"value": col, "name": WO_FIELD_DETAILS_NAME_OVERRIDES.get(col, f"field.{col}"), "checked": True}
@@ -475,6 +502,14 @@ def _fetch_wo_pipeline(start_ms, end_ms, tmp_dir):
 
     wo_list_path = "/api/eflow-wo/v1/export/list/eflow-wo"
     ftp_file_path, _ = _wait_export_ready(wo_list_path, WO_REFERER, file_name, "WO")
+    if not ftp_file_path:
+        # 同 TT：01 在 2026-11-13 已加这条退路，02 漏同步（见 _fetch_tt_pipeline 注释）。
+        logger.warning("WO 异步导出未被上游登记（轮询结束仍无文件），改走 base/list 直查")
+        try:
+            from backend.services.eflow.eflow_order_list import fetch_wo_via_list
+        except ImportError:
+            from services.eflow_order_list import fetch_wo_via_list
+        return fetch_wo_via_list(start_ms, end_ms)
     zip_path = _download_export_zip(WO_DOWNLOAD_PATH, WO_REFERER, file_name, ftp_file_path, "eflow-wo", "WO", tmp_dir)
     rows = _read_export_zip(zip_path, "WO")
     return ("eFlow WO", rows)
@@ -492,7 +527,7 @@ def _fetch_cr_pipeline(start_ms, end_ms, tmp_dir):
     _set_export_columns(CR_USERHABITS_PATH, CR_REFERER, export_config, "CR")
 
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    file_name = f"eflow-cr-export-{USERNAME}-{timestamp}"
+    file_name = f"eflow-cr-export-{_export_username()}-{timestamp}"
     field_details = {}
     for col in CR_EXPORT_COLUMNS:
         meta = {"value": col, "name": f"field.{col}", "checked": True}
@@ -735,7 +770,7 @@ def _fetch_pm_pipeline(start_ms, end_ms, tmp_dir):
     _set_export_columns(PM_USERHABITS_PATH, PM_REFERER, export_config, "PM")
 
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    file_name = f"eflow-pm-task-export-{USERNAME}-{timestamp}"
+    file_name = f"eflow-pm-task-export-{_export_username()}-{timestamp}"
     field_details = {}
     for col in PM_EXPORT_COLUMNS:
         meta = {"value": col, "name": f"field.{col}", "checked": True}

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, Button, Card, Checkbox, Col, DatePicker, Empty, Row, Space, Spin, Statistic, Tag, Tooltip, Typography } from 'antd'
 import { DownloadOutlined, InfoCircleOutlined, ReloadOutlined } from '@ant-design/icons'
 import dayjs, { Dayjs } from 'dayjs'
@@ -100,6 +100,14 @@ interface OverviewResp {
     cached: boolean
     start: string | null
     end: string | null
+    /** 旧值（stale-while-revalidate）：当前显示的是上次算好的，后台正在刷新 */
+    stale?: boolean
+    /** 后台是否正在刷新（true 时前端轮询） */
+    refreshing?: boolean
+    /** 连旧值都没有：后端已开始算，前端显示「正在计算」并轮询 */
+    computing?: boolean
+    /** 旧值的生成时间（YYYY-MM-DD HH:MM:SS） */
+    data_at?: string
   }
   title: string
   title_html: string
@@ -383,14 +391,26 @@ export default function CnKpi() {
   const [data, setData] = useState<OverviewResp | null>(null)
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState('')
+  // 冷缓存治理（2026-11-18）：后端改成「立即返回旧值 / computing，后台刷新」，
+  // 页面据此显示明确状态并轮询，不再出现 504 后只剩空壳。
+  const [computing, setComputing] = useState(false)
+  const [staleAt, setStaleAt] = useState('')
+  const pollRef = useRef<number | null>(null)
+  const stopPoll = useCallback(() => {
+    if (pollRef.current !== null) {
+      window.clearTimeout(pollRef.current)
+      pollRef.current = null
+    }
+  }, [])
   // 默认近 31 天（与原版 FineBI 口径一致）；null = 未自定义，交给后端默认
   const [range, setRange] = useState<[Dayjs, Dayjs] | null>(null)
   // 「仅显示两源都有数据的日期」：默认开 —— 用户 2026-11-18 的要求。
   // 只影响分源组件（c1/c4）的横轴范围，不改任何数值；取消勾选可看完整历史。
   const [bothOnly, setBothOnly] = useState(true)
 
-  const load = useCallback(async (force = false, r: [Dayjs, Dayjs] | null = range) => {
-    setLoading(true)
+  const load = useCallback(async (force = false, r: [Dayjs, Dayjs] | null = range, attempt = 0) => {
+    stopPoll()
+    if (attempt === 0) setLoading(true)
     setErr('')
     try {
       const res = await getCnKpiOverview({
@@ -398,16 +418,28 @@ export default function CnKpi() {
         end: r?.[1]?.format('YYYY-MM-DD'),
         force,
       })
-      setData(res.data)
+      const payload = res.data as OverviewResp
+      setData(payload)
+      setComputing(Boolean(payload.meta?.computing))
+      setStaleAt(payload.meta?.stale ? (payload.meta.data_at || '') : '')
+      // computing 或「旧值 + 后台刷新中」：4s 后自动再来一次，最多 ~96s
+      const needPoll = Boolean(payload.meta?.computing || (payload.meta?.stale && payload.meta?.refreshing))
+      if (needPoll && attempt < 24) {
+        pollRef.current = window.setTimeout(() => { void load(false, r, attempt + 1) }, 4000)
+      }
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e)
       setErr(msg)
+      setComputing(false)
     } finally {
-      setLoading(false)
+      if (attempt === 0) setLoading(false)
     }
-  }, [range])
+  }, [range, stopPoll])
 
-  useEffect(() => { load() }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    load()
+    return () => stopPoll()
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   // 组件布局：KPI 单值置顶，其余按 2 列栅格（宽屏 3 列）
   const widgets = data?.widgets ?? []
@@ -614,6 +646,26 @@ export default function CnKpi() {
         />
       )}
 
+      {computing && (
+        <Alert
+          type="info"
+          showIcon
+          icon={<Spin size="small" />}
+          message={t('cnkpi.computing')}
+          description={t('cnkpi.computingHint')}
+          style={{ marginBottom: 12 }}
+        />
+      )}
+
+      {!computing && staleAt && (
+        <Alert
+          type="info"
+          showIcon
+          message={t('cnkpi.staleHint', { at: staleAt })}
+          style={{ marginBottom: 12 }}
+        />
+      )}
+
       {/* 降级告警条：把「哪些图不是日粒度/换了数据源」一次性说清，
           避免用户把月粒度的点误读成当日值（这是本页最容易踩的坑）。 */}
       {degradedWidgets.length > 0 && (
@@ -672,7 +724,9 @@ export default function CnKpi() {
         />
       )}
 
-      {loading && !data ? (
+      {computing ? (
+        <div style={{ textAlign: 'center', padding: 60 }}><Spin size="large" /></div>
+      ) : loading && !data ? (
         <div style={{ textAlign: 'center', padding: 60 }}><Spin size="large" /></div>
       ) : (
         <Row gutter={[12, 12]}>
