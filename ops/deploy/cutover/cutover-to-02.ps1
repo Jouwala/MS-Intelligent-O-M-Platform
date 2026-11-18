@@ -137,7 +137,17 @@ if (-not $SnapshotDir -or -not (Test-Path -LiteralPath (Join-Path $SnapshotDir '
     Write-Warn2 '没有可用快照（回退脚本要靠它恢复 02 的 .env）。请先跑 snapshot-prod-state.ps1'
     $pre = $false
 }
-Add-Result '预检' $pre $(if ($pre) { '01 在跑、02 空闲、启动器/配置/证书/快照齐全' } else { '见上面的 WARN/FAIL' })
+# 必须是管理员：Portal_EnsureRunning 这类任务非管理员改不动（2026-11-18 实测 Access is denied）
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {
+    if ($Apply) {
+        Write-Bad '需要**管理员** PowerShell：Portal_EnsureRunning 的任务状态改不动（实测 Access is denied）'
+        $pre = $false
+    } else {
+        Write-Warn2 '当前不是管理员：干跑没问题，但真跑（-Apply）必须在管理员 PowerShell 里执行'
+    }
+}
+Add-Result '预检' $pre $(if ($pre) { '01 在跑、02 空闲、启动器/配置/证书/快照齐全' + $(if ($isAdmin) { '、管理员权限' } else { '' }) } else { '见上面的 WARN/FAIL' })
 if (-not $pre) { Write-Host '预检未通过，已停止。' -ForegroundColor Red; exit 1 }
 
 # 记下任务原状态
@@ -167,14 +177,26 @@ if (-not $Apply) {
 # ---------- 1. 停 01 自愈 ----------
 Write-Step '1/9 停 01 自愈任务'
 $fail = @()
+$disabled = @()
 foreach ($n in $TaskNames) {
     try {
         $t = Get-ScheduledTask -TaskName $n -ErrorAction Stop
-        if ($t.State -ne 'Disabled') { Disable-ScheduledTask -TaskName $n -ErrorAction Stop | Out-Null }
+        if ($t.State -ne 'Disabled') {
+            Disable-ScheduledTask -TaskName $n -ErrorAction Stop | Out-Null
+            $disabled += $n
+        }
     } catch { $fail += ("{0}({1})" -f $n, $_.Exception.Message) }
 }
-Add-Result '停 01 自愈' ($fail.Count -eq 0) $(if ($fail.Count -eq 0) { '5 个任务已禁用' } else { '失败：' + ($fail -join '; ') })
-if ($fail.Count -gt 0) { Write-Bad '自愈没停干净，继续下去会被 5 分钟任务把 01 拉回来。已中止。'; exit 1 }
+if ($fail.Count -gt 0) {
+    # 半途失败：把已经禁用的恢复回去，别让机器停在「自愈被关掉」的状态
+    foreach ($n in $disabled) {
+        try { Enable-ScheduledTask -TaskName $n -ErrorAction Stop | Out-Null; Write-Warn2 "已回滚：重新启用 $n" } catch { Write-Bad "回滚失败，请手工启用 $n" }
+    }
+    Add-Result '停 01 自愈' $false ('失败：' + ($fail -join '; ') + '（已把本次禁用的任务恢复）')
+    Write-Bad '自愈没停干净，继续下去会被 5 分钟任务把 01 拉回来。已中止。'
+    exit 1
+}
+Add-Result '停 01 自愈' $true ('已禁用：' + ($disabled -join ', '))
 
 # ---------- 2. 停 01 my_app ----------
 Write-Step '2/9 停 01 my_app'
@@ -299,14 +321,15 @@ $exe9267 = Get-PortExe 9267
 Add-Result '9267 归属 02' ($exe9267 -ne '' -and (Test-HttpOk 'http://127.0.0.1:9267/uniplam/')) '门户可达（进程路径见 manifest）'
 
 $manifest = [pscustomobject]@{
-    cutoverAt   = (Get-Date).ToString('yyyy-MM-ddTHH:mm:ss')
-    root01      = $Root01
-    root02      = $Root02
-    portal01    = $Portal01
-    snapshotDir = $SnapshotDir
-    backupEnv   = $bakEnv
-    tasksBefore = $taskBefore
-    results     = $script:Results
+    cutoverAt      = (Get-Date).ToString('yyyy-MM-ddTHH:mm:ss')
+    root01         = $Root01
+    root02         = $Root02
+    portal01       = $Portal01
+    snapshotDir    = $SnapshotDir
+    backupEnv      = $bakEnv
+    tasksDisabled  = $disabled
+    tasksBefore    = $taskBefore
+    results        = $script:Results
 }
 if ($SnapshotDir) {
     $manifestPath = Join-Path $SnapshotDir 'cutover-manifest.json'

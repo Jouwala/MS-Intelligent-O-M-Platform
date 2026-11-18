@@ -162,6 +162,10 @@ if (-not $Force) {
 
 Write-Host ''
 Write-Host ('模式：{0}' -f $(if ($DryRun) { '干跑（不改任何东西）' } else { '实跑（会停 02、恢复 01）' })) -ForegroundColor Yellow
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {
+    Write-Warn2 '当前不是管理员：停 02 没问题，但「重新启用/触发 01 的守护任务」会被拒绝（Access is denied）。回退请在管理员窗口跑。'
+}
 Write-Host ("02：{0}" -f $Root02) -ForegroundColor DarkGray
 Write-Host ("01：{0}" -f $Root01) -ForegroundColor DarkGray
 
