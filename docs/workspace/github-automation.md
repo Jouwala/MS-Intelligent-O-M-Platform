@@ -113,6 +113,36 @@ Reaper 失败告警的 `failure()` 步依赖检出：检出失败时退化为直
 已知遗留：`lease-reaper.yml` 的无负责人任务告警（ownerless-alert）仍走单独的
 同名告警 Issue，未并入收件箱——后续可顺手迁移，不在本 Issue 范围内。
 
+### 状态视图（2026-11-18，#142）
+
+统一的多 Muse 状态视图：固定状态 Issue（标题 `[状态视图] Muse 1`，
+首次使用时由 `status_view.py` 自动创建），由 `status-view.yml` 机器生成
+正文并就地 PATCH 更新。实现：`apps/control-plane/backend/dispatch/status_view.py`
+（标准库 only）+ `github_client.py` 新增的 `update_issue` / `list_pulls(state)` /
+`list_issues(state, labels)`。
+
+载体选固定 Issue 而不用 `docs/workspace/agent-status.md` 文件：往 main
+直接提交文件违反“完工走 PR、不直接推 main”；固定 Issue 就地 PATCH，与
+告警收件箱同一模式，单页常驻、无 PR 噪音。
+
+| 内容 | 口径（数据来源） |
+| --- | --- |
+| 在线 Muse | 心跳 refs（90 秒 TTL）+ 租约 refs（10 分钟 TTL），`derive_worker_state` 推导七态，与 `list_workers` 同源；无心跳 beat 的 Worker 不列出 |
+| 任务总览 | 带 `agent:muse-*` 标签的 Issue；等待 = 创建→认领，执行 = 认领→关闭（未认领/执行中的算到现在），认领时间取时间线 `state:claimed` 打标事件 |
+| QA 失败率 | 曾贴 `state:qa-failed` 的任务数 / 曾认领过的任务数；分母为 0 时写 `—`，不是 0% |
+| 审核退回率 | open PR + 近 30 天内合入的 PR，最新审核结论为 changes-requested/blocked 的占比；无审核标记的 PR 不计入分母 |
+| 自动重试次数 | 已取评论中 `auto-fix` 轮次标记的不同（任务，轮次）对数 |
+| 自动合并数 / 人工合入数 | merged_by 是否为 github-actions[bot] |
+| 每任务行 | 负责人（agent 标签）、状态、审核（关联 PR 的最新 review-result 标记，Closes #N / task: #N / 分支名关联）、QA（关联 PR 的最新 smoke-result 标记）、故障步、等待/执行/恢复用时 |
+
+触发（事件驱动，不定时轮询 PR 状态）：`pull_request` opened/closed、
+`issues` opened/closed/labeled/unlabeled、`issue_comment` created
+（认领与审核/冒烟标记都是评论；labeled 事件可能被 GITHUB_TOKEN 抑制时
+评论事件兜底）、`workflow_dispatch`（手动刷新；auto-merge 合入后显式
+dispatch，GITHUB_TOKEN 合并不会触发 pull_request closed 事件）。
+正文完全相同时跳过 PATCH。只读 + 更新本 Issue，不改代码、不改标签、
+不重跑、不合并。
+
 ## 三、几个容易误解的口径
 
 1. **「自动 Commit」指什么**：PR 至少要领先 base 一个提交才能创建，所以
