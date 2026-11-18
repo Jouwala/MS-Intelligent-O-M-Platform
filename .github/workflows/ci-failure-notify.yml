@@ -4,6 +4,8 @@
 #
 # 通知内容：失败的工作流与 job 名、运行链接、head SHA、builder 是谁
 # （按 PR / Issue 上的 agent: 标签判定，取不到时写 PR 作者账号）。
+# 同时同步一份到 Muse 1 告警收件箱（#143）：按 PR 聚合去重，同一 PR 多次
+# 失败只更新收件箱里的一条评论，不另开 Issue、不刷屏。
 #
 # 安全阀：
 #   - 只通知、不改代码、不改标签、不重跑——修复由开发 Agent 按协议走
@@ -32,6 +34,9 @@ jobs:
     if: github.event.workflow_run.conclusion == 'failure' || github.event.workflow_run.conclusion == 'timed_out'
     runs-on: ubuntu-latest
     steps:
+      - name: 检出仓库（取告警收件箱 CLI）
+        uses: actions/checkout@v4
+
       - name: 定位 PR 并通知 builder
         env:
           GH_TOKEN: ${{ github.token }}
@@ -117,5 +122,12 @@ jobs:
                 echo "已通知 Issue #$ISSUE_NUMBER"
               fi
             fi
+
+            # 同步一份到 Muse 1 告警收件箱（#143）：按 PR 聚合去重，同一 PR
+            # 多次失败只更新收件箱里的一条评论，不另开 Issue、不刷屏。
+            python apps/control-plane/backend/dispatch/alert_inbox.py ci-failure \
+              --pr "$PR" --run-id "$RUN_ID" --run-url "$RUN_URL" \
+              --jobs "$FAILED_JOBS" --head-sha "$HEAD_SHA" \
+              ${ISSUE_NUMBER:+--issue "$ISSUE_NUMBER"}
           done
           echo "通知完成。"

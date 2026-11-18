@@ -9,14 +9,17 @@ ADR-7 §零 要求「Reaper 抢过期租约也必须用 ref-CAS」：过期判�
 3. 可选 `--fix-labels`：租约已过期且无完成审计标记时，把残留 `state:claimed` 收敛成
    `state:todo`（展示层对账，失败只告警，不影响权威互斥）；
 4. 可选 `--claim-expiry`：认领后 4 小时无进展的任务发 `CLAIM_EXPIRED` 评论并把标签
-   收敛回 `state:todo`（`claim_expiry.py`，lease-reaper workflow 每 5 分钟跑一次）；
-5. 幂等、可重复执行；失败显式：缺 `REPO`/`GH_TOKEN`、ref_reap 未就绪、refs API 报错
+   收敛回 `state:todo`（`claim_expiry.py`，lease-reaper workflow 每 5 分钟跑一次），
+   同时往 Muse 1 告警收件箱发一条 `no-progress` 告警（`alert_inbox.py`，#143）；
+5. 可选 `--alert-blocked`：扫 `state:blocked` 的 open Issue，按优先级/阻塞时长升级
+   到告警收件箱（高优先级立即，普通满 30 分钟；`alert_inbox.py`，#143）；
+6. 幂等、可重复执行；失败显式：缺 `REPO`/`GH_TOKEN`、ref_reap 未就绪、refs API 报错
    → stderr 打印原因 + 退出码非 0。
 
 用法：
 ```bash
 REPO=owner/name GH_TOKEN=... python apps/control-plane/backend/dispatch/lease_reaper.py
-# 可选：--dry-run / --fix-labels / --claim-expiry / --ttl-seconds N / --reaper-instance <hex>
+# 可选：--dry-run / --fix-labels / --claim-expiry / --alert-blocked / --ttl-seconds N / --reaper-instance <hex>
 ```
 """
 
@@ -27,7 +30,7 @@ import os
 import re
 import sys
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -45,6 +48,19 @@ from dispatch.claim_expiry import (  # noqa: E402
     ENV_CLAIM_TTL_HOURS,
     expire_stale_claims,
 )
+
+try:  # 作为包导入（pytest: dispatch.lease_reaper）
+    from .alert_inbox import (  # noqa: E402
+        escalate_blocked_tasks,
+        no_progress_alert,
+        post_alert,
+    )
+except ImportError:  # 作为脚本直接运行（__package__ 为空）
+    from alert_inbox import (  # type: ignore[no-redef]  # noqa: E402
+        escalate_blocked_tasks,
+        no_progress_alert,
+        post_alert,
+    )
 
 try:  # 作为包导入（pytest: dispatch.lease_reaper）
     from .github_client import UrllibGitHubClient
@@ -381,6 +397,11 @@ def main(
         help="认领超时过期：state:claimed 超过租约无进展 → 发 CLAIM_EXPIRED、标签回 state:todo",
     )
     parser.add_argument(
+        "--alert-blocked",
+        action="store_true",
+        help="阻塞升级：扫 state:blocked，按优先级/时长发告警到 Muse 1 收件箱（#143）",
+    )
+    parser.add_argument(
         "--claim-ttl-hours",
         type=float,
         default=None,
@@ -451,9 +472,37 @@ def main(
         if args.claim_expiry:
             claim_ttl = _claim_ttl(args.claim_ttl_hours, values)
             client = github_client or _build_client(repo, token, api_base)
-            expire_stale_claims(
+            result = expire_stale_claims(
                 client, claim_ttl=claim_ttl, dry_run=args.dry_run, log=log
             )
+            # 长期无进展告警（#143）：本轮被过期的任务发一条到 Muse 1 收件箱。
+            # 告警是通知，不是回收本身：发送失败只记日志、不让整轮变红（认领过期
+            # 的 CLAIM_EXPIRED 评论与标签收敛已经完成，信息仍在任务 Issue 上）。
+            if not args.dry_run:
+                ttl_hours = int(claim_ttl.total_seconds() // 3600)
+                for item in result.get("expired_claims") or ():
+                    try:
+                        post_alert(
+                            client,
+                            repo,
+                            no_progress_alert(
+                                issue_number=int(item["number"]),
+                                claimed_at=str(item["claimed_at"]),
+                                ttl_hours=ttl_hours,
+                                at=datetime.now(timezone.utc).strftime(
+                                    "%Y-%m-%dT%H:%M:%SZ"
+                                ),
+                            ),
+                        )
+                        log(f"[alert-inbox] #{item['number']} 长期无进展告警已发")
+                    except Exception as exc:  # noqa: BLE001 - 见上：只记日志
+                        log(
+                            f"[alert-inbox] #{item['number']} "
+                            f"长期无进展告警发送失败：{exc!r}"
+                        )
+        if args.alert_blocked:
+            client = github_client or _build_client(repo, token, api_base)
+            escalate_blocked_tasks(client, repo, log=log)
     except (ReaperError, ValueError) as exc:
         print(f"[reaper] 配置错误：{exc}", file=sys.stderr)
         return 2
