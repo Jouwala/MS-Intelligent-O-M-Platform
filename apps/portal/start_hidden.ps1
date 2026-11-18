@@ -1,4 +1,4 @@
-# start_hidden.ps1 - Hidden startup of the liberia-noc_soc portal + its companion
+﻿# start_hidden.ps1 - Hidden startup of the liberia-noc_soc portal + its companion
 # WhatsApp local analysis service (the one the portal page calls on localhost:9268).
 #
 # Usage:
@@ -187,7 +187,7 @@ Add-Report '----- 1) Portal production server (9267) -----'
 function Ensure-Portal {
     if (Test-PortListening 9267) {
         $owner = Get-PortOwnerPid 9267
-        if (Test-OwnedByProject $owner 'liberia-noc_soc') {
+        if ((Test-OwnedByProject $owner $base) -or (Test-OwnedByProject $owner 'liberia-noc_soc')) {
             Add-Report ("[OK] Portal production server already running (pid={0}, port 9267)" -f $owner)
             return $true
         }
