@@ -345,6 +345,21 @@ def _claim_ttl(arg_value: Optional[float], values: dict) -> timedelta:
     return timedelta(hours=hours)
 
 
+def _write_github_output(name: str, value: str, values: dict | None = None) -> None:
+    """把结果写进 $GITHUB_OUTPUT（供 workflow 后续步骤判断；本地运行无此变量时静默跳过）。"""
+    env = values if values is not None else os.environ
+    path = str(env.get("GITHUB_OUTPUT") or "")
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(f"{name}={value}\n")
+    except OSError as exc:
+        # 写失败不影响回收本身，但要留一行日志：否则 reaped 输出为空，
+        # 下游分派步静默跳过（"" > 0 为假），被释放的任务无声等到下一小时巡检。
+        print(f"[reaper] 写 GITHUB_OUTPUT 失败（{name}={value}）：{exc}", flush=True)
+
+
 def main(
     argv: Optional[list[str]] = None,
     *,
@@ -417,7 +432,7 @@ def main(
             ref_store = make_ref_store(repo, token=token, api_base=api_base)
         if label_adapter is None and args.fix_labels:
             label_adapter = _build_label_adapter(repo, token, api_base)
-        reap(
+        summary = reap(
             ref_store,
             label_adapter=label_adapter,
             ttl=ttl,
@@ -427,6 +442,12 @@ def main(
             ref_reap=ref_reap,
             log=log,
         )
+        # 供 workflow 判断「本轮是否释放了任务」：>0 时触发一次自动分派。
+        # 只写数字，不写 Issue 编号（编号在日志里已有）。
+        reaped_count = len(summary.get("reaped_leases") or ()) + len(
+            summary.get("orphan_scopes") or ()
+        )
+        _write_github_output("reaped", str(reaped_count), values)
         if args.claim_expiry:
             claim_ttl = _claim_ttl(args.claim_ttl_hours, values)
             client = github_client or _build_client(repo, token, api_base)
