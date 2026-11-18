@@ -335,6 +335,96 @@ def test_fresh_assignment_still_blocks(fake: FakeGitHub) -> None:
     assert "分派" in reason
 
 
+# --------------------------------------------------------------------- 认领过期（P0-2 死锁修复）
+def test_expired_claim_allows_redispatch(fake: FakeGitHub) -> None:
+    """最新认领已被 CLAIM_EXPIRED 覆盖：不再阻塞，允许重新分派。"""
+    fake.seed_issue(7, labels=("state:todo", "agent:muse-2"))
+    fake.seed_comment(7, "<!-- agent-claim: muse-2, 2026-11-16T08:00:00Z -->")
+    fake.seed_comment(
+        7,
+        "<!-- agent-msg: CLAIM_EXPIRED, task: #7, from: lease-reaper, "
+        "at: 2026-11-16T12:00:00Z -->\n"
+        "<!-- claim-expiry: issue-7 claimed-at-20261116T080000Z -->",
+    )
+    ok, _reason = is_ready(fake, fake.get_issue(7))
+    assert ok is True
+
+
+def test_reclaim_after_expiry_still_blocks(fake: FakeGitHub) -> None:
+    """过期后又被重新认领：最新认领晚于最新过期，仍阻塞。"""
+    fake.seed_issue(7, labels=("state:todo", "agent:muse-2"))
+    fake.seed_comment(7, "<!-- agent-claim: muse-2, 2026-11-16T08:00:00Z -->")
+    fake.seed_comment(
+        7,
+        "<!-- agent-msg: CLAIM_EXPIRED, task: #7, from: lease-reaper, "
+        "at: 2026-11-16T12:00:00Z -->",
+    )
+    fake.seed_comment(7, "<!-- agent-claim: muse-3, 2026-11-16T13:00:00Z -->")
+    ok, reason = is_ready(fake, fake.get_issue(7))
+    assert ok is False
+    assert "认领" in reason
+
+
+def test_claim_without_timestamp_still_blocks(fake: FakeGitHub) -> None:
+    """老格式认领评论（无时间戳）：无法判断是否已过期，保守阻塞。"""
+    fake.seed_issue(7, labels=("state:todo", "agent:muse-2"))
+    fake.seed_comment(7, "<!-- agent-claim: muse-2 -->")
+    ok, reason = is_ready(fake, fake.get_issue(7))
+    assert ok is False
+    assert "认领" in reason
+
+
+def test_expired_claim_then_new_expired_claim_allows_redispatch(
+    fake: FakeGitHub,
+) -> None:
+    """认领→过期→再认领→再过期：最新过期晚于最新认领，允许重派。"""
+    fake.seed_issue(7, labels=("state:todo", "agent:muse-2"))
+    fake.seed_comment(7, "<!-- agent-claim: muse-2, 2026-11-16T08:00:00Z -->")
+    fake.seed_comment(
+        7,
+        "<!-- agent-msg: CLAIM_EXPIRED, task: #7, from: lease-reaper, "
+        "at: 2026-11-16T12:00:00Z -->",
+    )
+    fake.seed_comment(7, "<!-- agent-claim: muse-3, 2026-11-16T13:00:00Z -->")
+    fake.seed_comment(
+        7,
+        "<!-- agent-msg: CLAIM_EXPIRED, task: #7, from: lease-reaper, "
+        "at: 2026-11-16T17:00:00Z -->",
+    )
+    ok, _reason = is_ready(fake, fake.get_issue(7))
+    assert ok is True
+
+
+def test_task_accepted_claim_expired_allows_redispatch(fake: FakeGitHub) -> None:
+    """ref-CAS 的 TASK_ACCEPTED 认领格式（Worker 实际写的）同样适用过期豁免。"""
+    fake.seed_issue(7, labels=("state:todo", "agent:muse-2"))
+    fake.seed_comment(
+        7,
+        "<!-- agent-msg: TASK_ACCEPTED, task: #7, from: muse-2-linux, "
+        "at: 2026-11-16T08:00:00Z -->",
+    )
+    fake.seed_comment(
+        7,
+        "<!-- agent-msg: CLAIM_EXPIRED, task: #7, from: lease-reaper, "
+        "at: 2026-11-16T12:00:00Z -->",
+    )
+    ok, _reason = is_ready(fake, fake.get_issue(7))
+    assert ok is True
+
+
+def test_task_accepted_claim_without_expiry_still_blocks(fake: FakeGitHub) -> None:
+    """TASK_ACCEPTED 认领无过期记录：仍阻塞（与原来一致）。"""
+    fake.seed_issue(7, labels=("state:todo", "agent:muse-2"))
+    fake.seed_comment(
+        7,
+        "<!-- agent-msg: TASK_ACCEPTED, task: #7, from: muse-2-linux, "
+        "at: 2026-11-16T08:00:00Z -->",
+    )
+    ok, reason = is_ready(fake, fake.get_issue(7))
+    assert ok is False
+    assert "认领" in reason
+
+
 # --------------------------------------------------------------------- 定时巡检（每小时 :17）
 def test_schedule_dispatches_without_pr(fake: FakeGitHub) -> None:
     fake.seed_ready_issue(7)
