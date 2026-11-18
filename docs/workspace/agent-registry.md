@@ -1,7 +1,13 @@
 # Agent 注册表（第一阶段，2026-11-13）
 
 > Worker 注册、心跳与健康检查的登记册。Muse 1 维护本表，身份变化先改这里再改代码。
-> 心跳定义：节点的最近 GitHub 活动时间（push / 评论 / PR 更新），Muse 1 定时查 API 判定，90 分钟无活动判失联。
+> 心跳定义（2026-11-18，#141 改为真实心跳）：Worker 进程每轮写一条心跳 beat ref
+> `refs/heads/agent-heartbeat/<agent>/<instance>/<epoch_ms>/<state>`（epoch 毫秒，
+> state 自报 online / idle / working / waiting / blocked / failed）；`list_workers`
+> 由心跳新鲜度 + 有效租约推导七态 ONLINE / IDLE / WORKING / WAITING / BLOCKED /
+> OFFLINE / FAILED。过期阈值是心跳 TTL 90 秒（`api.DEFAULT_HEARTBEAT_TTL`），
+> 租约有效时不判 offline。旧口径“最近 GitHub 活动时间、90 分钟无活动判失联”
+> 是错的——那不是进程心跳，已废止。
 > 身份独立化（V6，用户 2026-11-13 决定）：Muse 1/2/3 尽可能用独立 GitHub 身份，Grok 如支持也用独立机器人身份（Grok 已于 2026-11-14 退役，本条对其不再适用）；暂时做不到时先用机器身份标记过渡（见下表“过渡方案”列）。
 
 | Agent | 角色 | 运行环境 | GitHub 身份 | 状态 | 过渡方案 |

@@ -168,11 +168,12 @@ class LinuxWorker:
             time.sleep(min(0.2, max(0.01, deadline - time.monotonic())))
 
     def run_cycle(self) -> dict[str, Any]:
-        """一个轮询周期：刷新 Worker 心跳 + 最多处理一个可认领任务。"""
-        try:
-            self.scheduler.heartbeat_worker(self.config.worker_id, self.config.instance)
-        except Exception as exc:  # noqa: BLE001 - 心跳失败不阻塞任务发现
-            self.log(f"worker heartbeat failed: {type(exc).__name__}: {exc}")
+        """一个轮询周期：拉取可认领任务 + 最多处理一个。
+
+        调度器心跳在状态已知时写（无任务 → idle，认领后 → working），不再在
+        周期开头写 online——否则 online beat 会抢占 60s 节流窗口，idle/working
+        永远写不进去。
+        """
         try:
             issues = self.transport.list_issues(
                 labels=(self.config.agent_label, "state:todo"), state="open"
@@ -180,12 +181,22 @@ class LinuxWorker:
         except Exception as exc:  # noqa: BLE001 - 断网/限流：下一轮重试
             self.log(f"discover failed: {type(exc).__name__}: {exc}")
             return {"outcome": "discover-error"}
+        saw_lease_held = False
         for issue in sorted(issues, key=lambda item: int(item.number)):
             outcome = self.process_issue(issue)
             if outcome in ("lease-held", "already-terminal"):
+                if outcome == "lease-held":
+                    saw_lease_held = True
                 continue
             return {"outcome": outcome, "issue": int(issue.number),
                     "task_id": f"issue-{int(issue.number)}"}
+        try:
+            self.scheduler.heartbeat_worker(
+                self.config.worker_id, self.config.instance,
+                state="waiting" if saw_lease_held else "idle",
+            )
+        except Exception as exc:  # noqa: BLE001 - 心跳失败不阻塞任务发现
+            self.log(f"worker heartbeat failed: {type(exc).__name__}: {exc}")
         return {"outcome": "idle"}
 
     # -- 单个任务 -----------------------------------------------------------
@@ -236,6 +247,12 @@ class LinuxWorker:
             self.log(
                 f"claimed {task_id} attempt={lease.attempt_id} token={lease.fencing_token}"
             )
+            try:
+                self.scheduler.heartbeat_worker(
+                    self.config.worker_id, self.config.instance, state="working"
+                )
+            except Exception as exc:  # noqa: BLE001 - 心跳失败不影响已认领的任务
+                self.log(f"worker heartbeat failed: {type(exc).__name__}: {exc}")
             self._set_state_label(int(issue.number), "state:claimed")
             self.scheduler.transition(
                 task_id,
@@ -280,6 +297,13 @@ class LinuxWorker:
                 if not state["stale"]:
                     self._release_quietly(state)
                 self._set_state_label(int(issue.number), "state:blocked")
+                # 阻塞也要上报心跳（best-effort：节流窗口内可能写不出，见 #141 复审 P2-5）。
+                try:
+                    self.scheduler.heartbeat_worker(
+                        self.config.worker_id, self.config.instance, state="blocked"
+                    )
+                except Exception as exc:  # noqa: BLE001 - 心跳失败不影响主流程
+                    self.log(f"worker heartbeat failed: {type(exc).__name__}: {exc}")
                 return "blocked"
 
             result = self._execute(state, command)
