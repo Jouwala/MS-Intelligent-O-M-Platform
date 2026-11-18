@@ -1,0 +1,180 @@
+# 应用 ZIP 发布构建（Phase 1 P1-5）
+#
+# 触发：SemVer 标签推送（v*）自动发布；workflow_dispatch 可手动构建，
+# dry_run=true 时只构建不发布（预演）。
+# 产物：noc-soc-platform-<版本>-<平台>.zip + .sha256（双平台），见 Release 页面。
+#
+# 质量门：本工作流不复制 quality.yml 的检查（不新增第二个真相源），而是等
+# quality.yml 在同一提交上的运行结论为 success 后才构建。quality.yml 对每次
+# push（含标签推送）都会跑，因此被构建的提交一定有对应的 quality 运行。
+#
+# 版本号：标签名即版本（vX.Y.Z，见 Phase 0 报告 §6.2）。手动触发时版本为
+# dev-<短 SHA>，不发布 Release。
+# 构建脚本见 ops/deploy/build-zip.mjs；流程说明见 docs/workspace/zip-build-release.md。
+
+name: release-build
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '只构建不发布（预演）'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write # 创建 Release + 上传产物（仅此工作流）
+  actions: read # 读取 quality 工作流的运行结论
+
+concurrency:
+  group: release-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    name: 质量门（等 quality 全绿）
+    runs-on: ubuntu-latest
+    steps:
+      - name: 等待 quality.yml 在本提交上成功
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          SHA="${{ github.sha }}"
+          for i in $(seq 1 30); do
+            OUT=$(gh api "repos/${{ github.repository }}/actions/workflows/quality.yml/runs?head_sha=${SHA}&per_page=1" --jq '.workflow_runs[0] | "\(.status // "none") \(.conclusion // "none") \(.html_url // "")"' 2>/dev/null || true)
+            STATUS=$(echo "$OUT" | cut -d' ' -f1)
+            CONCLUSION=$(echo "$OUT" | cut -d' ' -f2)
+            URL=$(echo "$OUT" | cut -d' ' -f3)
+            echo "第 ${i} 次检查：status=${STATUS} conclusion=${CONCLUSION} ${URL}"
+            if [ "$STATUS" = "completed" ] && [ "$CONCLUSION" = "success" ]; then
+              echo "质量门通过。"
+              exit 0
+            fi
+            if [ "$STATUS" = "completed" ]; then
+              echo "错误：quality 结论为 ${CONCLUSION}，拒绝构建。${URL}"
+              exit 1
+            fi
+            if [ "$STATUS" = "none" ] && [ "$i" -ge 5 ]; then
+              echo "错误：5 分钟内未找到 quality 运行，请确认 quality.yml 已触发。"
+              exit 1
+            fi
+            sleep 60
+          done
+          echo "错误：等待 quality 超时（30 分钟）。"
+          exit 1
+
+  build:
+    name: 构建 ${{ matrix.platform }}
+    needs: gate
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            platform: win-x64
+          - os: ubuntu-latest
+            platform: linux-x64
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 取标签 + 完整历史，供 build-info 取 SHA
+
+      - name: 解析版本
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+          else
+            VERSION="dev-$(git rev-parse --short HEAD)"
+          fi
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "版本：${VERSION}"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      # 4 个项目各自 npm ci（lockfileVersion 3，可复现；不得跨平台复用 node_modules）。
+      - name: npm ci（my_app 前端）
+        working-directory: apps/my_app/frontend
+        run: npm ci
+      - name: npm ci（门户）
+        working-directory: apps/portal
+        run: npm ci
+      - name: npm ci（WhatsApp 分析服务）
+        working-directory: apps/portal/scripts/whatsapp_analysis
+        run: npm ci
+      - name: npm ci（WhatsApp bot）
+        working-directory: apps/whatsapp-kb-bot
+        run: npm ci
+
+      - name: 构建前端（my_app + 门户）
+        run: |
+          npm --prefix apps/my_app/frontend run build
+          npm --prefix apps/portal run build
+          node -e "const fs=require('fs'); for (const p of ['apps/_fe_dist/index.html','apps/portal/dist/index.html']) { if (!fs.existsSync(p)) { console.error('缺构建产物: '+p); process.exit(1) } }"
+
+      # wheels/ 供首次启动离线建 venv（Phase 0 报告 §6.3 路线 B）。必须用 lock 文件，
+      # 不用 requirements.txt（范围版会漂移）。含编译的包在 runner 上编好 wheel。
+      - name: 下载 wheels（lock 文件）
+        run: python -m pip download -r apps/my_app/requirements.lock.txt -d wheels --progress-bar off
+
+      - name: 构建 ZIP
+        run: node ops/deploy/build-zip.mjs --mode full --platform "${{ matrix.platform }}" --version "${{ steps.version.outputs.version }}" --out zip-dist
+
+      - name: 校验 ZIP（可解压 + build-info 合法）
+        run: |
+          python - <<'PY'
+          import glob, json, zipfile
+          z = glob.glob('zip-dist/*.zip')[0]
+          bad = zipfile.ZipFile(z).testzip()
+          assert bad is None, bad
+          info = json.loads(zipfile.ZipFile(z).read('build-info.json'))
+          assert info['version'] and info['commit'] and info['commit'] != 'unknown', info
+          print('ZIP 校验通过:', z, info['version'], info['commit'][:7])
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: noc-soc-platform-${{ matrix.platform }}-${{ steps.version.outputs.version }}
+          path: zip-dist/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 发布到 Release（仅标签触发且非干跑）
+        if: startsWith(github.ref, 'refs/tags/') && (github.event_name == 'push' || inputs.dry_run == false)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          ZIP_NAME=$(basename zip-dist/*.zip)
+          SHA_HEX=$(cut -d' ' -f1 "zip-dist/${ZIP_NAME}.sha256")
+          cat > NOTES.md <<EOF
+          # noc-soc-intelligent-platform ${TAG}
+
+          提交：${{ github.sha }}
+          产物：${ZIP_NAME}
+          SHA256：${SHA_HEX}
+
+          校验（Windows PowerShell）：
+          Get-FileHash -Algorithm SHA256 ${ZIP_NAME}
+          校验（Linux）：
+          sha256sum -c ${ZIP_NAME}.sha256
+
+          升级前请备份外部数据目录，并读 docs/workspace/部署说明.md；首次启动流程见 Phase 0 报告 §6.7。
+          运行时 ZIP（Python/Node/PG/nginx）另行发布，见 runtime-build 工作流。
+          EOF
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" zip-dist/* --clobber
+          else
+            gh release create "${TAG}" --title "${TAG}" --notes-file NOTES.md zip-dist/*
+          fi
