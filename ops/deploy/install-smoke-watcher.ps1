@@ -42,7 +42,7 @@ if (-not (Test-Path -LiteralPath $Watcher)) { throw "找不到 watcher：$Watche
 
 function Stop-RunningWatchers {
     $w = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -match 'smoke-watcher\.ps1' }
+        Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -match '(^|[\s\\/])smoke-watcher\.ps1' }
     foreach ($p in @($w)) {
         if (-not $p) { continue }
         Write-Host "停止正在运行的 watcher：pid=$($p.ProcessId)"
@@ -60,7 +60,7 @@ function Show-Status {
     if (-not $t) {
         Write-Host "计划任务 '$TaskName' 不存在。"
         $w = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
-            Where-Object { $_.CommandLine -match 'smoke-watcher\.ps1' }
+            Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -match '(^|[\s\\/])smoke-watcher\.ps1' }
         if ($w) {
             Write-Host "但检测到手工启动的 watcher 进程：$($w.ProcessId -join ', ')"
         }
@@ -73,7 +73,7 @@ function Show-Status {
     Write-Host "动作:     $($t.Actions[0].Execute) $($t.Actions[0].Arguments)"
     Write-Host "工作目录: $($t.Actions[0].WorkingDirectory)"
     $w = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -match 'smoke-watcher\.ps1' }
+        Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -match '(^|[\s\\/])smoke-watcher\.ps1' }
     if ($w) { Write-Host "当前 watcher 进程: $($w.ProcessId -join ', ')" }
     else { Write-Host "当前 watcher 进程: 无" }
     if (Test-Path -LiteralPath (Join-Path $Root 'TMP\smoke-watcher.log')) {
@@ -95,7 +95,7 @@ if ($Uninstall) {
         Write-Host "计划任务 '$TaskName' 本来就不存在。"
     }
     $w = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -match 'smoke-watcher\.ps1' }
+        Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -match '(^|[\s\\/])smoke-watcher\.ps1' }
     foreach ($p in @($w)) {
         if ($p) { Write-Host "仍在运行的 watcher 进程 pid=$($p.ProcessId)（未杀，需要时手工停）" }
     }

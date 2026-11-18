@@ -270,7 +270,7 @@ function Enter-WatcherPidGuard {
         try { $old = [int]((Get-Content -LiteralPath $PidFile -Raw).Trim()) } catch { $old = 0 }
         if ($old -gt 0 -and $old -ne $PID) {
             $p = Get-CimInstance Win32_Process -Filter "ProcessId=$old" -ErrorAction SilentlyContinue
-            if ($p -and ("$($p.CommandLine)" -match 'smoke-watcher\.ps1')) {
+            if ($p -and ("$($p.CommandLine)" -match '(^|[\s\\/])smoke-watcher\.ps1')) {
                 throw "已有 smoke-watcher 在跑（pid=$old），本实例退出，避免两个轮询器同时冒烟。"
             }
         }
@@ -345,7 +345,8 @@ function Get-UtcNowIso {
 
 function Get-IssueLabelNames {
     param([int]$Number)
-    return @((Invoke-GitHubApi "/repos/$Repo/issues/$Number/labels") | ForEach-Object { $_.name })
+    # 必须过 Normalize-GitHubList：恰好 1 个标签时 API 返回单对象而非数组。
+    return @((Normalize-GitHubList (Invoke-GitHubApi "/repos/$Repo/issues/$Number/labels")) | ForEach-Object { $_.name })
 }
 
 function Set-IssueLabels {
@@ -371,7 +372,7 @@ function Set-IssueQaState {
 function Test-IssueMarker {
     # 去重：Issue 评论里已有同标记就不再发（不依赖本机状态文件）。
     param([int]$Issue, [string]$Marker)
-    $comments = Invoke-GitHubApi "/repos/$Repo/issues/$Issue/comments?per_page=100"
+    $comments = Normalize-GitHubList (Invoke-GitHubApi "/repos/$Repo/issues/$Issue/comments?per_page=100")
     foreach ($c in $comments) {
         if ($c.body -and $c.body.Contains($Marker)) { return $true }
     }
@@ -604,7 +605,7 @@ function Invoke-OneCycle {
         Invoke-GitHubApi "/repos/$Repo/issues/$n/comments" 'POST' @{ body = $report } | Out-Null
         Write-WatchLog "PR #$n 冒烟评论已贴（通过=$passed）。"
         if ($passed) {
-            $current = @((Invoke-GitHubApi "/repos/$Repo/issues/$n/labels") | ForEach-Object { $_.name })
+            $current = @((Normalize-GitHubList (Invoke-GitHubApi "/repos/$Repo/issues/$n/labels")) | ForEach-Object { $_.name })
             if ($current -notcontains 'smoke-passed') { $current += 'smoke-passed' }
             Invoke-GitHubApi "/repos/$Repo/issues/$n/labels" 'PUT' @{ labels = $current } | Out-Null
             $state['smoked'][$key] = $sha

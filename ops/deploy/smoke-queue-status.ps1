@@ -105,11 +105,11 @@ function Get-WatcherAlive {
         try { $old = [int]((Get-Content -LiteralPath $PidFile -Raw).Trim()) } catch { $old = 0 }
         if ($old -gt 0) {
             $p = Get-CimInstance Win32_Process -Filter "ProcessId=$old" -ErrorAction SilentlyContinue
-            if ($p -and ("$($p.CommandLine)" -match 'smoke-watcher\.ps1')) { return $old }
+            if ($p -and ("$($p.CommandLine)" -match '(^|[\s\\/])smoke-watcher\.ps1')) { return $old }
         }
     }
     $w = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -match 'smoke-watcher\.ps1' })
+        Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -match '(^|[\s\\/])smoke-watcher\.ps1' })
     if ($w.Count -gt 0) { return $w[0].ProcessId }
     return $null
 }
