@@ -623,7 +623,8 @@ function Invoke-OneCycle {
 
 Write-WatchLog "smoke-watcher 启动：repo=$Repo remote=$Remote 根=$Root 轮询=${PollSeconds}s Once=$Once DryRun=$DryRun OnlyPr=$OnlyPr token来源=$TokenSource"
 # 干跑只读轮询，不与常驻实例抢 pid 文件（否则排障时 -Once -DryRun 永远起不来）。
-if (-not $DryRun) { Enter-WatcherPidGuard }
+# -OnlyPr 为手工补跑单条 PR，允许与常驻实例并存（靠 smoke.lock 防并发冒烟）。
+if ((-not $DryRun) -and ($OnlyPr -le 0)) { Enter-WatcherPidGuard }
 try {
     if ($Once) {
         Invoke-OneCycle
@@ -637,5 +638,5 @@ try {
         }
     }
 } finally {
-    if (-not $DryRun) { Exit-WatcherPidGuard }
+    if ((-not $DryRun) -and ($OnlyPr -le 0)) { Exit-WatcherPidGuard }
 }
