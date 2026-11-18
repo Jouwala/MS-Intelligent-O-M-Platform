@@ -99,6 +99,20 @@ jobs:
           "
           echo "组装完成。"
 
+      # EDB 的 Windows 二进制 zip 捆绑 pgAdmin 4（约 779M）与 StackBuilder、
+      # doc/，运行时不需要。裁剪后 PG 约 138M（bin/lib/share/include 保留；
+      # include/ 保留是为将来可能在运行时上编扩展留余地）。裁剪后断言
+      # 四个关键可执行文件仍在，防止上游布局变化导致静默缺件。
+      - name: 裁剪 PostgreSQL 附带组件（仅 win-x64）
+        if: matrix.platform == 'win-x64'
+        run: |
+          PG="runtime-staging/postgresql16"
+          rm -rf "${PG}/pgAdmin 4" "${PG}/StackBuilder" "${PG}/doc"
+          for EXE in initdb pg_ctl psql createdb; do
+            [ -f "${PG}/bin/${EXE}.exe" ] || { echo "错误：裁剪后缺 ${EXE}.exe"; exit 1; }
+          done
+          echo "裁剪完成，PG 剩余：$(du -sh "${PG}" | cut -f1)"
+
       - name: 打包 + 生成 SHA256
         run: |
           VERSION="${{ steps.manifest.outputs.version }}"
