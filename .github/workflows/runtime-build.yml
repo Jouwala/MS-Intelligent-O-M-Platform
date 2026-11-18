@@ -54,6 +54,9 @@ jobs:
         with:
           node-version: "24"
 
+      - name: 工具预检（tar/jq/sha256sum/curl）
+        run: command -v tar jq sha256sum curl || { echo "错误：缺构建工具（GitHub 托管 runner 应预装 tar/jq/sha256sum/curl；自托管 runner 须补齐，见 zip-build-release.md）"; exit 1; }
+
       - name: 解析清单版本
         id: manifest
         run: echo "version=$(jq -r .version ops/deploy/runtime-manifest.json)" >> "${GITHUB_OUTPUT}"
