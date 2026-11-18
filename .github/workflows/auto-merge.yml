@@ -1,4 +1,18 @@
-# 自动合并：CI 全绿 + smoke-passed 标签的 PR 自动合入 main，不经过 Muse、无需人工点批准。
+# 自动合并：CI 全绿 + smoke-passed 标签 + 独立审核通过的 PR 自动合入 main，
+# 不经过 Muse、无需人工点批准。
+#
+# 双门禁（Phase 2 P2-3 #132）：QA 与独立审核针对同一 head SHA 才合入，
+# 任一门禁失败即阻断——
+#   - QA 门禁：smoke-passed 标签 + 冒烟结果 SHA 绑定（见下）；
+#   - 审核门禁：PR 评论里最后一条 review-result 标记须为 passed，且
+#     标记的 pr 等于本 PR、sha 等于当前 head（判定见
+#     apps/control-plane/backend/dispatch/review_gate.py，唯一真相源；
+#     协议见 docs/workspace/review-record-protocol.md）。
+#   新提交自动使旧审核失效（sha 对不上）；审核者事后改判
+#   （补 changes-requested / blocked 标记）同样阻断。无记录 = 未审，不合入。
+#   门禁脚本取自 main 检出（可信代码），不取 PR 分支的版本——PR 作者
+#   不得自带门禁脚本。双门禁上线前，审核无权阻断合并（#127、#136 两次
+#   竞态均因此发生）；上线后，REQUEST_CHANGES 的 PR 即使 CI 全绿也不会合入。
 #
 # 冒烟结果由 D:\02 本机 smoke-watcher 贴回：它在 D:\02 冒烟通过后贴评论并给该 PR 打 smoke-passed 标签
 # （标签需先在仓库里建好；打标签用 GitHub API 或网页，不经过 Muse）。
@@ -99,6 +113,16 @@ jobs:
     if: always() && (needs.update-branches.result == 'success' || needs.update-branches.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
+      # 检出 main 上的门禁脚本（可信代码）：review_gate.py 必须取 main 的
+      # 版本，不取 PR 分支的——否则 PR 作者可以自己改门禁脚本放行自己。
+      # 稀疏检出只要这一个文件；后续评估循环里每个 PR 都调它判定。
+      - name: 检出 main 上的可信门禁脚本
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          sparse-checkout: |
+            apps/control-plane/backend/dispatch/review_gate.py
+          sparse-checkout-cone-mode: false
       - name: 评估并自动合并符合条件的 PR
         env:
           GH_TOKEN: ${{ github.token }}
@@ -161,6 +185,14 @@ jobs:
             if [ -z "$SMOKE_SHA" ]; then echo "smoke-passed 没有 SHA 绑定标记（旧流程标签或标记缺失），跳过"; continue; fi
             if [ "$SMOKE_SHA" != "$HEAD_SHA" ]; then echo "smoke-passed 绑定的是旧 head $SMOKE_SHA，当前 head $HEAD_SHA，结果已过期，跳过"; continue; fi
             echo "smoke-passed 已绑定当前 head（$SMOKE_SHA），继续评估"
+
+            # 独立审核门禁（Phase 2 P2-1 #131 / P2-3 #132）：取 PR 评论里
+            # 最后一条 review-result 标记判定。无记录、改判、旧 head、pr
+            # 不符一律不通过；读评论失败时脚本 exit 1（fail-closed）。
+            # 脚本取自本作业开头检出的 main 版本（可信代码）。
+            if ! python3 apps/control-plane/backend/dispatch/review_gate.py --repo "$REPO" --pr "$PR" --head-sha "$HEAD_SHA"; then
+              echo "独立审核门禁未通过，跳过"; continue
+            fi
 
             if [ "$MERGEABLE" = "false" ]; then echo "有冲突，跳过"; continue; fi
 
