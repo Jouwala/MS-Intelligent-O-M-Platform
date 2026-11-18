@@ -85,11 +85,16 @@ def test_replan_branch_before_create(wf: str) -> None:
 
 
 def test_agent_assignment_rules(wf: str) -> None:
-    """只回派 muse-2 / muse-3；取不到不派任何人，评论请 Muse 1 介入。"""
-    assert "for a in muse-2 muse-3" in wf
+    """回派原 Issue 上的任意 agent:muse-N 标签（muse-2/3/4/5）；
+    取不到时默认派给 muse-2（正文注明请 Muse 1 复核），禁止创建
+    无 agent 标签的修复 Issue（P0-3）。"""
+    assert "grep -oE '^agent:muse-[0-9]+$'" in wf
+    assert 'AGENT="muse-2"' in wf  # 无 agent 标签时的默认负责人
+    assert "默认指派" in wf
+    assert "请 Muse 1 复核" in wf
     assert '\\"agent:$AGENT\\"' in wf  # 修复 Issue 的 agent 标签来自判定结果
-    assert "未派给任何人，请 Muse 1 介入指派" in wf
-    assert "待 Muse 1 指派" in wf  # 修复 Issue 正文负责人字段如实写待指派
+    assert "未派给任何人" not in wf  # 不再有无负责人分支
+    assert "待 Muse 1 指派" not in wf
 
 
 def test_fix_requested_message_fields(wf: str) -> None:
@@ -114,8 +119,9 @@ def test_fix_issue_body_follows_template(wf: str) -> None:
     ):
         assert section in wf, f"修复 Issue 正文缺模板小节：{section}"
     assert "依赖：depends on #$ISSUE" in wf
-    assert "agent/task-49-fix-$ISSUE" in wf
-    assert '"state:todo"' in wf
+    assert "由 issue-to-pr 按本 Issue 编号自动创建" in wf  # 分支不再写死编号
+    assert "agent/task-49-fix-$ISSUE" not in wf  # 旧的写死分支名已删除
+    assert 'LABELS_JSON="[\\"state:todo\\", \\"agent:$AGENT\\"]"' in wf  # 修复 Issue 一定带 state:todo + agent 标签
     # 失败项逐条转成可打勾的验收项
     assert '"- [ ] 修复：$item"' in wf
 
