@@ -25,9 +25,11 @@
 # 安全阀（任务说明第 4 条）：
 #   - 只建 Issue、发评论、打 needs-replan 标签；不改代码、不合并、
 #     不关闭原 Issue；
-#   - 原开发 Agent 只认原 Issue 上的 agent:muse-2 / agent:muse-3 标签
-#     （muse-1 是协调者不写业务代码，不回派）；取不到就不派给任何人，
-#     在 FIX_REQUESTED 里写明请 Muse 1 介入指派，绝不猜人；
+#   - 原开发 Agent 认原 Issue 上的任意 agent:muse-N 标签（muse-2/3/4/5，
+#     与分派白名单一致）；取不到时默认派给 muse-2（并在正文注明请 Muse 1
+#     复核），禁止创建无 agent 标签的修复 Issue（P0-3：无负责人修复 Issue
+#     对 auto-dispatch 永久不可见，只能等人工指派）；muse-1 是协调者
+#     不写业务代码，不回派；
 #   - 幂等：同一根任务 + 同一失败 HEAD SHA 只建一个修复 Issue，
 #     重复触发（标签被摘下重打等）直接跳过；
 #   - needs-replan 是终止标记：原 Issue 已带它时整体跳过；第 4 次
@@ -139,11 +141,16 @@ jobs:
           fi
           ROUND=$((EXISTING + 1))
 
-          # 原开发 Agent：只认 agent:muse-2 / agent:muse-3，取不到不派。
-          AGENT=""
-          for a in muse-2 muse-3; do
-            if echo "$LABELS" | grep -qx "agent:$a"; then AGENT="$a"; fi
-          done
+          # 原开发 Agent：认原 Issue 上的任意 agent:muse-N 标签
+          # （muse-2/3/4/5，与分派白名单一致）；取不到时默认派给 muse-2，
+          # 禁止创建无 agent 标签的修复 Issue（P0-3）。
+          AGENT="$(echo "$LABELS" | grep -oE '^agent:muse-[0-9]+$' | head -n 1 | sed 's/^agent://' || true)"
+          DEFAULTED=""
+          if [ -z "$AGENT" ]; then
+            AGENT="muse-2"
+            DEFAULTED="yes"
+            echo "原 Issue 无 agent 标签，修复 Issue 默认派给 muse-2（请 Muse 1 复核是否应改派）"
+          fi
 
           # 建修复 Issue：正文按 agent-task.md 模板填齐，首行放计数标记。
           {
@@ -160,10 +167,10 @@ jobs:
             echo
             echo "## 负责人"
             echo
-            if [ -n "$AGENT" ]; then
-              echo "负责人：agent:$AGENT（回派原开发 Agent）"
+            if [ -n "$DEFAULTED" ]; then
+              echo "负责人：agent:$AGENT（默认指派：原 Issue 无 agent 标签，请 Muse 1 复核是否应改派）"
             else
-              echo "负责人：待 Muse 1 指派（原 Issue 无 agent:muse-2 / agent:muse-3 标签，未自动派给任何人）"
+              echo "负责人：agent:$AGENT（回派原开发 Agent）"
             fi
             echo
             echo "## 优先级"
@@ -188,25 +195,22 @@ jobs:
             echo
             echo "## 所属分支"
             echo
-            echo "分支：\`agent/task-49-fix-$ISSUE\`"
+            echo "分支：待认领后由 issue-to-pr 按本 Issue 编号自动创建"
             echo
             echo "## 当前状态"
             echo
             echo "状态：state:todo"
           } > /tmp/fix-body.md
 
-          if [ -n "$AGENT" ]; then
-            LABELS_JSON="[\"state:todo\", \"agent:$AGENT\"]"
-          else
-            LABELS_JSON='["state:todo"]'
-          fi
+          # AGENT 恒有值（取不到时已默认 muse-2），修复 Issue 一定带 agent 标签。
+          LABELS_JSON="[\"state:todo\", \"agent:$AGENT\"]"
           TITLE="[修复] #$ISSUE QA 失败（第 $ROUND 轮）：$ORIG_TITLE"
           RESP="$(jq -n --arg title "$TITLE" --rawfile body /tmp/fix-body.md --argjson labels "$LABELS_JSON" \
             '{title: $title, body: $body, labels: $labels}' \
             | curl -sS -X POST "${AUTH[@]}" "$API/issues" --data-binary @-)"
           FIX_NUMBER="$(echo "$RESP" | jq -r '.number // empty')"
           test -n "$FIX_NUMBER" || { echo "建修复 Issue 失败：$RESP"; exit 1; }
-          echo "已建修复 Issue #$FIX_NUMBER（第 $ROUND 轮，回派 ${AGENT:-无}）"
+          echo "已建修复 Issue #$FIX_NUMBER（第 $ROUND 轮，回派 $AGENT${DEFAULTED:+（默认指派）}）"
 
           # 在原 Issue 发 FIX_REQUESTED（协议第二节第 9 类消息）。
           {
@@ -216,10 +220,10 @@ jobs:
             echo "- 新 Issue：#$FIX_NUMBER"
             echo "- 失败报告：$QA_URL（PR #$PR_NUMBER，HEAD SHA \`$HEAD_SHA\`）"
             echo "- 修复轮次：第 $ROUND 次（上限 3）"
-            if [ -n "$AGENT" ]; then
-              echo "- 负责人：agent:$AGENT（回派原开发 Agent）"
+            if [ -n "$DEFAULTED" ]; then
+              echo "- 负责人：agent:$AGENT（默认指派：原 Issue 无 agent 标签，请 Muse 1 复核是否应改派）"
             else
-              echo "- 负责人：未能判定（原 Issue 无 agent:muse-2 / agent:muse-3 标签），未派给任何人，请 Muse 1 介入指派。"
+              echo "- 负责人：agent:$AGENT（回派原开发 Agent）"
             fi
           } > /tmp/fix-requested.md
           jq -n --rawfile body /tmp/fix-requested.md '{body: $body}' \
