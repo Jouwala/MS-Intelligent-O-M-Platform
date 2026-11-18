@@ -130,7 +130,9 @@ Jouwala——**仅凭 GitHub 评论无法区分“谁贴的标记”**。因此�
   绑定当前 head。回答“跑起来对不对”。
 - **审核门禁**（本协议）：review-result 标记 passed + 绑定当前 head。
   回答“代码写得对不对”。
-- 两者针对**同一 SHA**，缺一不可，互不替代。接线见 Issue #132。
+- 两者针对**同一 SHA**，缺一不可，互不替代。接线见 Issue #132：
+  `auto-merge.yml` 在 smoke SHA 绑定通过后调 `review_gate.py`
+  （取 main 检出的可信脚本）判定；任一门禁失败即跳过，不合入。
 
 ## 八、协议消息类型（补 agent-protocol.md）
 
@@ -147,3 +149,18 @@ Agent 在 TASK_COMPLETED 时打上；watcher 在冒烟开始时按既有行为�
 它（QA 状态单值化），此后审核状态不由 Issue 标签承载，而由 PR 评论
 里的 review-result 标记承载。QA 标签（qa-ready / qa-passed /
 qa-failed）与审核状态并行存在，互不覆盖。
+
+## 九、PR 开启通知与 needs-review 标签生命周期（#132）
+
+- **PR 一打开**，`pr-opened-notify.yml`（`pull_request[opened]` 触发）
+  就给 PR 打 `needs-review` 标签并留一条提示评论。Muse 1 没有推送
+  通道，标签是他在 PR 列表里能直接看到的待审信号——此前没有任何
+  workflow 在 PR 打开时通知 Muse 1，审核经常在 CI 全绿之后才开始，
+  于是 #127、#136 两次被 auto-merge 在复审完成前合入旧 head。
+- **审核通过后**，审核者在贴 passed 标记时顺手摘掉 `needs-review`
+  标签（浏览器操作，与贴标记同一趟）。标签只是“待审”信号，不是门禁
+  本身——真正阻断合并的是 auto-merge 里的 review-gate 判定。
+- **作者推新提交**不需要重打标签：`needs-review` 一直挂着，直到
+  审核通过摘掉；新 head 使旧 passed 失效由门禁的 SHA 比对处理。
+- 标签定义见 `.github/labels.yml`（先定义再创建）；工作流用 `--fail`
+  调标签接口——标签缺失时作业变红，而不是静默跳过（没标签就等于没通知）。
