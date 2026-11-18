@@ -148,6 +148,16 @@ test('门禁植入：凭据/.env/pgdata 都会被拦截', (t) => {
   scanCredentials(clean)
 })
 
+test('凭据扫描：node_modules 内示例密钥不误报，自有文件仍拦截', (t) => {
+  const staging = fixture(t, {
+    'apps/portal/node_modules/dotenv/README.md': '-----BEGIN PRIVATE KEY-----\n示例密钥\n',
+    'apps/portal/src/ok.ts': 'export {}\n',
+  })
+  scanCredentials(staging) // 不抛：第三方包文档示例不是泄漏
+  const leak = fixture(t, { 'apps/portal/src/leak.ts': '-----BEGIN PRIVATE KEY-----\n' })
+  assert.throws(() => scanCredentials(leak), GateError)
+})
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 集成：真实仓库组装 + 回归 8 文件 + 确定性
 // ─────────────────────────────────────────────────────────────────────────────

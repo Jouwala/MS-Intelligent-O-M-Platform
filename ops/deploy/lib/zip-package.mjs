@@ -235,7 +235,7 @@ const SCAN_RULES_STRICT = [
   { name: 'API 密钥赋值', re: /\b(api[_-]?key|secret[_-]?key|access[_-]?token|client[_-]?secret)\s*[:=]\s*['"]([A-Za-z0-9_\-./+=]{16,})['"]/i, valueGroup: 2 },
   { name: '口令赋值', re: /\bpassword\s*[:=]\s*['"]([^\s'"]{8,})['"]/i, valueGroup: 1 },
 ]
-const SCAN_RULES_LOOSE = SCAN_RULES_STRICT.slice(0, 2) // node_modules/dist/_fe_dist 只查前两条（避免压缩产物误报）
+const SCAN_RULES_LOOSE = SCAN_RULES_STRICT.slice(0, 2) // dist/_fe_dist 只查前两条（避免压缩产物误报）；node_modules 不扫，见 scanCredentials
 
 function isBinary(buf) {
   return buf.subarray(0, 8192).includes(0)
@@ -245,7 +245,11 @@ export function scanCredentials(staging) {
   const hits = []
   const all = walkFiles(staging, '', new Set(), [])
   for (const rel of all) {
-    const loose = rel.includes('/node_modules/') || rel.includes('/dist/') || rel.startsWith('apps/_fe_dist/')
+    // node_modules 是第三方包（由 lockfile 复现），其文档里的示例密钥块
+    // （如 dotenv README）不是项目泄漏；扫它只会误报。供应链安全靠
+    // lockfile + npm audit，不靠内容扫描。P1-2 称重实测发现。
+    if (rel.includes('/node_modules/') || rel.startsWith('node_modules/')) continue
+    const loose = rel.includes('/dist/') || rel.startsWith('apps/_fe_dist/')
     const buf = readFileSync(join(staging, rel))
     if (isBinary(buf)) continue
     const rules = loose ? SCAN_RULES_LOOSE : SCAN_RULES_STRICT
