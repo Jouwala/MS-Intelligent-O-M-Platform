@@ -3,7 +3,8 @@ REM Sync data/mw_data/MW LINKS.kml -> frontend/public + live dist (_fe_dist)
 REM Usage: double-click, or pass a custom KML: mw_links_sync.bat "path\to\xxx.kml"
 setlocal
 
-set PY=C:\Users\ZTEEMS\AppData\Local\Programs\Python\Python312\python.exe
+for %%I in (python.exe) do set "PY=%%~$PATH:I"
+if not defined PY set "PY=%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
 for %%I in ("%~dp0.") do set "ROOT=%%~fI"
 set KML=%ROOT%\data\mw_data\MW LINKS.kml
 if not "%~1"=="" set KML=%~1
