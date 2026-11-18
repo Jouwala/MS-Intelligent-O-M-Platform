@@ -443,6 +443,30 @@ if (-not (Test-Path -LiteralPath $pgCtl)) {
     Write-Step "<干跑> 跳过 initdb / pg_ctl start（$PgData）"
 }
 
+# ------------------------------------------- 数据库迁移（alembic upgrade head，D1）
+# 绿包首次启动时库是空的：此前没有任何脚本跑 alembic，后端起来后表不存在。
+# upgrade head 幂等（已是最新时为空操作），每次启动都跑；失败直接抛错，
+# 不让后端带着未迁移的库启动。MY_APP_DB_MODE/DATABASE_URL 已由派生变量放进
+# 进程环境（见上），alembic env.py 直接读它们，与后端同一套连接串。
+Write-Step '--- 数据库迁移（alembic upgrade head） ---'
+if ($DryRun) {
+    Write-Step '<干跑> 跳过 alembic upgrade head'
+} else {
+    $alembicOut = Join-Path $TmpDir 'portable-alembic.out'
+    $alembicErr = Join-Path $TmpDir 'portable-alembic.err'
+    Push-Location -LiteralPath $MyAppDir
+    try {
+        & $PyExe -m alembic upgrade head > $alembicOut 2> $alembicErr
+        if ($LASTEXITCODE -ne 0) {
+            $tail = ''
+            if (Test-Path -LiteralPath $alembicErr) { $tail = (Get-Content -LiteralPath $alembicErr -Tail 10) -join "`n" }
+            throw "alembic upgrade head 失败（见 $alembicErr）：$tail"
+        }
+    } finally { Pop-Location }
+    Get-Content -LiteralPath $alembicOut -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
+    Write-Ok 'alembic upgrade head 完成'
+}
+
 # ------------------------------------------------- 2) nginx 配置（含 -t 校验）
 Write-Step '--- 2/6 nginx 配置展开 ---'
 $startNginx = (Get-Cfg 'START_NGINX' '1') -eq '1'
