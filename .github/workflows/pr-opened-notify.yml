@@ -1,0 +1,49 @@
+# PR 开启时通知 Muse 1（Phase 2 P2-3 #132，审计 F20）。
+#
+# 背景：此前没有任何 workflow 在 PR 打开时通知 Muse 1——Muse 1 只能
+# 靠自己轮询 PR 列表发现新 PR，独立审核经常在 CI 全绿之后才开始，
+# 于是 #127、#136 两次被 auto-merge 在复审完成前合入旧 head。
+#
+# 机制：PR 一打开就打 `needs-review` 标签并留一条提示评论。Muse 1
+# 没有推送通道，标签是他在 PR 列表里能直接看到的待审信号；审核通过后，
+# 审核者在贴 passed 标记时顺手摘掉该标签（协议见
+# docs/workspace/review-record-protocol.md §九）。
+# 标签定义见 .github/labels.yml（先定义再创建，见下方说明）。
+#
+# 注意：本工作流只加标签、留言，不做任何合并判定；合入仍由 auto-merge
+# 的双门禁（QA smoke + 独立审核，同 SHA）决定。草稿 PR 也会收到通知，
+# 标签留在上面，等它 ready 后审核照常进行。
+
+name: pr-opened-notify
+
+on:
+  pull_request:
+    types: [opened]
+
+permissions:
+  pull-requests: write
+  issues: write
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 打 needs-review 标签并留言
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          API="https://api.github.com/repos/$REPO"
+          AUTH=(-H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json')
+          # 标签须已在仓库建好（定义见 .github/labels.yml；缺失时 --fail
+          # 让本作业变红，而不是静默跳过——没标签就等于没通知）。
+          curl -fsS -o /dev/null -X POST "${AUTH[@]}" "$API/issues/$PR/labels" \
+            -H 'Content-Type: application/json' \
+            --data-binary '{"labels":["needs-review"]}'
+          echo "PR #$PR 已打 needs-review"
+          curl -fsS -o /dev/null -X POST "${AUTH[@]}" "$API/issues/$PR/comments" \
+            -H 'Content-Type: application/json' \
+            --data-binary '{"body":"已打 `needs-review`：等待 Muse 1 独立审核（审核记录协议见 docs/workspace/review-record-protocol.md）。审核通过后，审核者在贴 passed 标记时摘掉本标签。"}'
+          echo "PR #$PR 已留言通知"

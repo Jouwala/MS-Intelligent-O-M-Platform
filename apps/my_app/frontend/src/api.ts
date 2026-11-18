@@ -475,6 +475,18 @@ export function getCnKpi5minsOverview(params?: { force?: boolean }) {
   return api.get('/cn-kpi-5mins/overview', { params: Object.keys(q).length ? q : undefined })
 }
 
+// CN 小时 KPI 看板（?page=cn_hourly_kpi）
+// 数据源：任务 cn_hourly_kpi_sync 写入的 <模板名>_UME 表（gr=3600，db_ps_cs_cn.sqlite3），
+// 模板来自 UME「KPI 模板管理」导出件 KPI Template.xlsx（见 services/cn_kpl/cn_hourly_kpi_service.py）。
+// params: start/end=YYYY-MM-DD 含端点（默认最近 7 天，上限 31 天）；force=true 跳过后端 300s 缓存
+export function getCnHourlyKpiOverview(params?: { start?: string; end?: string; force?: boolean }) {
+  const q: Record<string, string | number> = {}
+  if (params?.start) q.start = params.start
+  if (params?.end) q.end = params.end
+  if (params?.force) q.force = 1
+  return api.get('/cn-hourly-kpi/overview', { params: Object.keys(q).length ? q : undefined })
+}
+
 // ===== 原生看板（my-finebi 其余看板泛化迁移） =====
 // 一套端点驱动 17 个看板（IP RAN Metro Ring / 可用率 / 2G-3G-4G KPI / MTTR /
 // CM / 备件 / Progress 等），slug 见 backend/services/native/native_catalog.py。
@@ -1128,4 +1140,16 @@ export function getIpranTopoGraph(layer: string, refresh = 0) {
 /** 页签清单（key / 中英名 / 是否有 UME 人工布局）。页面用静态层定义，此接口供门户与调试。 */
 export function getIpranTopoLayers() {
   return api.get('/ipran-topo/layers')
+}
+
+// ========== RAN 资产台账（?page=ran_inventory）==========
+// 后端 routers/ran_inventory.py；数据源 RAN UME 的三类资产接口 + 网元表。
+// 一次取数约 2.9 万行 / 8 秒，服务端进程内缓存 600s；refresh=true 只绕过一次缓存。
+export function getRanInventoryLedger(refresh = false) {
+  return api.get('/ran-inventory/ledger', { params: refresh ? { refresh: true } : undefined })
+}
+
+/** 单网元的硬件 / 光模块 / 软件包明细（从服务端缓存取，不二次抓上游）。 */
+export function getRanInventoryNe(neId: string) {
+  return api.get(`/ran-inventory/ne/${encodeURIComponent(neId)}`)
 }

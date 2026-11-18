@@ -336,7 +336,7 @@ def session_still_valid(page, dashboard_url, wait_timeout=120000):
 
     注意：safe_goto 由调用方注入，避免本模块反向依赖 site_outage_service。
     """
-    from _playwright_utils import safe_goto
+    from backend.services._playwright_utils import safe_goto
 
     try:
         safe_goto(page, dashboard_url, timeout=wait_timeout)

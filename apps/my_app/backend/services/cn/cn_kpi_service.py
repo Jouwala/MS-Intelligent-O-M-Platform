@@ -147,54 +147,75 @@ WIDGETS: List[Dict[str, Any]] = [
         "id": "c1",
         "title": "VLR Subscribers",
         "chart": "line",
-        # ⚠ EMS 与 UME 是**同一个量在两套网管里的两次测量**，绝不可相加。
-        # 原 SQL 用 UNION ALL + SUM：两表实测有 30 天完全重叠（EMS 2026-09-02~10-01，
-        # UME 2026-07-01~10-01），于是那 30 天每天都 ≈ 双倍
-        # （1143472+1133095=2276567，而真实值约 113 万）。
-        # 正确口径：**同日取 EMS（人工导出，口径更贴合原看板），缺失日才用 UME 补**。
-        #
-        # 实现用 LEFT JOIN + UNION ALL 而非 FULL OUTER JOIN：
-        # 两者实测 93 行结果完全一致，但 FULL OUTER JOIN 需要 SQLite ≥ 3.39
-        # （远端当前 3.50.4 支持），而这是**远端服务的隐性版本依赖**，
-        # 一旦对端降级就会整页报错。LEFT JOIN 无此约束，故取此写法。
+        # 2026-11-18 业务口径（用户确认）：EMS 表 = **HQ** 站点，UME 表 = **ODC** 站点
+        # （UME 侧只有 MSC71，语音另含 MGCF76，正是一个站点的网元集合）。
+        # 所以两张表是**两个站点的同一 KPI**，可以相加得全网 Total；页面按
+        # HQ / ODC / Total 三条线显示（EMS→HQ、UME→ODC 的改名是用户要求）。
+        #   · 旧写法「同日优先 EMS、缺日取 UME」把两个站点压成一条线，换源日
+        #     出现台阶（10-18 UME 1,002,263 → 10-19 EMS 1,231,875，+22.9%）；
+        #   · 现在用**日历骨架 + 三条线**：只在各自有数据的日期有点，缺数即断线
+        #     （不用另一来源顶替、不插值）；Total 只在两站都有数的日期成立。
+        # 日历骨架同时保证「没有数据的日期」也有一行（值为 NULL），ECharts 才能断线。
+        # 递归 CTE 是 SQLite 内置能力（远端 3.50.4），无额外版本依赖。
         "source_table": "VLR_SUBSCRIBERS_TEMPLATE_OSS_EMS",
-        "fallback": "VLR_SUBSCRIBERS_TEMPLATE_OSS_UME",
+        # self_contained：SQL 已自带两张表 + 日历，不再走「主表→UME→月表」三级降级
+        # （否则 tier-2 的 _rewrite_source_table 会把 EMS 改写成 UME，两列变成同一张表）。
+        "self_contained": True,
+        "source_split": {
+            "ems": "VLR_SUBSCRIBERS_TEMPLATE_OSS_EMS",
+            "ume": "VLR_SUBSCRIBERS_TEMPLATE_OSS_UME",
+        },
         "sql": (
-            'SELECT e.d AS t, e.v AS "VLR Subscribers" FROM (\n'
-            'SELECT substr("End Time",1,10) AS d, SUM("Number of Subscribers in VLR") AS v '
-            'FROM "VLR_SUBSCRIBERS_TEMPLATE_OSS_EMS" GROUP BY 1) e\n'
-            "WHERE e.d >= {{LO}} AND e.d < {{HI}}\n"
-            'UNION ALL SELECT u.d AS t, u.v AS "VLR Subscribers" FROM (\n'
-            'SELECT substr("End Time",1,10) AS d, SUM("Number of Subscribers in VLR") AS v '
-            'FROM "VLR_SUBSCRIBERS_TEMPLATE_OSS_UME" GROUP BY 1) u\n'
-            'LEFT JOIN (SELECT substr("End Time",1,10) AS d '
-            'FROM "VLR_SUBSCRIBERS_TEMPLATE_OSS_EMS" GROUP BY 1) e2 ON e2.d = u.d\n'
-            "WHERE e2.d IS NULL AND u.d >= {{LO}} AND u.d < {{HI}}\n"
-            "ORDER BY t"
+            "WITH RECURSIVE cal(d) AS (\n"
+            "SELECT date({{LO}})\n"
+            "UNION ALL SELECT date(d,'+1 day') FROM cal "
+            "WHERE d < date({{HI}},'-1 day'))\n"
+            ', ems AS (SELECT substr("End Time",1,10) AS d, '
+            'SUM("Number of Subscribers in VLR") AS v '
+            'FROM "VLR_SUBSCRIBERS_TEMPLATE_OSS_EMS" GROUP BY 1)\n'
+            ', ume AS (SELECT substr("End Time",1,10) AS d, '
+            'SUM("Number of Subscribers in VLR") AS v '
+            'FROM "VLR_SUBSCRIBERS_TEMPLATE_OSS_UME" GROUP BY 1)\n'
+            'SELECT cal.d AS t, ems.v AS "HQ", ume.v AS "ODC",\n'
+            # 只有两站都有数时才成立；任一缺失给 NULL（前端断线，不画半截总和）
+            'CASE WHEN ems.v IS NULL OR ume.v IS NULL THEN NULL '
+            'ELSE ems.v + ume.v END AS "Total" FROM cal\n'
+            "LEFT JOIN ems ON ems.d = cal.d\n"
+            "LEFT JOIN ume ON ume.d = cal.d\n"
+            "ORDER BY cal.d"
         ),
     },
     {
         "id": "c4",
         "title": "Voice Traffic(Erl)",
         "chart": "line",
-        # 同 c1：EMS/UME 是同一量的两次测量，实测 30 天重叠，UNION ALL + SUM 会翻倍
-        # （42868+40460=83329，真实约 4.2 万）。改为同日优先 EMS、缺日取 UME。
-        # 注意主表写 UME：tier-1 只要**任一**表有数据就有行，写哪张都能出图；
-        # 写 UME 是因为它覆盖更长（121 天 vs 30 天），月度兜底表也挂在 UME 侧。
-        "source_table": "VOICE_TRAFFIC_TEMPLATE_OSS_UME",
-        "monthly_table": "1month_VOICE_TRAFFIC_TEMPLATE_OSS_UME",
+        # 同 c1：日历骨架 + HQ（EMS 表）/ ODC（UME 表）/ Total 三条线。
+        # 2026-11-18 回补后 UME 覆盖 08-31~11-18（含 9 月），EMS 仍只有人工导出的
+        # 10-19~11-18 —— 两条线的长短本身就是「谁缺数」的直接证据；
+        # Total 只在两站都有数的日期成立（断档/单站日期不画总和的半截值）。
+        "source_table": "VOICE_TRAFFIC_TEMPLATE_OSS_EMS",
+        "self_contained": True,
+        "source_split": {
+            "ems": "VOICE_TRAFFIC_TEMPLATE_OSS_EMS",
+            "ume": "VOICE_TRAFFIC_TEMPLATE_OSS_UME",
+        },
         "sql": (
-            'SELECT e.d AS t, e.v AS "Voice Traffic(Erl)" FROM (\n'
-            'SELECT substr("End Time",1,10) AS d, SUM("Seized Traffic(Erl)") AS v '
-            'FROM "VOICE_TRAFFIC_TEMPLATE_OSS_EMS" GROUP BY 1) e\n'
-            "WHERE e.d >= {{LO}} AND e.d < {{HI}}\n"
-            'UNION ALL SELECT u.d AS t, u.v AS "Voice Traffic(Erl)" FROM (\n'
-            'SELECT substr("End Time",1,10) AS d, SUM("Seized Traffic(Erl)") AS v '
-            'FROM "VOICE_TRAFFIC_TEMPLATE_OSS_UME" GROUP BY 1) u\n'
-            'LEFT JOIN (SELECT substr("End Time",1,10) AS d '
-            'FROM "VOICE_TRAFFIC_TEMPLATE_OSS_EMS" GROUP BY 1) e2 ON e2.d = u.d\n'
-            "WHERE e2.d IS NULL AND u.d >= {{LO}} AND u.d < {{HI}}\n"
-            "ORDER BY t"
+            "WITH RECURSIVE cal(d) AS (\n"
+            "SELECT date({{LO}})\n"
+            "UNION ALL SELECT date(d,'+1 day') FROM cal "
+            "WHERE d < date({{HI}},'-1 day'))\n"
+            ', ems AS (SELECT substr("End Time",1,10) AS d, '
+            'SUM("Seized Traffic(Erl)") AS v '
+            'FROM "VOICE_TRAFFIC_TEMPLATE_OSS_EMS" GROUP BY 1)\n'
+            ', ume AS (SELECT substr("End Time",1,10) AS d, '
+            'SUM("Seized Traffic(Erl)") AS v '
+            'FROM "VOICE_TRAFFIC_TEMPLATE_OSS_UME" GROUP BY 1)\n'
+            'SELECT cal.d AS t, ems.v AS "HQ", ume.v AS "ODC",\n'
+            'CASE WHEN ems.v IS NULL OR ume.v IS NULL THEN NULL '
+            'ELSE ems.v + ume.v END AS "Total" FROM cal\n'
+            "LEFT JOIN ems ON ems.d = cal.d\n"
+            "LEFT JOIN ume ON ume.d = cal.d\n"
+            "ORDER BY cal.d"
         ),
     },
     {
@@ -242,15 +263,26 @@ WIDGETS: List[Dict[str, Any]] = [
         "chart": "line",
         # 主表是自动同步的 UME（通常也够新）；DATA_SUBSCRIBERS 的 _EMS 实测已被
         # 人工导出覆盖成月粒度，说明这条人工链路不稳定，故再兜一层月表。
+        #
+        # 2026-11-18 按业务要求改口径与命名：
+        #   · 序列名改成制式名（GSM→2G、UMTS→3G、EPS→4G），并新增 5G；
+        #   · 5G 取自 C466010001（导出列 "Mean Number of EPS Attach NSA subscribers"，
+        #     该指标项与位置已加入 ccn_ume_kpi_service.CNN_KPI_QUERY_CONFIGS 的
+        #     DATA_SUBSCRIBERS，同步写库后才会有这一列）。
+        # ⚠ Total **仍只合计 2G+3G+4G**，不含 5G：5G NSA 用户是「EPS 附着里支持 NSA
+        # 的那部分」，与 4G EPS Attach 是**包含关系而非并列**，加进去会重复计数
+        # （实测同一 NE 同日 4G=293027 / 5G=20879，5G 从未大于 4G）。
+        # 因此图上 5G 单列一条曲线用于看趋势，Total 保持"不重复计数的用户总数"。
         "source_table": "DATA_SUBSCRIBERS_TEMPLATE_OSS_UME",
         "monthly_table": "1month_DATA_SUBSCRIBERS_TEMPLATE_OSS_UME",
         "sql": (
-            'SELECT substr("End Time",1,10) AS t, SUM(gsm) AS "GSM", '
-            'SUM(umts) AS "UMTS", SUM(eps) AS "EPS", '
+            'SELECT substr("End Time",1,10) AS t, SUM(gsm) AS "2G", '
+            'SUM(umts) AS "3G", SUM(eps) AS "4G", SUM(nsa) AS "5G", '
             'SUM(gsm+umts+eps) AS "Total" FROM (\n'
             'SELECT "End Time", "Mean number of attached subscribers(GSM)" AS gsm, '
             '"Mean number of attached subscribers(UMTS)" AS umts, '
-            '"Mean Number of EPS Attach subscribers" AS eps '
+            '"Mean Number of EPS Attach subscribers" AS eps, '
+            '"Mean Number of EPS Attach NSA subscribers" AS nsa '
             'FROM "DATA_SUBSCRIBERS_TEMPLATE_OSS_UME"\n'
             ")  GROUP BY substr(\"End Time\",1,10) "
             "HAVING t >= {{LO}} AND t < {{HI}} ORDER BY t"
@@ -662,6 +694,40 @@ def _resolve_fallback(src: str) -> Optional[str]:
     return cand
 
 
+def _has_any_value(rows: List[List[Any]], ncols: int) -> bool:
+    """行里是否至少有一个非空值。
+
+    为什么需要：c1/c4 改成「日历骨架」SQL 后，即使两张源表都没有数，
+    日历也会返回一堆 NULL 行。不能把这种「有行但全空」当成取数成功，
+    否则会跳过降级/报错分支，页面显示一张空图而不是「暂无数据」。
+
+    ⚠ 单值 KPI（如 kpi_time 的 `SELECT MAX(...)`）只有一列，那一列本身就是值，
+    不能按「第 1 列是日期、跳过」处理 —— 否则会被误判成空数据。
+    """
+    if ncols <= 1:
+        return any(r and r[0] is not None and r[0] != "" for r in rows)
+    return any(v is not None and v != "" for r in rows for v in r[1:])
+
+
+def _series_coverage(cols: List[str], rows: List[List[Any]]) -> Dict[str, Any]:
+    """统计每个来源序列的覆盖（起止日期 + 有数天数）与两源都没数的日期。
+
+    2026-11-18 起 c1/c4 的 SQL 返回日历骨架 + [EMS, UME] 两列：某天某来源
+    没有行时该列为 NULL，前端据此**断线**（不用另一来源顶替、不插值）。
+    这里只做统计、不重算数值，页面用「EMS 31 天 / UME 80 天」把谁缺数说清。
+    """
+    cov: Dict[str, Dict[str, Any]] = {}
+    for ci in range(1, len(cols)):
+        days = [str(r[0])[:10] for r in rows if ci < len(r) and r[ci] not in (None, "")]
+        if days:
+            cov[str(cols[ci])] = {"from": days[0], "to": days[-1], "days": len(days)}
+    missing = [
+        str(r[0])[:10] for r in rows
+        if all(ci >= len(r) or r[ci] in (None, "") for ci in range(1, len(cols)))
+    ]
+    return {"coverage": cov, "missing_days": missing}
+
+
 def _fetch_widget(w: Dict[str, Any], start: Optional[str] = None,
                   end: Optional[str] = None) -> Dict[str, Any]:
     """取单个组件的数据；失败只标记该组件，不影响整页。
@@ -689,6 +755,10 @@ def _fetch_widget(w: Dict[str, Any], start: Optional[str] = None,
         "degraded": "",
         "fallback_from": "",
         "granularity": "",
+        # 分源覆盖（只对带 source_split 的组件，如 c1 VLR / c4 Voice 填充）：
+        # coverage = {序列名: {from,to,days}}；missing_days = 两源都没有数的日期
+        "coverage": {},
+        "missing_days": [],
     }
     if w["chart"] == "text":
         return out
@@ -708,10 +778,13 @@ def _fetch_widget(w: Dict[str, Any], start: Optional[str] = None,
     # 早期版本只在「返回 0 行」时降级，主表一旦改名/被删就直接抛错开天窗 ——
     # 而上游表被人工导出重命名正是本页的常态，所以错误必须同样触发降级。
     tiers: List[tuple] = [("day", w["sql"], None)]
-    if w.get("fallback") or _fallback_candidate(src):
-        tiers.append(("day_ume", w["sql"], w.get("fallback") or _resolve_fallback(src)))
-    if w.get("monthly_table"):
-        tiers.append(("monthly", w["sql"], w["monthly_table"]))
+    # self_contained（c1/c4）：SQL 自带两张源表 + 日历骨架，不能再走降级 ——
+    # 降级会把 SQL 里的 EMS 表名整体改写成 UME，两条序列变成同一张表。
+    if not w.get("self_contained"):
+        if w.get("fallback") or _fallback_candidate(src):
+            tiers.append(("day_ume", w["sql"], w.get("fallback") or _resolve_fallback(src)))
+        if w.get("monthly_table"):
+            tiers.append(("monthly", w["sql"], w["monthly_table"]))
 
     errors: List[str] = []
     for kind, base_sql, dst in tiers:
@@ -730,7 +803,8 @@ def _fetch_widget(w: Dict[str, Any], start: Optional[str] = None,
                            w["id"], w["title"], dst or src or "(主表)", e)
             errors.append(f"{dst or src}: {e}")
             continue
-        if rows:
+        # 「日历骨架」会返回全 NULL 行：有行 ≠ 有数据，必须再判一次。
+        if rows and _has_any_value(rows, len(cols)):
             out["sql"] = use_sql
             out["columns"] = cols
             out["rows"] = rows
@@ -746,6 +820,14 @@ def _fetch_widget(w: Dict[str, Any], start: Optional[str] = None,
                 # 主表本身就是月粒度：不算「降级」，但必须标注粒度
                 logger.info("CN KPI 组件 %s(%s) 主表为月粒度数据（%d 行）",
                             w["id"], w["title"], len(rows))
+            # 分源组件（c1/c4）：回传每个来源的覆盖天数与两源都缺的日期。
+            # 只做统计，不改数值；页面据此显示「EMS 31 天 / UME 80 天」。
+            if kind == "day" and gran == "day" and w.get("source_split"):
+                extra = _series_coverage(cols, rows)
+                out.update(extra)
+                if extra["missing_days"]:
+                    logger.info("CN KPI 组件 %s(%s) 两源都缺 %d 天",
+                                w["id"], w["title"], len(extra["missing_days"]))
             return out
 
     # 所有级别都没有数据

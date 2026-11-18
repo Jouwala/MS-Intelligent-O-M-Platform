@@ -30,6 +30,12 @@ labels:
   - name: agent:muse-3
     color: "5319e7"
     description: "Coding Worker Muse 3：独立 VM，负责分配给它的开发任务"
+  - name: agent:muse-4
+    color: "d93f0b"
+    description: "生产构建与打包 Worker Muse 4：ZIP 交付构建与打包任务（Phase 1–2）"
+  - name: agent:muse-5
+    color: "6e5494"
+    description: "生产部署与发布 QA Worker Muse 5：ZIP 交付部署与发布 QA 任务（Phase 3–4）"
   - name: agent:grok
     color: "006b75"
     description: "已退役（2026-11-14）：QA 由 D:\02 本机 smoke-watcher 自动执行，不再有 Grok 实例"
@@ -61,6 +67,10 @@ labels:
   - name: state:in-review
     color: "d4c5f9"
     description: "开发完成待评审：PR 已开，等 Muse 1 评审"
+  # --- PR 待审（needs-review，紫色系；打在 PR 上，不是 Issue 状态）---
+  - name: needs-review
+    color: "5319e7"
+    description: "待独立审核：PR 已开，等 Muse 1 审代码；审核通过贴 passed 标记时由审核者摘掉（Phase 2 #132，pr-opened-notify.yml 自动打）"
   - name: state:qa-ready
     color: "fbca04"
     description: "待测试：由 D:\02 本机 smoke-watcher 自动冒烟（原 agent-orchestrator/Grok 已停用）"

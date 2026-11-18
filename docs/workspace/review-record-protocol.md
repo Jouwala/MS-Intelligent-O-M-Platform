@@ -25,8 +25,10 @@ CI 通过不等于代码没问题。用户指令（2026-11-17）：“审核是�
 
 ## 二、记录格式
 
-审核者在 PR 下发一条评论，**首行必须是机器可读标记**（HTML 注释），
-第二行起是人可读正文（结论、发现、复核证据）。
+审核者在 PR 下发一条评论，评论正文中须包含机器可读标记（HTML 注释，
+惯例贴在首行，与 smoke-result 标记一致），第二行起是人可读正文
+（结论、发现、复核证据）。一条评论只应含一个标记；同一评论含多条
+时以最后一条为准。
 
 ```
 <!-- review-result: pr-<N> sha-<40 位小写十六进制 SHA> reviewer-<审核者> verdict=passed|changes-requested|blocked -->
@@ -83,7 +85,8 @@ CI 通过不等于代码没问题。用户指令（2026-11-17）：“审核是�
 规则：
 
 1. **只看最后一条标记**：按评论时间顺序取 PR 下最后一条 review-result
-   标记，之前的所有标记一律作废。
+   标记，之前的所有标记一律作废；同一评论含多条标记时取该评论的
+   最后一条。
 2. **三条件同时成立才放行**：标记的 pr 等于本 PR；verdict 是 `passed`；
    标记的 sha 等于 PR 当前 head SHA。
 3. **新提交自动失效**：作者推新提交后 head 变化，旧 passed 标记的 sha
@@ -127,11 +130,13 @@ Jouwala——**仅凭 GitHub 评论无法区分“谁贴的标记”**。因此�
   绑定当前 head。回答“跑起来对不对”。
 - **审核门禁**（本协议）：review-result 标记 passed + 绑定当前 head。
   回答“代码写得对不对”。
-- 两者针对**同一 SHA**，缺一不可，互不替代。接线见 Issue #132。
+- 两者针对**同一 SHA**，缺一不可，互不替代。接线见 Issue #132：
+  `auto-merge.yml` 在 smoke SHA 绑定通过后调 `review_gate.py`
+  （取 main 检出的可信脚本）判定；任一门禁失败即跳过，不合入。
 
 ## 八、协议消息类型（补 agent-protocol.md）
 
-在 `docs/workspace/agent-protocol.md` 第二节 12 类消息后追加：
+在 `docs/workspace/agent-protocol.md` 第二节 15 类消息后追加：
 
 | # | 消息类型 | 机器可读头 | 谁发 | 人可读正文写什么 |
 | --- | --- | --- | --- | --- |
@@ -139,7 +144,23 @@ Jouwala——**仅凭 GitHub 评论无法区分“谁贴的标记”**。因此�
 | 14 | REVIEW_FAILED | `<!-- review-result: pr-<N> sha-<40> reviewer-<名> verdict=changes-requested -->` | Muse 1（独立审核） | 逐条阻塞发现（文件:行号 + 证据）与要求的修复 |
 | 15 | REVIEW_BLOCKED | `<!-- review-result: pr-<N> sha-<40> reviewer-<名> verdict=blocked -->` | Muse 1（独立审核） | 阻断原因（如涉生产库、须用户决定）与下一步 |
 
-状态机补充：`state:in-review` 是“PR 已开、待独立审核”的状态；审核
-通过后 Issue 仍保持 `state:in-review` 直到合入（合入后
-pr-merged-writeback 打 `state:merged`）。QA 标签（qa-ready /
-qa-passed / qa-failed）与审核状态并行存在，互不覆盖。
+状态机补充：`state:in-review` 是“PR 已开、待独立审核”的状态，由开发
+Agent 在 TASK_COMPLETED 时打上；watcher 在冒烟开始时按既有行为摘掉
+它（QA 状态单值化），此后审核状态不由 Issue 标签承载，而由 PR 评论
+里的 review-result 标记承载。QA 标签（qa-ready / qa-passed /
+qa-failed）与审核状态并行存在，互不覆盖。
+
+## 九、PR 开启通知与 needs-review 标签生命周期（#132）
+
+- **PR 一打开**，`pr-opened-notify.yml`（`pull_request[opened]` 触发）
+  就给 PR 打 `needs-review` 标签并留一条提示评论。Muse 1 没有推送
+  通道，标签是他在 PR 列表里能直接看到的待审信号——此前没有任何
+  workflow 在 PR 打开时通知 Muse 1，审核经常在 CI 全绿之后才开始，
+  于是 #127、#136 两次被 auto-merge 在复审完成前合入旧 head。
+- **审核通过后**，审核者在贴 passed 标记时顺手摘掉 `needs-review`
+  标签（浏览器操作，与贴标记同一趟）。标签只是“待审”信号，不是门禁
+  本身——真正阻断合并的是 auto-merge 里的 review-gate 判定。
+- **作者推新提交**不需要重打标签：`needs-review` 一直挂着，直到
+  审核通过摘掉；新 head 使旧 passed 失效由门禁的 SHA 比对处理。
+- 标签定义见 `.github/labels.yml`（先定义再创建）；工作流用 `--fail`
+  调标签接口——标签缺失时作业变红，而不是静默跳过（没标签就等于没通知）。

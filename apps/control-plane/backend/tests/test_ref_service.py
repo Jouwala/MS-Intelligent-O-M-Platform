@@ -102,14 +102,14 @@ def test_worker_registry_local_noop_mode(fake_github, ref_store, ref_transport, 
     worker = authority.register_worker(
         AGENT, INSTANCE, hostname="host-a", platform="linux", capabilities=("python", "git")
     )
-    assert worker.state == "active" and worker.hostname == "host-a"
+    assert worker.state == "online" and worker.hostname == "host-a"
     assert authority.heartbeat_worker(AGENT, INSTANCE) is True
     assert authority.heartbeat_worker(AGENT, "unknown") is False
     workers = authority.list_workers(stale_after=timedelta(seconds=90))
     assert [item.instance_id for item in workers] == [INSTANCE]
     assert workers[0].capabilities == ("python", "git")
     ref_clock.advance(3600)
-    assert authority.list_workers(stale_after=timedelta(seconds=90))[0].state == "stale"
+    assert authority.list_workers(stale_after=timedelta(seconds=90))[0].state == "offline"
 
 
 def test_worker_registry_issue_comments_and_heartbeat_throttle(
@@ -118,7 +118,7 @@ def test_worker_registry_issue_comments_and_heartbeat_throttle(
     fake_github.add_issue(99)
     authority = scheduler(ref_store, ref_transport, ref_clock, registry_issue=99)
     worker = authority.register_worker(AGENT, INSTANCE, hostname="h1", platform="linux")
-    assert worker.state == "active"
+    assert worker.state == "online"
     comments_after_register = len(fake_github.comment_bodies(99))
     assert comments_after_register >= 1
     # 节流窗口内不重复发评论，但心跳被接受
@@ -128,7 +128,7 @@ def test_worker_registry_issue_comments_and_heartbeat_throttle(
     assert authority.heartbeat_worker(AGENT, INSTANCE) is True
     assert len(fake_github.comment_bodies(99)) == comments_after_register + 1
     workers = authority.list_workers(stale_after=timedelta(seconds=90))
-    assert workers[0].hostname == "h1" and workers[0].state == "active"
+    assert workers[0].hostname == "h1" and workers[0].state == "online"
 
 
 def test_list_workers_parses_adapter_style_registry_comments(

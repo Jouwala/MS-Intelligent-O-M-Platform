@@ -314,6 +314,16 @@ class GitHubClient:
             idempotent=True,
         )
 
+    def update_issue(self, number: int, body: str) -> dict[str, Any]:
+        """就地更新一个 Issue 的正文（PATCH）。状态视图就靠它：固定 Issue
+        的正文每次刷新时整体重写，不另开 Issue、不追加评论。"""
+        return self._request(
+            "PATCH",
+            f"/repos/{self.repo}/issues/{number}",
+            {"body": body},
+            idempotent=True,
+        )
+
     def create_issue(self, title: str, body: str) -> dict[str, Any]:
         """新建 Issue（告警收件箱首次使用时建固定收件箱）。"""
         return self._request(
@@ -330,11 +340,18 @@ class GitHubClient:
         不靠评论时间推断。"""
         return self.paginate(f"/repos/{self.repo}/issues/{number}/events")
 
-    def list_open_issues(self, labels: str | None = None) -> list[dict[str, Any]]:
-        params: dict[str, Any] = {"state": "open"}
+    def list_issues(
+        self, state: str = "open", labels: str | None = None
+    ) -> list[dict[str, Any]]:
+        """按状态列 Issue（state: open / closed / all；含 PR 条目，调用方
+        自己按 `pull_request` 键过滤）。全量分页。"""
+        params: dict[str, Any] = {"state": state}
         if labels:
             params["labels"] = labels
         return self.paginate(f"/repos/{self.repo}/issues", params)
+
+    def list_open_issues(self, labels: str | None = None) -> list[dict[str, Any]]:
+        return self.list_issues(state="open", labels=labels)
 
     def add_issue_labels(self, number: int, labels: list[str]) -> Any:
         # POST 加标签是幂等的：同标签重复添加不会产生重复标签。
@@ -363,8 +380,15 @@ class GitHubClient:
     def get_pull(self, number: int) -> dict[str, Any]:
         return self._request("GET", f"/repos/{self.repo}/pulls/{number}")
 
+    def list_pulls(self, state: str = "open") -> list[dict[str, Any]]:
+        """按状态列 PR（state: open / closed / all）。全量分页。
+
+        注意：GitHub 的 /pulls 列表默认只给 open；取 closed/all 时
+        含已合入与未合入关闭的 PR，调用方按 `merged` 区分。"""
+        return self.paginate(f"/repos/{self.repo}/pulls", {"state": state})
+
     def list_open_pulls(self) -> list[dict[str, Any]]:
-        return self.paginate(f"/repos/{self.repo}/pulls", {"state": "open"})
+        return self.list_pulls(state="open")
 
     def get_git_ref(self, ref: str) -> dict[str, Any] | None:
         """按完整 ref（如 refs/heads/x）读取；不存在返回 None。"""

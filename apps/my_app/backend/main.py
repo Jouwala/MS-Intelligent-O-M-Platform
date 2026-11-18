@@ -94,6 +94,7 @@ from backend.routers import (
     avail_flm,
     avail_county,
     ran_cells_kpi,
+    ran_inventory,
     bp_report,
     ume_in_kpi,
     ume_in_screen,
@@ -135,6 +136,9 @@ from backend.routers import (
     portal_catalog,
     cn_kpi,
     cn_kpi_5mins,
+    # CN 小时粒度 KPI 看板（?page=cn_hourly_kpi）：数据源/口径见
+    # services/cn_kpl/cn_hourly_kpi_service.py 顶部说明。
+    cn_hourly_kpi,
     native_boards,
     repeat_site_down,
     fme_ranking,
@@ -264,6 +268,9 @@ app.include_router(avail_flm.router)
 app.include_router(avail_county.router)
 # RAN 2G/3G/4G Cells KPI 看板（小区级可用率，达标值 99.65%）
 app.include_router(ran_cells_kpi.router)
+# RAN 资产台账（page=ran_inventory；RAN UME 三类资产接口 + 网元表，只统计在线网元，
+# 服务端进程内缓存 600s，口径见 services/ran_inventory/ran_inventory_service.py）
+app.include_router(ran_inventory.router)
 # BP Report 劣化小区报告（page=bp_report；读本机派生库 data/bp_report.sqlite3，
 # Cluster 来自 Excel 的 BP Cells List、指标由 RAN_UME 更新，口径见 services/bp/bp_caliber.py）
 app.include_router(bp_report.router)
@@ -363,6 +370,9 @@ app.include_router(cn_kpi.router)
 # CN KPI 5 分钟看板：读 cnn_kpi_sync_5mins 任务写入的 5mins_* 表，Day0/Day1/Day7 叠画。
 # 数据源/口径见 services/cn/cn_kpi_5mins_service.py 顶部说明。
 app.include_router(cn_kpi_5mins.router)
+# CN 小时 KPI 看板：读 cn_hourly_kpi_sync 任务写入的 <模板名>_UME 表（gr=3600，
+# 数据源 KPI Template.xlsx）。数据源/口径见 services/cn_kpl/cn_hourly_kpi_service.py 顶部说明。
+app.include_router(cn_hourly_kpi.router)
 # 原生看板（泛化版）：my-finebi 其余全部看板（IP RAN Metro Ring / 可用率 / 2G-3G-4G KPI /
 # MTTR / CM / 备件 / Progress 等 17 个）统一由一套引擎驱动，经远端只读 SQL API 取数，
 # 不依赖 my-finebi 进程；支持时间窗口过滤与 Excel 导出。

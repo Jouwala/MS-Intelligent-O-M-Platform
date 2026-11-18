@@ -350,11 +350,11 @@ $PyExe       = Join-Path $Root 'runtime\python312\python.exe'
 $AppDir      = Join-Path $Root 'apps\my_app'
 $AuthSrc     = 'D:\01_olbr_portal\Task\my_app\db\app.db'
 $AuthTgt     = Join-Path $Root 'apps\my_app\db\app.db'
-$AuthExpect  = [ordered]@{
-    credentials          = 20
-    task_schedule_config = 74
-    email_recipients     = 10
-}
+# 只列「必须出现在 check 输出里的表名」。行数**不再硬编码**——2026-11-18 实测踩过：
+# 副本补了一条 email_recipients（10→11，补的是生产本来就有的那条），硬编码的期望值
+# 把一次正确迁移判成了冒烟失败。判据改为「源库可读时两侧必须一致」，
+# 源库为空/不可读时只报告、不判失败（换机器没有 01 副本时不该误伤）。
+$AuthTables  = @('credentials', 'task_schedule_config', 'email_recipients')
 $TestPorts   = @(8080, 8443, 7039, 7091, 9277, 55432)
 # 后端派生的实时代理（start_all 不写它们的 pid，故 stop_all 停不掉）-- 只记录，不杀
 $ExtraPorts  = @(8887, 8890)
@@ -987,16 +987,21 @@ try {
     }
     $countOk = $true
     $countBits = @("exit=$authCode")
-    foreach ($t in $AuthExpect.Keys) {
+    $countParts = @()
+    foreach ($t in $AuthTables) {
         if (-not $got.ContainsKey($t)) {
             $countOk = $false
             $countBits += "$t=MISSING"
+            $countParts += ("{0}=?" -f $t)
         } else {
-            $countBits += ("{0} source={1} target={2}" -f $t, $got[$t].Src, $got[$t].Tgt)
-            if ($got[$t].Tgt -ne $AuthExpect[$t]) { $countOk = $false }
+            $srcN = $got[$t].Src
+            $tgtN = $got[$t].Tgt
+            $countBits += ("{0} source={1} target={2}" -f $t, $srcN, $tgtN)
+            $countParts += ("{0}={1}" -f $t, $tgtN)
+            if ($srcN -gt 0 -and $tgtN -ne $srcN) { $countOk = $false }
         }
     }
-    Add-R '§8.2 local_authority_tools check 三表行数 credentials/task_schedule_config/email_recipients = 20/74/10' `
+    Add-R ('§8.2 local_authority_tools check 三表行数与源一致（' + ($countParts -join '/') + '）') `
         (($authCode -eq 0) -and $countOk) ($countBits -join '; ')
 
     # ======================================================== 4. §8.3 检查
@@ -1014,8 +1019,14 @@ try {
         }
         Add-R '(1) /api/health 返回 db_mode=pg' ($dbMode -eq 'pg') ("db_mode='$dbMode' body=$(Short $health)")
 
-        $wo = Get-Body 'http://127.0.0.1:7039/api/wo-dashboard/overview'
-        $woOk = ($wo.Length -gt 20) -and ($wo -notmatch '^\s*\{\s*\}\s*$') -and ($wo -notmatch '^\s*\[\s*\]\s*$')
+        # 与 /api/health 同理：后端偶发比 start_all 晚就绪（2026-11-18 #157 实测 wo 首秒 len=0）
+        $wo = ''; $woOk = $false
+        for ($i = 0; $i -lt 15; $i++) {
+            $wo = Get-Body 'http://127.0.0.1:7039/api/wo-dashboard/overview'
+            $woOk = ($wo.Length -gt 20) -and ($wo -notmatch '^\s*\{\s*\}\s*$') -and ($wo -notmatch '^\s*\[\s*\]\s*$')
+            if ($woOk) { break }
+            Start-Sleep -Seconds 1
+        }
         Add-R '(2) /api/wo-dashboard/overview 返回非空业务数据' $woOk ("len=$($wo.Length) body=$(Short $wo 200)")
 
         $c = Get-Status 'http://127.0.0.1:9277/uniplam/'

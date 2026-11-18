@@ -1,0 +1,51 @@
+# 统一多 Muse 状态视图（#142）：事件驱动刷新固定状态 Issue，不定时轮询。
+#
+# 触发：
+#   - pull_request opened/closed：PR 打开/合入时刷新；
+#   - issues opened/closed/labeled/unlabeled：任务认领/关闭/贴 QA 失败标记时刷新；
+#   - issue_comment created：认领与审核/冒烟标记都是评论——labeled 事件可能被
+#     GITHUB_TOKEN 抑制时（如 auto-dispatch 改标签），评论事件兜底；
+#   - workflow_dispatch：手动刷新；auto-merge 合入后显式 dispatch（GITHUB_TOKEN
+#     合并不会触发 pull_request closed 事件，见 pr-merged-writeback 前例）。
+#
+# 安全阀：
+#   - 只读 + 更新本 Issue 正文，不改代码、不改标签、不重跑、不合并；
+#   - 正文完全相同时跳过 PATCH，不产生无意义的写操作；
+#   - CLI 失败（exit 非零）只让本工作流变红，不影响其他工作流。
+#
+# 载体：固定状态 Issue `[状态视图] Muse 1`（首次使用时由 CLI 自动创建），
+# 与 #143 告警收件箱同一模式。不用 docs 文件：往 main 直接提交文件违反
+# “完工走 PR、不直接推 main”。
+
+name: status-view
+
+on:
+  pull_request:
+    types: [opened, closed]
+  issues:
+    types: [opened, closed, labeled, unlabeled]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: '触发本次刷新的 PR 编号（auto-merge 合入后传入；手动刷新可留空）'
+        required: false
+        type: number
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出仓库（取状态视图 CLI）
+        uses: actions/checkout@v4
+
+      - name: 刷新状态视图
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: python apps/control-plane/backend/dispatch/status_view.py update

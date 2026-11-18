@@ -89,6 +89,8 @@ class FakeGitHub(GitHubClient):
         state: str = "open",
         title: str | None = None,
         pull_request: bool = False,
+        created_at: str = "2026-11-18T00:00:00Z",
+        closed_at: str | None = None,
     ) -> dict[str, Any]:
         with self.lock:
             self.issues[number] = {
@@ -97,6 +99,8 @@ class FakeGitHub(GitHubClient):
                 "labels": list(labels),
                 "title": title or f"Issue {number}",
                 "pull_request": pull_request,
+                "created_at": created_at,
+                "closed_at": closed_at,
             }
             self.comments.setdefault(number, [])
             return self.issues[number]
@@ -122,6 +126,8 @@ class FakeGitHub(GitHubClient):
         merge_sha: str | None = None,
         labels: tuple[str, ...] | list[str] = (),
         draft: bool = False,
+        merged_by: str | None = None,
+        merged_at: str | None = None,
     ) -> dict[str, Any]:
         with self.lock:
             pull = {
@@ -134,6 +140,8 @@ class FakeGitHub(GitHubClient):
                 "head": {"ref": head_ref, "sha": head_sha},
                 "base": {"ref": base},
                 "labels": [{"name": lb} for lb in labels],
+                "merged_by": {"login": merged_by} if merged_by else None,
+                "merged_at": merged_at,
             }
             self.pulls[number] = pull
             self.known_shas.add(head_sha)
@@ -275,7 +283,7 @@ class FakeGitHub(GitHubClient):
                 )
             match = re.fullmatch(r"issues/(\d+)", rest)
             if match:
-                return self._issue_get(method, int(match.group(1)))
+                return self._issue(method, int(match.group(1)), payload)
             if rest == "issues":
                 return self._issues_list(method, query, payload)
             match = re.fullmatch(r"pulls/(\d+)", rest)
@@ -332,16 +340,25 @@ class FakeGitHub(GitHubClient):
             "state": issue["state"],
             "body": issue.get("body") or "",
             "labels": [{"name": label} for label in issue["labels"]],
+            "created_at": issue.get("created_at") or "2026-11-18T00:00:00Z",
+            "closed_at": issue.get("closed_at"),
         }
         if issue.get("pull_request"):
             view["pull_request"] = {}
         return view
 
-    def _issue_get(self, method: str, number: int) -> tuple[int, dict[str, str], Any]:
-        if method != "GET":
-            return 405, {}, {"message": "method not allowed"}
+    def _issue(self, method: str, number: int, payload: Any) -> tuple[int, dict[str, str], Any]:
+        """GET /issues/{n} 读 Issue；PATCH /issues/{n} 改正文（状态视图用）。
+
+        PATCH 只认 `body` 字段；Issue 不存在返回 404。"""
         if number not in self.issues:
             return 404, {}, {"message": "Not Found"}
+        if method == "PATCH":
+            if isinstance(payload, dict) and "body" in payload:
+                self.issues[number]["body"] = str(payload["body"])
+            return 200, {}, self._issue_view(number)
+        if method != "GET":
+            return 405, {}, {"message": "method not allowed"}
         return 200, {}, self._issue_view(number)
 
     def _issues_list(
@@ -464,10 +481,11 @@ class FakeGitHub(GitHubClient):
     def _pulls_list(self, method: str, query: dict[str, str]) -> tuple[int, dict[str, str], Any]:
         if method != "GET":
             return 405, {}, {"message": "method not allowed"}
+        state = query.get("state", "open")
         items = [
             self._pull_view(number)
             for number in sorted(self.pulls)
-            if self.pulls[number].get("state") == "open"
+            if state == "all" or self.pulls[number].get("state") == state
         ]
         return self._page(f"/repos/{self.repo}/pulls", query, items)
 

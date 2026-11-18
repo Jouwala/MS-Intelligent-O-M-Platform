@@ -1,12 +1,14 @@
 """独立代码审核记录门禁（Phase 2 P2-1，Issue #131）。
 
-协议见 `docs/workspace/review-record-protocol.md`。审核结论以 PR 评论首行
-的机器可读标记承载，复用冒烟结果（smoke-result）的 SHA 绑定模式：
+协议见 `docs/workspace/review-record-protocol.md`。审核结论以 PR 评论里
+的机器可读标记承载（惯例贴在评论首行），复用冒烟结果（smoke-result）
+的 SHA 绑定模式：
 
     <!-- review-result: pr-<N> sha-<40 位 SHA> reviewer-<审核者> verdict=passed|changes-requested|blocked -->
 
 判定规则（唯一真相源，本模块与 `auto-merge.yml` 的门禁共用）：
-- 取 PR 评论里**最后一条** review-result 标记（按评论时间顺序）；
+- 取 PR 评论里**最后一条** review-result 标记（按评论时间顺序；
+  同一评论含多条标记时取最后一条）；
 - 门禁通过当且仅当：标记的 pr 等于本 PR、verdict 是 passed、
   标记的 sha 等于当前 head SHA；
 - 新提交（sha 变化）自动使旧审核失效；审核者事后改判（补一条
@@ -27,11 +29,13 @@ import sys
 import urllib.request
 
 #: 审核记录标记。reviewer 只允许字母/数字/`_`/`-`/`.`（如 muse-1、muse-4）。
+#: verdict 后须跟空白、`--`（标记结尾）或串尾——没有这个边界，
+#: `verdict=passedXYZ` 也会被解析成 passed（放行方向，绝不允许）。
 REVIEW_MARKER_RE = re.compile(
     r"review-result:\s*pr-(?P<pr>\d+)\s+"
     r"sha-(?P<sha>[0-9a-f]{40})\s+"
     r"reviewer-(?P<reviewer>[A-Za-z0-9_.\-]+)\s+"
-    r"verdict=(?P<verdict>passed|changes-requested|blocked)"
+    r"verdict=(?P<verdict>passed|changes-requested|blocked)(?=(?:\s|--|$))"
 )
 
 #: 合法 verdict 全集；只有 passed 能放行合并。
@@ -42,6 +46,8 @@ def format_review_marker(
     pr_number: int, sha: str, reviewer: str, verdict: str
 ) -> str:
     """生成一条审核记录标记（贴评论首行用）。"""
+    if not isinstance(pr_number, int) or pr_number < 1:
+        raise ValueError(f"非法 PR 编号：{pr_number!r}")
     if verdict not in VERDICTS:
         raise ValueError(f"非法 verdict：{verdict!r}，只允许 {VERDICTS}")
     if not re.fullmatch(r"[0-9a-f]{40}", sha or ""):
@@ -55,16 +61,19 @@ def format_review_marker(
 
 
 def parse_review_markers(bodies: list[str]) -> list[dict]:
-    """按评论顺序抽取全部 review-result 标记（一条评论最多取一条）。
+    """按评论顺序抽取全部 review-result 标记（同一评论含多条时取最后一条）。
 
     每条返回 {"pr": int, "sha": str, "reviewer": str, "verdict": str}。
     格式不对的行直接跳过，不抛错——评论正文是人写的，门禁只认合规标记。
+    取最后一条是安全方向：同一评论先贴 passed、后贴 blocked 时，
+    blocked 说了算，不会把已改判的结论当成通过。
     """
     markers: list[dict] = []
     for body in bodies or []:
-        match = REVIEW_MARKER_RE.search(body or "")
-        if not match:
+        matches = list(REVIEW_MARKER_RE.finditer(body or ""))
+        if not matches:
             continue
+        match = matches[-1]
         markers.append(
             {
                 "pr": int(match.group("pr")),
@@ -111,10 +120,17 @@ def review_gate_passes(
 
 
 def fetch_comment_bodies(repo: str, pr_number: int, token: str) -> list[str]:
-    """读 PR 的全部 Issue 评论正文（分页拉满，顺序即时间顺序）。"""
+    """读 PR 的全部 Issue 评论正文（分页拉满，顺序即时间顺序）。
+
+    最多拉 100 页（10000 条评论）：服务端若永远返回满页就不再是
+    “分页”，而是异常——此时抛错，门禁 fail-closed（main 捕获后
+    exit 1），不让门禁脚本无限循环。
+    """
     bodies: list[str] = []
     page = 1
     while True:
+        if page > 100:
+            raise RuntimeError(f"评论分页超过 100 页，疑似服务端异常")
         url = (
             f"https://api.github.com/repos/{repo}/issues/{pr_number}"
             f"/comments?per_page=100&page={page}"

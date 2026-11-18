@@ -1,6 +1,6 @@
 # my_app User Help & Guide
 
-> User-facing platform features & operations guide. Generated from the same source as the in-app Help page (frontend/src/helpMarkdown.ts), compiled from docs/manual/ and backend/task_registry.py. Generated on 2026-11-17.
+> User-facing platform features & operations guide. Generated from the same source as the in-app Help page (frontend/src/helpMarkdown.ts), compiled from docs/manual/ and backend/task_registry.py. Generated on 2026-11-18.
 
 > In-app entry: the "Help" sidebar item, or `http://<host>/myapp/?page=help` directly.
 
@@ -10,7 +10,7 @@
 
 - [1. Platform Overview](#1-platform-overview)
 - [2. General Usage](#2-general-usage)
-- [3. Task Manager Deep Dive (84 tasks)](#3-task-manager-deep-dive)
+- [3. Task Manager Deep Dive (85 tasks)](#3-task-manager-deep-dive)
 - [4. Pages Guide](#4-pages-guide)
 - [5. Ops & Troubleshooting](#5-ops-troubleshooting)
 - [6. FAQ](#6-faq)
@@ -83,7 +83,7 @@ Built for the NOC scenario "boards every day, reports must go out": 41+ schedule
 
 > ⚠️ **New tasks MUST also be registered in `GROUP_TASK_MAP` in worker_watchdog.py** — declaring them only in TASK_SPECS leaves them pending forever. This accident happened four times (finebi_report_sync / whatsapp_send_ext / sp_email_details / the olib_soc and vmax_multi_data_sync tasks found on 2026-09-18).
 
-### 3.3 Full task catalog (84 tasks)
+### 3.3 Full task catalog (85 tasks)
 
 | Task | task_id | Default cron | Group | Workflow script |
 | --- | --- | --- | --- | --- |
@@ -110,6 +110,7 @@ Built for the NOC scenario "boards every day, reports must go out": 41+ schedule
 | BP Cells Report Sync | `bp_report_sync` | `20 6 * * *` | u | `services/bp/bp_report_sync.py → run_bp_report_sync` |
 | CNN UME KPI Sync | `cnn_kpi_sync` | `0 6 * * *` | n | `services/cnn/ccn_ume_kpi_service.py → run_cnn_kpi_sync` |
 | CNN UME KPI 5-Min Sync | `cnn_kpi_sync_5mins` | `*/15 * * * *` | n | `services/cnn/cnn_ume_kpi_5mins_service.py → run_cnn_kpi_sync_5mins` |
+| CN Hourly KPI Sync | `cn_hourly_kpi_sync` | `20 6 * * *` | n | `services/cn_kpl/cn_hourly_kpi_service.py → run_cn_hourly_kpi_sync` |
 | SP Spare Data Sync | `sp_data_sync` | `10 * * * *` | s | `services/sp/get_sp_table.py → run_sp_data_sync` |
 | iPRAN UME KPI Sync | `ipran_kpi_sync` | `0 * * * *` | u | `services/ipran/ipran_ume_kpi_service.py → run_ipran_kpi_sync` |
 | Liberia Site-Down 1H Report Email | `liberia_email_1h` | `15 * * * *` | m | `services/email/liberia_email_report.py → run_1h_report` |
@@ -635,6 +636,27 @@ Workflow & maintenance notes per task:
 - WARNING: one run used to take about 105 s with the full 1.5-day window (Free Rating alone has 14k rows/day); since 2026-11-15 the default window is incremental (last 120 minutes), so writes per round are a few hundred rows — this also unblocks the page reads that the remote SQLite write lock used to stall
 - Runs in group n alongside cnn_kpi_sync so the two never log into the same account and kick each other off
 - The only consumer is ?page=cn_kpi_5mins (services/cn/cn_kpi_5mins_service.py reads the 5mins_* tables)
+
+#### CN Hourly KPI Sync（`cn_hourly_kpi_sync`）
+
+- Default cron: `20 6 * * *`　|　worker group: **n**
+- Workflow script: `services/cn_kpl/cn_hourly_kpi_service.py → run_cn_hourly_kpi_sync`
+
+**What it does**: Parses 3 templates from the UME "KPI Template" export file KPI Template.xlsx (PS_xGW_Session_Capacity_OSS / PS_xGW_Throughput_Capacity_OSS / CS_MRFP96_Resource_Utilization_OSS), queries them at hourly granularity (gr=3600) and writes the <template>_UME tables in DB CNN for the date-rangeable CN Hourly KPI board; Object Scope=ALL covers every NE, and only the Utilization family is kept because Utilization/Capacity duplicate each other (user decision 2026-11-18)
+
+**Workflow & data flow**:
+
+1. Parse KPI Template.xlsx (falls back to embedded configs with a warning if the file is missing)
+1. Log into CNN UME (shares the session cache with cnn_kpi_sync)
+1. Query each template at hourly granularity (2-day incremental window by default; first backfill via python -m ... --days 31)
+1. Upsert into db_ps_cs_cn tables named <template>_UME (PK Begin Time+NE(+SERVICE))
+
+**Maintenance**:
+
+- WARNING: a 0-row export is treated as an empty state and skipped, not a failure (same as the 5-minute task)
+- Runs in group n alongside cnn_kpi_sync / cnn_kpi_sync_5mins so the shared CNN UME session never gets kicked
+- Consumer: ?page=cn_hourly_kpi (routers/cn_hourly_kpi.py + the read side of cn_kpl/cn_hourly_kpi_service.py)
+- When the upstream changes templates, re-export the xlsx over cn_kpl/KPI Template.xlsx — no code change needed
 
 #### SP Spare Data Sync（`sp_data_sync`）
 
@@ -2292,6 +2314,23 @@ RAN Cells KPI: per-technology (2G/3G/4G) daily availability matrices for cells, 
 - The two easiest misreadings are stated in the bubbles: **the monthly figure is the arithmetic mean of the daily availabilities (one vote per day, not weighted by the number of cells that day)** — a day with 3 cells counts as much as a day with 300; and **the meeting / below shares divide by the cells that had a value that day, excluding cells without data** — so heavy upstream gaps inflate the meeting share
 - This page is **cell-level** availability (2G = available channels ÷ (available + unavailable), 3G/4G = service time ÷ 86400) and is **not the same caliber** as the site-level UME values on the site availability page — the two cannot be compared directly
 
+#### ran_inventory（`ran_inventory`）
+
+RAN asset ledger: turns the three asset families on RAN UME — hardware units, software packages and optical modules — into one searchable, exportable register per network element (added 2026-11-18). The ledger lists **online NEs only** (connectionState = 1); offline NEs only affect the denominator of the "online NEs" card and none of their assets are counted anywhere.
+
+- The "how it is calculated" note at the top is **collapsed by default**; open it for the online scope, the asset-to-NE join keys, hardware grouping, the age algorithm, the enumerations that have no published dictionary, and the data source
+- Six cards: online NEs / sites on record / hardware assets / software packages / optical modules / average equipment age. The ⓘ in each title explains that card; hovering the number shows the composition of that figure (how many offline NEs were excluded, how many records are not inventorystatus 1)
+- Five charts: NE type mix (by online NE), hardware asset mix (by unit count), manufacturing year (by hardware unit), optical vendor share, and the top 10 board models
+- The table searches by site / IP / NE ID, filters by NE type, or keeps only NEs aged 8 years or more; click a header to sort; click a row to open that NE's hardware / optical / software detail
+- **Model statistics** (added 2026-11-18): switch to "Model pivot" for one column per model, grouped under boards / radio / antennas with the group total in the header and a "Total" first column inside each group. Narrow it to a single category or change the number of columns per group (6/8/10/12) — model columns only show the most frequent models in the current filter and merge the rest into "Other", so filtering to SDR does not leave a row of zero-filled board columns
+- The site-summary view also carries three model columns (board / radio / antenna models), shown as "VBP 2 · VSW 1 · VFC 1" with a +N for the rest; hovering gives every model of that type on the NE with its count
+- Model keys: boards and radio units use packfunction (the orderable model such as VBP / VFC / R9242E); antennas use vendorunittypename, because packfunction on antenna records is always RETC (the RET controller class) and would not distinguish anything
+- The Excel export covers **the current view and filter**: the summary view exports one ledger sheet (including the three model-composition columns), the model pivot exports a two-level-header model sheet grouped by boards / radio / antennas. Both use the site-wide UNIFIED_EXCEL_V1 format. The detail modal has its own export with three sheets: hardware, optical, software
+- The asset tables are refreshed by the network manager around 04:00 daily and the backend caches them for 600 seconds; "Reload" bypasses the cache and pulls again (about 8 seconds) — do not click it repeatedly
+- ⚠ Upstream publishes no dictionary for inventorystatus / swstatus / maintainStatus. The page keeps the raw values and does **not** infer meanings such as "1 is in service, 2 is decommissioned"; the detail panel only reports how many records are not inventorystatus 1
+- ⚠ Age is measured from the **oldest single unit** of the NE, so "average equipment age" is an equipment age, not the site service life; the "over 8 years" count follows the same rule
+- ⚠ "Sites on record" de-duplicates by NE userlabel. It is lower than the online NE count because a few sites carry two NEs (for example 2G/3G and 4G); that is not missing data
+
 #### Packet Loss（`packet_loss`）
 
 LTE packet loss board (RAN UME SDR / IPRAN IPPD): last 7 complete calendar days at hourly granularity; the ongoing day is hidden.
@@ -2355,6 +2394,18 @@ CN KPI 5-minute dashboard: overlays today (Day0), yesterday (Day1) and 7 days ag
 - The "vs yesterday ±%" tag opens with the admission that it is computed **by the frontend** (the API sends no pct): today's mean from 00:00 to now against yesterday's mean truncated to the same clock time, ±10% grey and beyond orange. It disappears entirely when either day has no point in that span, or yesterday's mean is 0
 - The header tags "N/N widgets with data", "elapsed / cache" and "N failed" are hover-explainable too: empty and failed widgets are both **excluded** from "with data", and the failure count covers query errors only
 - "Export Excel" writes one sheet per widget, expanded as Day0 / Day1 / Day7 columns by time of day (only the days that widget actually has)
+
+#### cn_hourly_kpi（`cn_hourly_kpi`）
+
+CN Hourly KPI board: an HOURLY-granularity view of xGW session/throughput capacity and MGW/MRFP resource utilization, with a selectable date range (last 7 days by default, up to 31 days). The data comes from 3 templates parsed out of the UME "KPI Template" export file KPI Template.xlsx (templates created 2026-11-17); task cn_hourly_kpi_sync pulls them at gr=3600 every day at 06:20 into the <template>_UME tables in db_ps_cs_cn. Caliber (set 2026-11-18): the Resource_Utilization and Resource_Capacity template families duplicate each other, so only Utilization is kept; Object Scope=ALL, covering every network element.
+
+- Seven widget cards: xGW PFCP sessions used, xGW session occupancy(%), xGW throughput used(Mbps), xGW throughput occupancy(%), and MGW/MRFP TONE/TC/RTP utilization(%). The first four plot xGWU22/xGWU122 (occupancy is a single merged ALL line), the last three plot MGW_91/MGW_92/MRFP_96
+- Change the date range with the range picker (inclusive endpoints); the board refetches immediately and is capped at 31 days (same tier as the backfill window)
+- **Every widget title explains its value on hover**: the ⓘ spells out the aggregate per card — session/throughput usage is a SUM over NE-hours, occupancy is SUM(Used)×100÷SUM(Authorized) weighted across NEs, and resource utilization is the upstream composite-KPI value as-is (e.g. 100*C408230024/(Gr*C408230021), Gr=3600s) with no recomputation on the page
+- The first month of history comes from the backfill command: python -m backend.services.cn_kpl.cn_hourly_kpi_service --days 31; afterwards the daily 06:20 run appends new hours automatically (2-day window by default)
+- The header tags "N/N widgets with data", "date range" and "N failed" are hover-explainable too: empty and failed widgets are both excluded from "with data"
+- "Data caliber notes" is collapsed by default (click the title to expand): template origin, the Utilization/Capacity choice, Object Scope=ALL and the utilization formulas are all in there
+- "Export Excel" writes one sheet per widget, expanded per NE column by hour, for reconciliation
 
 #### UME iMonitor Screen（`imonitor`, iframe page）
 

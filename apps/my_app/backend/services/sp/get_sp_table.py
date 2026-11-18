@@ -422,11 +422,7 @@ def download_file(sftp, remote_file, local_path, convert_to_excel=False):
         final = Path(local_path)
         tmp = final.with_suffix(final.suffix + f".{os.getpid()}.tmp")
         sftp.get(remote_file, str(tmp))
-        try:
-            from .atomic_write import atomic_replace_file
-        except ImportError:
-            logging.getLogger(__name__).warning("[SILENT-EXCEPT] download_file: exception swallowed", exc_info=True)
-            from atomic_write import atomic_replace_file
+        from backend.services.atomic_write import atomic_replace_file
         atomic_replace_file(str(tmp), str(final))
 
 

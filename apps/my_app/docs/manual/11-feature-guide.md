@@ -40,6 +40,7 @@
 | 25 | RAN 小区 KPI | `ran_cells_kpi` | React |
 | 26 | CN KPI | `cn_kpi` | React |
 | 27 | CN KPI 5分钟 | `cn_kpi_5mins` | React |
+| 27b | CN 小时KPI | `cn_hourly_kpi` | React |
 | 28 | 客户业务 KPI | `ume_in_kpi` | React |
 | 29 | CXO 经营看板 | `cxoDashboard` | **iframe** |
 | 30 | VMAX CXO 原版看板 | `vmaxCxoDashboard` | **iframe** |
@@ -65,6 +66,7 @@
 | 52 | IPT 站点电源查询 | `ipt_power` | React |
 | 46 | Speedtest 基准报告 | `bm_speedtest` | React |
 | 47 | Meta 基准报告 | `bm_meta` | React |
+| 47b | RAN 资产台账 | `ran_inventory` | React |
 | 48 | 数据总览 | `overview` | React |
 | 49 | 表浏览器 | `tables` | React |
 | 50 | 数据上传 | `upload` | React |
@@ -4679,9 +4681,11 @@ GROUP BY substr("End Time",1,10)
 曲线整体抬到约 2 倍高度，且早段（只有 UME）是正常量级 →
 **曲线中间出现一个台阶式跳变**。这就是用户报的「日期不一致时图会异常」。
 
-**关键认知：EMS 与 UME 是同一个量在两套网管里的两次测量，不是两个可加的组成部分。**
-证据：两边数值本身只差约 1%（1143472 vs 1133095），
-差异来自采集口径/时点，**相加没有任何业务含义**。
+**关键认知（2026-10-01 当时）**：EMS 与 UME 数值只差约 1%（1143472 vs 1133095），
+当时判定为「同一个量在两套网管里的两次测量，相加没有业务含义」。
+
+> **⚠ 2026-11-18 业务更正**：两张表其实是 **HQ / ODC 两个站点**（UME 侧只有
+> MSC71 + MGCF76），可以相加得 `Total`。下面这段保留作历史；现行口径见 §33.3c。
 
 **正确口径：同日优先 EMS，缺失日才用 UME 补。**
 
@@ -4702,6 +4706,12 @@ ORDER BY t
 
 **为什么选 EMS 优先而不是 UME 优先**：EMS 是人工按原看板口径导出的，更贴近 FineBI 原值；
 UME 只是自动同步的补充。**这个优先级是口径决定，不是性能决定** —— 若要改，必须业务确认。
+
+> **⚠ 2026-11-18 口径更新**：业务确认 EMS 表 = **HQ 站点**、UME 表 = **ODC 站点**，
+> 两者是**两个站点的同一 KPI**，可以相加得 `Total`。本节「两个来源是同一量的两次测量、
+> 绝不可相加」是 2026-10-01 当时的判断，**已被取代**；现在 VLR / Voice 按
+> `HQ / ODC / Total` 三条线显示（见 §33.3c）。本节其余内容（翻倍 bug 的修法、
+> 台阶的定位方法）仍然有效，保留作历史记录。
 
 #### 33.3b 这个 bug 的典型外观：曲线中间一个「台阶」
 
@@ -4744,6 +4754,107 @@ UME 只是自动同步的补充。**这个优先级是口径决定，不是性�
 > 所以修正同时写进了生成器的 `WIDGET_SQL_OVERRIDES`（看板 id=3）——
 > **只改生成物不改生成器，下次重新生成就会把 bug 带回来。**
 > 两者的 SQL 必须**逐字节一致**（含 `\n`），校验脚本 `TMP\_probe_cnkpi_override_sync.py`。
+
+### 33.3b Data Subscribers 的制式命名与 5G NSA 序列（2026-11-18）
+
+按业务要求，`c3 Data Subscribers` 的序列名改成**制式名**并新增 5G：
+
+| 图上序列 | 端口径 | 上游指标项 |
+| --- | --- | --- |
+| `2G` | GSM 附着用户 | `C405080015`（列 `Mean number of attached subscribers(GSM)`） |
+| `3G` | UMTS 附着用户 | `C405080016`（列 `Mean number of attached subscribers(UMTS)`） |
+| `4G` | EPS 附着用户 | `C431000001`（列 `Mean Number of EPS Attach subscribers`） |
+| `5G` | 5G NSA 附着用户 | `C466010001`（列 `Mean Number of EPS Attach NSA subscribers`） |
+| `Total` | **2G+3G+4G** | 同上三列相加 |
+
+**`Total` 刻意不含 5G** —— 5G NSA 用户是「EPS 附着里支持 NSA 的那一部分」，与 4G
+是**包含关系而非并列**，加进去会重复计数（实测同一 NE 同日 4G=293027 / 5G=20879，
+5G 从未大于 4G）。所以 5G 单列一条曲线看趋势，`Total` 保持「不重复计数的用户总数」。
+这个口径同时写进了页面口径条（`cnkpi.calc.secData` / `cnkpi.calc.data1` / `cnkpi.calc.data2`）。
+
+⚠ **`items` 与 `itemsposition` / `itemsposition1` 是按位置一一对应的平行数组，长度必须相等**
+（`ccn_ume_kpi_service.CNN_KPI_QUERY_CONFIGS["DATA_SUBSCRIBERS"]`）。实测 2026-11-18：
+只加 `items` 不补 positions（4 个指标配 3 个位置）时，UME 查询照常 200、导出照常成功，
+但 **GSM/UMTS 两列会从导出表头里整体消失**，只剩 EPS 与 5G —— 写库是 upsert，
+旧列于是停在最后一次有值的那天，看板不报错、只是曲线不再更新（静默丢数）。
+现在 `build_cnn_kpi_payload()` 会先调 `_validate_item_positions()` 拦住长度不等/位置越界，
+让任务带着明确原因失败。**加指标项时务必同时补 positions**（5G 与 EPS 同属 MME，
+即 `motid` 第 2 项 50300，索引 0）。
+
+回补说明：日常任务 `days_back=7`，新增列只有最近 7 天有值；看板默认窗口是 31 天，
+所以首次上线时用 `TMP\_sync_datasub_5g.py`（只跑 DATA_SUBSCRIBERS 的日表+月表、
+`days_back` 临时 31）回补了一次。日表与月表都要写 —— 否则降级到月表那一级会因缺列报错。
+
+### 33.3c VLR / Voice 改为 **HQ / ODC / Total** 分站显示 + 9 月回补（2026-11-18）
+
+> **口径更新（用户 2026-11-18 确认）**：EMS 表 = **HQ** 站点、UME 表 = **ODC** 站点
+> （UME 侧 VLR 只有 MSC71，语音另含 MGCF76——正是一个站点的网元集合）。
+> 因此两张表是**两个站点的同一 KPI**，可以相加：`Total = HQ + ODC`
+> （只在两站都有数的日期成立）。图上标签按业务要求由 EMS/UME 改为 HQ/ODC。
+> §33.3a 里「两源是同一量的两次测量、不可相加」是 2026-10-01 当时的判断，
+> **已被本口径取代**，该节保留作历史记录。
+
+**报障原话**：「VLR Subscribers 和 Voice Traffic(Erl) 两个图以一个粒度的数据老是异常，
+估计少 UME 或者 EMS 的数据。」—— 与 §33.3b 的翻倍 bug 是**两件事**：
+翻倍已修（极差 2.03x → 1.02x），这次是**两个站点本身对不上**。
+
+实测归因（2026-11-18，`db_ps_cs_cn`）：
+
+| 事实 | 数值 |
+| --- | --- |
+| 默认窗口（近 31 天）里只有 1 天来自 UME，其余 31 天来自 EMS | 10-18→UME，10-19..11-18→EMS |
+| 换源日台阶（VLR） | 10-18 UME 1,002,263 → 10-19 EMS 1,231,875（**+22.9%**） |
+| 换源日台阶（Voice） | 10-18 UME 33,392.6 → 10-19 EMS 43,504.3（**+30.3%**） |
+| 同一天两源差多少（10-19） | VLR：EMS 1,231,875 / UME 1,008,806（差 18%）；Voice：EMS 43,504 / UME 34,803（差 20%） |
+| 拉宽到 09-01 的断档 | Voice 在 **09-07 ~ 09-25 连续 19 天无任何来源数据**；VLR 无断档 |
+| 上游脏行 | Voice 的 UME 表在 09-02~09-06 只有 MSC71 且值为 **90001~90005**（逐日 +1，明显是测试/占位写入） |
+
+**根因**：HQ（EMS 表，人工导出）与 ODC（UME 表，自动同步）是两个站点，覆盖与采集
+时点都不同。旧实现「同日优先 EMS、缺日取 UME」把两个站点的值拼成一条线，
+换源处必然出现台阶；断档日又会被线条直接连过去，看起来像平滑下坡。
+
+**处理 1：回补 9 月（2026-11-18 已执行）**
+
+`cn_kpi_sync` 的增量窗口默认只有 7 天，9 月的洞补不到。用回补工具把窗口临时放大到 80 天，
+只重跑 VLR / VOICE 两张 UME 日表：
+
+```powershell
+cd D:\01_olbr_portal\Task\my_app   # 在生产副本里跑；回补脚本在它的 TMP\，属一次性工具、不入库
+$env:PYTHONIOENCODING='utf-8'; $env:PYTHONPATH='.'
+python TMP\_backfill_vlr_voice_ume.py 80
+```
+
+结果（实测）：VLR 80 行、VOICE 156 行，覆盖 **2026-08-31 ~ 11-18**；
+09-07~09-25 的空洞全部补齐，09-02~09-06 的 `90001~90005` 测试行被真实值覆盖
+（09-02 = 40,460.5、09-03 = 39,671.0 …）。
+
+> ⚠ 回补是 upsert，会**重写**窗口内已有的 UME 行；只动这两张 UME 日表，不动 EMS、
+> 不动 `1month_*` 月表。`import_to_database()` 会对缺失的导出回退读磁盘旧文件 ——
+> 若只想补部分 KPI，跑完检查日志里有没有多余的 `reading from disk`。
+
+**处理 2：改成 HQ / ODC / Total 三条线**
+
+- SQL（`cn_kpi_service.WIDGETS` 的 c1 / c4）：用 `WITH RECURSIVE cal(d)` 生成窗口内
+  每一天，`LEFT JOIN` EMS / UME 两张按天聚合的 CTE，返回
+  `[日期, HQ, ODC, Total]` 四列：`HQ = EMS.v`、`ODC = UME.v`，
+  `Total = CASE WHEN 任一为 NULL THEN NULL ELSE HQ + ODC END`
+  —— 某天某站没有行 → 该列为 **NULL**；Total 不画「半截总和」。
+- 前端（`CnKpi.tsx`）：`connectNulls: false` —— 缺数即**断线**，不用另一站顶替、不插值。
+  某条线短或断开，就是那个站点缺数，一眼可见。
+- 工具条勾选框「仅显示 HQ 与 ODC 都有数据的日期」（默认**勾上**）：把横轴裁到
+  HQ∩ODC 的日期交集 —— 用户要求的「只从两边都有数据的时候再显示」。
+  取消勾选可看完整历史（例如 9 月只有 ODC）。裁的只是横轴，不改任何数值。
+- 覆盖告警条（常驻）：列出 `HQ 31 天（10-19 ~ 11-18）· ODC 32 天（10-18 ~ 11-18）`；
+  两站都缺的日期单独列出（`missing_days`），避免被当成 0。
+- 后端 `_series_coverage()` 只做统计（`coverage` / `missing_days`），不重算数值；
+  `self_contained=True` 让这两个组件**不再走三级降级**（否则 tier-2 会把 EMS 表名
+  改写成 UME，两列变成同一张表）。
+- `_has_any_value()`：日历骨架在全空时也会返回行，不能把「有行但全 NULL」当成功，
+  否则会跳过「暂无数据」分支；单值 KPI（如 `kpi_time`）按一列处理。
+
+> 判据速查：图上三条线是 HQ / ODC / Total；哪条先结束，就是那个站点覆盖更短。
+> 接口自查：`GET /api/cn-kpi/overview?start=2026-08-31&end=2026-11-18`，
+> 看 c1/c4 的 `columns`（应为 `t | HQ | ODC | Total`）与 `coverage`。
 
 ### 33.4 界面必须显示的粒度提示（不要删）
 
@@ -4793,6 +4904,7 @@ UME 只是自动同步的补充。**这个优先级是口径决定，不是性�
 | `TMP\_probe_vlr_window.py` | 并排对比某区间内 EMS 与 UME **各自有没有那天**，并给出「当前结果取自谁」，用于定位台阶位置 |
 | `TMP\_probe_vlr_oldvsnew.py` | **对比线上运行中的后端与修复后代码的逐日值**，直接打印倍数与极差。改完代码未重启时用它确认"是不是还没生效"（重启后两者应一致，倍数恒为 1.00x） |
 | `TMP\_probe_restart_ready.py` | 按 `main.py` 的导入顺序重新 import 相关模块，**确认重启不会起不来**；改动模块级常量后、重启前跑一次 |
+| `TMP\_sync_datasub_5g.py` | **回补工具**（不是探针）：只跑 DATA_SUBSCRIBERS 的日表+月表，`days_back` 临时 31，用于把新加的指标项（如 2026-11-18 的 C466010001 / 5G NSA）回补进库。详见 §33.3b |
 
 ---
 
@@ -4975,6 +5087,60 @@ FROM "5mins_3G_FDD_DATA_TRAFFIC_TEMPLATE_OSS_UME"
 
 > 运行前记得 `$env:PYTHONIOENCODING='utf-8'`，否则中文日志在 GBK 控制台会抛
 > `UnicodeEncodeError`。
+
+## 33c. CN 小时 KPI 看板（`?page=cn_hourly_kpi`）—— KPI Template.xlsx 的小时粒度数据（2026-11-18 新增）
+
+xGW 会话/吞吐容量与 MGW/MRFP 资源利用率的**小时粒度**（gr=3600）看板，可按日期区间
+（默认最近 7 天、上限 31 天）回看。数据源是 UME 网管「KPI 模板管理」导出件
+`backend\services\cn_kpl\KPI Template.xlsx`（2026-11-17 新建的 8 个模板批），
+由 `cn_kpl\cn_hourly_kpi_service.py` 解析 `template` sheet 后**复用既有 CNN 查询管线**
+组包（`build_cnn_kpi_payload` → create/poll/export → `read_xlsx_bytes`），
+写库走 `DbWriterClient` upsert 进 `db_ps_cs_cn` 的 `<模板名>_UME` 三张新表。
+
+### 33c.1 口径决定（用户 2026-11-18 定）
+
+1. **Resource_Utilization 与 Resource_Capacity 两族模板重复，只保留 Utilization 一族**
+   —— 三个 MGW/MRFP Utilization 模板（items/motid/grouplayer 完全一致）取
+   `CS_MRFP96_Resource_Utilization_OSS` 一个即可，实测导出自动包含全部网元
+   （MGW_91/MGW_92/MRFP_96）；Capacity 族为 6 个原始 counter，弃用。
+2. **Object Scope = ALL**：payload 的 `filterlayer="all"` 即对应此选择。
+3. 参与模板共 3 个：`PS_xGW_Session_Capacity_OSS` / `PS_xGW_Throughput_Capacity_OSS` /
+   `CS_MRFP96_Resource_Utilization_OSS`，全部 gr=3600（一小时档）。
+4. **首次回补一个月**（31 天）：`python -m backend.services.cn_kpl.cn_hourly_kpi_service --days 31`；
+   日常由任务 `cn_hourly_kpi_sync` 每天 06:20 增量（默认 2 天窗口）。
+
+### 33c.2 解析坑（实测踩过，改代码前必读）
+
+- xlsx 布尔列是**字符串** `"false"`/`"true"`，`bool("false")` 是 True —— 必须显式判
+  （`_cell_bool`）；motid/templateid/gr 保持字符串；items/itemsposition 是 JSON
+  字符串且两数组长度必须一致。
+- 登录链路（auth_manager → cryptography）只能用 my_app 实际运行环境（系统 Python312）；
+  DSH 内置 python 缺 `cryptography` 会登录失败。
+- 导出 0 行视为空态跳过（与 5 分钟任务同约定），不算失败。
+- 任务必须登记 `worker_watchdog.py` 的 `GROUP_TASK_MAP["n"]`（与 `cnn_kpi_sync` /
+  `cnn_kpi_sync_5mins` 同登 CNN UME 共享会话，同组串行避免互踢）——漏了队列 pending 卡死。
+
+### 33c.3 页面与 API
+
+- `GET /api/cn-hourly-kpi/overview?start=&end=&force=`：7 个组件，每个一条
+  `[Hour, Series(NE 或 ALL), Value]` 三列 SQL，前端按第 2 列 pivot 成线；
+  列名守卫复用 `cn_kpi_5mins_service` 的实现（SQLite 未知双引号标识符不报错恒为 0 的防线）。
+- 组件清单：xGW PFCP 会话用量/占用率、xGW 吞吐用量/占用率、MGW/MRFP TONE/TC/RTP 利用率。
+  占用率 = Σ已用×100÷Σ授权（全网元加权）；资源利用率是上游复合 KPI 直接返回的原值
+  （公式见 xlsx `index` sheet，如 `100*C408230024/(Gr*C408230021)`），页面不二次换算。
+- 卡头 ⓘ 口径文案在 `i18n.tsx` 的 `cnhourly.explain.*`（中英双份），**与
+  `cn_hourly_kpi_service._widgets` 的 SQL 逐条对应**，改 SQL 必须同步改。
+
+### 33c.4 相关文件
+
+| 文件 | 作用 |
+| --- | --- |
+| `backend\services\cn_kpl\KPI Template.xlsx` | UME 模板导出件（模板真相源，上游改模板后重新导出即可） |
+| `backend\services\cn_kpl\cn_hourly_kpi_service.py` | xlsx 解析 + 同步（写库）+ 页面读取侧 |
+| `backend\routers\cn_hourly_kpi.py` | `/api/cn-hourly-kpi/*` |
+| `frontend\src\pages\CnHourlyKpi.tsx` | 页面（日期区间 + 7 组件 pivot 线图） |
+| `backend\task_registry.py` | `TASK_SPECS` 登记 `cn_hourly_kpi_sync` |
+| `backend\worker_watchdog.py` | `GROUP_TASK_MAP["n"]` 加入该任务 |
 
 ## 34. WO 清理 —— 批量关闭待确认工单（`?page=eflow_qa` 左栏，2026-10-01 新增）
 
@@ -5793,3 +5959,59 @@ VMAX 数仓 GBase（10.123.255.12:5258/zxvmax，只读）
 - **C 单点加固**：`IptEnergyClient.filter_map` 对超时 / 408 / 5xx 做 1 次短重试（第 2 次 12s 超时，401 重登不占次数）；仍失败时 collector 用上一轮 `ipt_power_sites` 清单降级继续采，本轮跳过站点表刷新与属性回填，`last_run.stale_sites` 留痕。
 - **D 补完 A（22:20）**：改后 21:25~22:08 共 10 轮实测：覆盖率中位数 84.1%→**94.1%**、21:56/22:01/22:06 **连续 3 轮 501/501**，filter-map 失败/降级/失败告警全部归零；但仍有 **7/10 轮撞 100s 硬上限**（21:27=333/501、21:46=327/501）。根因是周期放到 300s 后空出的 200s 完全没用——`KPI_ROUND_HARD_DEADLINE_S` `100→240`，`full_kpi.budget_s` 同步 `80→200`（⚠ 该字段当前在 collector 中**未被读取**，实际约束一律由 `hard_deadline` 给出，改它只是配置与文档口径一致）。不改并发、不改单请求超时、不增加任何瞬时压力；`max_instances=1` 保证轮次不重叠，`STALE_RUNNING_SECONDS=1800s` 不会把 240s 长轮误判成僵尸。另已排除两条看似更好的路：上游批量电源接口经抓包全量核对确认不存在；`ipt_power_sites` 实测 495 online / 6 offline，给离线站降频最多省 6 个请求。
 - **判据（改后 24 小时看）**：硬上限截断率、popup 覆盖率中位数、`filter-map` 超时次数、失败告警数。不要再单独调线程数（32→8 已边际递减）。若 D 后仍 <95% 覆盖率，再评估「滚动窗口」（每轮采 1/3 站 + 游标轮转，请求量约 -54%，代价是单站新鲜度 5→15 分钟）。
+
+## 42. RAN 资产台账（`?page=ran_inventory`，2026-11-18 新增）
+
+**一句话**：把 RAN UME 的硬件单元、软件包、光模块三类资产，按网元整理成一本可查、可下钻、可导出的资产登记册；**只统计在线网元**。
+
+### 42.1 数据源与链路
+
+| 环节 | 位置 |
+| --- | --- |
+| 抓包 | `backend/services/ran_inventory/url.txt`（三类资产）、`online_url.txt`（网元表） |
+| 采集与聚合 | `backend/services/ran_inventory/ran_inventory_service.py` |
+| 路由 | `backend/routers/ran_inventory.py`（`/api/ran-inventory/ledger`、`/ne/{id}`、`/cache`） |
+| 前端 | `frontend/src/pages/RanInventory.tsx` |
+
+上游接口：
+
+- `POST /api/ranim/v1/inventorys/conditionQuery/{hw,sw,opt}` —— 分页取全量（`pageInfo.pageSize`，实测 1000/页 16 页）
+- `GET /api/res/v1/ranmes?queryDn=model:subnetwork&...` —— 网元表，取 `connectionState` 判在线
+
+鉴权复用 `auth_manager.get_auth(probe=...)` + `credential_store` 的 `zte_ume` 组，与 `RANElementManagement` / `ran_ume_service` 共享跨进程会话缓存；探活打本服务自己的资产端点（**不是**登录首页，首页会返回误导性的 200）。抓包里的 `-b` 会话 Cookie **不入库、不写进代码**。
+
+### 42.2 口径（页面「数据口径说明」逐条对应）
+
+1. **在线口径**：`connectionState = 1` 才进台账。离线网元只作为「在线网元」卡的分母，其名下资产不计入任何数字。
+2. **关联键**：资产表 `neuuid` ↔ 网元表 `id`（实测 hw 15,874/15,874、sw 3,160/3,161、opt 9,412/9,412）；缺 `neuuid` 用 `neid` ↔ `nbiId` 兜底；都命不中的行不进台账。
+3. **硬件分组**：按 `inventoryunittype` —— `pack` 板卡 / `RRU` 射频单元 / `antenna` 天馈 / `subrack` 机箱 / `shelf` 机架层 / `rack` 机柜 / `accessory` 配件。
+4. **机龄**：该网元最早一台设备的 `dateofmanufacture` 至今，`365.25` 天/年折算；**投产**取最早 `networkaccesstime`。两者都以「一台设备」为单位，不代表整站上线日期。
+5. **软件包**：按 `pkgtype` 计数；「补丁」= `patchPackage` + `hotpatchPackage`。
+6. **未提供字典的枚举**：`inventorystatus`(1/2)、`swstatus`(2/3)、`maintainStatus`(0/2/3…) 上游没给取值含义，页面**只原样保留**，不推断语义；网元明细底部只提示「库存状态非 1」的记录条数。
+7. **型号口径**：板卡与射频取 `packfunction`（`VBP` / `VFC` / `R9242E` 这类可采购型号）；天馈必须取 `vendorunittypename` —— 天线记录的 `packfunction` **全是 `RETC`**（电调控制器类，1 种），拿它做型号列等于没有区分度。同网元下同型号多台按台数累计。
+
+> 2026-11-18 实测规模（**在线率随网元上下线实时变化，下列只作数量级参考**）：NE 938（在线约 880、离线约 60）、站点约 870、hw 约 1.55 万、sw 约 3,000（补丁 700+）、opt 约 9,200、平均设备机龄 8.4 年、8 年以上网元约 230 个。页面上的数字永远取当次取数结果，手册不写死。
+
+### 42.3 页面构成
+
+- **六张卡**：在线网元 / 在册站点 / 硬件资产 / 软件包 / 光模块 / 平均设备机龄。标题的 ⓘ 讲这一张怎么算，数字本身悬浮给出这一格的构成（`ExplainIcon` / `ExplainPopover`）。
+- **五张图**：网元类型构成（按在线网元）、硬件资产构成（按单元数）、设备制造年份（按硬件单元）、光模块厂商份额、板卡型号 Top 10。
+- **台账表**：搜索站点 / IP / NE ID，按类型筛选，「仅机龄 ≥ 8 年」开关，列头排序；点任意一行开 `DraggableClickModal`，取 `/api/ran-inventory/ne/{id}` 展示该网元的硬件 / 光模块 / 软件包明细。
+- **两个视图**（同一张表，工具条的「站点汇总 / 型号透视」切换）：
+  - **站点汇总**：数量列 + 三列型号构成（`板卡型号` / `射频型号` / `天馈型号`），单元格形如 `VBP 2 · VSW 1 · VFC 1`，只列前 3 个型号，其余用 `+N` 标出；悬停气泡给出该网元该类的**全部**型号与台数。
+  - **型号透视**：每个型号一列，列头按 `板卡 / 射频 / 天馈` 分组、组头带该组在当前筛选结果里的总量；组内首列是「合计」，末尾按需给「其他」。可按类别收窄（全部 / 板卡 / 射频 / 天馈）避免 36 列横向滚动，可调「每组列数」（6 / 8 / 10 / 12）—— 型号列只取**当前筛选结果**里数量最多的前 N 个，所以筛到 SDR 不会留一排全是 0 的板卡列。
+  - 两种视图的列都可点列头排序（型号列按该型号台数排）。
+- **导出**：页面级按**当前视图 + 当前筛选结果**导出 —— 汇总视图出 `RAN_Asset_Ledger`（含三列型号构成文本），型号透视图出 `RAN_Model_Pivot`（两层表头，`板卡/射频/天馈` 分组 + 组内合计，与屏幕列一一对应）。两者都是 `utils/excelReport` 的 UNIFIED_EXCEL_V1：标题行 + 自动列宽 + 冻结表头 + 数值千分位 + 合计行；明细弹窗里另有导出，三个 sheet（Hardware / Optical / Software）。
+
+### 42.4 缓存与刷新
+
+- 服务端进程内缓存 **600 秒**（`RAN_INV_CACHE_TTL`），`force=true` 绕过；缓存里同时保留逐网元明细，所以下钻**不会二次抓上游**。
+- 一次全量约 **8 秒**、2.9 万行；`RAN_INV_PAGE_SIZE` 可调分页大小。
+- 按页刷新建议间隔 **900 秒**（`App.tsx` 的 `AR_PAGE_DEFAULTS`），理由：上游资产表每天约 04:00 才刷新一次。
+- 上游不可用时接口返回 `{"error": ...}`，页面渲染 `Alert type="error"` + 重试按钮，**不伪造空台账** —— 把「取不到」显示成 0 会让用户以为全网没有资产。
+
+### 42.5 已知边界
+
+- 台账是**快照**，不落库：历史对比（某台上次换板、某站上季度机龄分布）本页不提供。需要趋势时另立任务按日落 PG，而不是在这里加隐式写入。
+- 只有 `hw/sw/opt` 三类；上游的 `/api/rncmoaction/v1/rnc/<uuid>` 详情接口含 `OMM FTP` 明文口令，**刻意不采集**（见 `RANElementManagement/ran_element_management_service.py` 顶部说明）。
+- 882 个网元的明细一次性下发约 450 KB（含逐网元的型号矩阵），页面一次取回；不按网元分页拉取，是因为台账表本身就要全量排序与筛选。

@@ -1,6 +1,6 @@
 # my_app 使用帮助
 
-> 面向使用者的平台功能与操作指南。本文件由「使用帮助」页面同源生成（frontend/src/helpMarkdown.ts），内容依据 docs/manual/ 各章与 backend/task_registry.py 整理。生成日期：2026-11-17。
+> 面向使用者的平台功能与操作指南。本文件由「使用帮助」页面同源生成（frontend/src/helpMarkdown.ts），内容依据 docs/manual/ 各章与 backend/task_registry.py 整理。生成日期：2026-11-18。
 
 > 站内入口：侧边栏「使用帮助」，或直链 `http://<host>/myapp/?page=help`。
 
@@ -10,7 +10,7 @@
 
 - [1. 平台简介](#1-平台简介)
 - [2. 通用操作](#2-通用操作)
-- [3. 任务管理详解（84 个任务）](#3-任务管理详解)
+- [3. 任务管理详解（85 个任务）](#3-任务管理详解)
 - [4. 页面指南](#4-页面指南)
 - [5. 运维与排障](#5-运维与排障)
 - [6. 常见问题](#6-常见问题)
@@ -83,7 +83,7 @@
 
 > ⚠️ **新增任务必须同时登记进 `worker_watchdog.py` 的 `GROUP_TASK_MAP`** —— 只写 `TASK_SPECS` 不分组 = 任务入队后永远 pending。这是本项目已发生过四次的事故模式（finebi_report_sync / whatsapp_send_ext / sp_email_details / 2026-09-18 的 olib_soc 与 vmax_multi_data_sync）。
 
-### 3.3 全量任务清单（84 个）
+### 3.3 全量任务清单（85 个）
 
 | 任务 | task_id | 默认 cron | 组 | 工作流脚本 |
 | --- | --- | --- | --- | --- |
@@ -110,6 +110,7 @@
 | BP Cells Report 更新 | `bp_report_sync` | `20 6 * * *` | u | `services/bp/bp_report_sync.py → run_bp_report_sync` |
 | CNN UME KPI 同步 | `cnn_kpi_sync` | `0 6 * * *` | n | `services/cnn/ccn_ume_kpi_service.py → run_cnn_kpi_sync` |
 | CNN UME KPI 5分钟同步 | `cnn_kpi_sync_5mins` | `*/15 * * * *` | n | `services/cnn/cnn_ume_kpi_5mins_service.py → run_cnn_kpi_sync_5mins` |
+| CN 小时KPI同步 | `cn_hourly_kpi_sync` | `20 6 * * *` | n | `services/cn_kpl/cn_hourly_kpi_service.py → run_cn_hourly_kpi_sync` |
 | SP 备件数据同步 | `sp_data_sync` | `10 * * * *` | s | `services/sp/get_sp_table.py → run_sp_data_sync` |
 | iPRAN UME KPI 同步 | `ipran_kpi_sync` | `0 * * * *` | u | `services/ipran/ipran_ume_kpi_service.py → run_ipran_kpi_sync` |
 | Liberia 宕站 1小时报告邮件 | `liberia_email_1h` | `15 * * * *` | m | `services/email/liberia_email_report.py → run_1h_report` |
@@ -635,6 +636,27 @@
 - ⚠ 全窗口时代实测单轮约 105 秒（Free Rating 一天就有 1.4 万行）；2026-11-15 起窗口默认增量（最近 120 分钟），每轮写入降到百行级 —— 这同时解掉了远端 SQLite 写锁卡 cn-kpi-5mins 页面读的问题（当天实测读被卡 120s+）
 - 与 cnn_kpi_sync 同在 n 组串行，避免两个任务各自登录同一账号互踢
 - 页面为本任务的唯一消费方：?page=cn_kpi_5mins（services/cn/cn_kpi_5mins_service.py 读 5mins_* 表）
+
+#### CN 小时KPI同步（`cn_hourly_kpi_sync`）
+
+- 默认 cron: `20 6 * * *`　|　worker 组: **n**
+- 工作流脚本: `services/cn_kpl/cn_hourly_kpi_service.py → run_cn_hourly_kpi_sync`
+
+**功能**: 从 UME「KPI 模板管理」导出件 KPI Template.xlsx 解析 3 个新模板（PS_xGW_Session_Capacity_OSS / PS_xGW_Throughput_Capacity_OSS / CS_MRFP96_Resource_Utilization_OSS），以小时粒度（gr=3600）查询并 API 写入 DB CNN 的 <模板名>_UME 三张表，供「CN 小时KPI」看板按日期区间出图；Object Scope=ALL 覆盖全部网元，Utilization/Capacity 两族重复只留 Utilization（用户 2026-11-18 定）
+
+**工作流与数据流**:
+
+1. 解析 KPI Template.xlsx（缺文件时用内置兜底配置并告警）
+1. 登录 CNN UME（与 cnn_kpi_sync 共用会话缓存）
+1. 按模板逐个查询小时粒度数据（默认 2 天增量窗口；首次回补 python -m ... --days 31）
+1. 写入 db_ps_cs_cn 的 <模板名>_UME 表（upsert，主键 Begin Time+NE(+SERVICE)）
+
+**维护要点**:
+
+- ⚠ 导出 0 行视为空态跳过、不计失败（与 5 分钟任务同约定）
+- 与 cnn_kpi_sync / cnn_kpi_sync_5mins 同在 n 组串行，避免共用 CNN UME 会话互踢
+- 页面消费方：?page=cn_hourly_kpi（routers/cn_hourly_kpi.py + cn_kpl/cn_hourly_kpi_service.py 读取侧）
+- 上游改模板后重新导出 xlsx 覆盖 cn_kpl/KPI Template.xlsx 即可，无需改代码
 
 #### SP 备件数据同步（`sp_data_sync`）
 
@@ -2293,6 +2315,23 @@ RAN 小区 KPI：按制式（2G/3G/4G）看小区的逐日可用率矩阵与月�
 - 两处最容易读错的地方已写进气泡：**月均是「各日可用率的算术平均」（日等权，不按当天小区数加权）** —— 只有 3 个小区的那天与有 300 个小区的那天一样重；**达标/未达标占比的分母是「当天有值小区数」，不含无数据小区** —— 大面积缺上报时这个比例会虚高
 - 本页是**小区级**可用率（2G = 可用信道 ÷（可用+不可用），3G/4G = 服务时长 ÷ 86400），与「站点可用率」页的站点级 UME 原值**不是同一口径**，两处数字不可直接比
 
+#### ran_inventory（`ran_inventory`）
+
+RAN 资产台账：把 RAN UME 的硬件单元、软件包、光模块三类资产按网元整理成一本可查、可导出的登记册（2026-11-18 新增）。台账**只收录在线网元**（connectionState = 1），离线网元只进「在线网元」卡的分母，其名下资产不计入任何数字。
+
+- 顶部「数据口径说明」**默认收起**，点开可看到在线口径、资产与网元的关联键、硬件分组、机龄算法、没有字典的枚举字段与数据源
+- 六张卡：在线网元 / 在册站点 / 硬件资产 / 软件包 / 光模块 / 平均设备机龄。标题的 ⓘ 讲这一张怎么算，鼠标停在数字上给出这一格的构成（排除多少离线网元、其中多少条库存状态非 1）
+- 五张图：网元类型构成（按在线网元）、硬件资产构成（按单元数）、设备制造年份（按硬件单元）、光模块厂商份额、板卡型号 Top 10
+- 台账表可搜索站点 / IP / NE ID，按网元类型筛选，或只留机龄 ≥ 8 年的网元；点列头排序；点任意一行打开该网元的硬件 / 光模块 / 软件包明细
+- **型号统计**（2026-11-18 补充）：切到「型号透视」，每个型号一列，列头按 板卡 / 射频 / 天馈 分组，组头带该组总量，组内首列是「合计」；可按类别收窄、可调每组列数（6/8/10/12）—— 型号列只取当前筛选结果里最多的前 N 个，其余并入「其他」，所以筛到 SDR 不会留一排全 0 的板卡列
+- 汇总视图里也带三列型号构成（板卡型号 / 射频型号 / 天馈型号），单元格形如「VBP 2 · VSW 1 · VFC 1」，其余用 +N，悬停气泡给出该网元该类的全部型号与台数
+- 型号口径：板卡与射频取 packfunction（VBP / VFC / R9242E 这类可采购型号），天馈取 vendorunittypename —— 天线记录的 packfunction 全是 RETC（电调控制器类），拿它做型号列没有区分度
+- 「导出 Excel」导出**当前视图 + 当前筛选结果**：汇总视图出一张台账（含三列型号构成文本），型号透视出两层表头的型号表（板卡/射频/天馈 分组 + 组内合计），都是全站统一的 UNIFIED_EXCEL_V1 格式；明细弹窗里另有导出，按硬件 / 光模块 / 软件包三个 sheet 输出该网元
+- 资产表每天约 04:00 由网管刷新一次，服务端缓存 600 秒；点「重新取数」跳过缓存立刻重抓（约 8 秒），不要连点
+- ⚠ 上游没有给出 inventorystatus / swstatus / maintainStatus 的取值字典，页面只原样保留、不推断「1 是在网、2 是退网」这类语义；网元明细里只提示「库存状态非 1」的记录条数
+- ⚠ 机龄取该网元**最早一台设备**的制造日期，所以「平均设备机龄」说的是设备账龄，不是站点服役年限；「8 年以上」同理按各自最早设备算
+- ⚠ 「在册站点」按网元 userlabel 去重，少于在线网元数是因为个别站点有 2 个网元（如 2G/3G 与 4G 分设），不是漏数
+
 #### 丢包看板（`packet_loss`）
 
 LTE 丢包看板（RAN UME SDR / IPRAN IPPD）：最近 7 个完整自然日、小时粒度，当天没过完不展示。
@@ -2356,6 +2395,18 @@ CN KPI 5 分钟看板：把「今天（Day0）」「昨天（Day1）」「7 天�
 - 「vs 昨日 ±%」点开后先说明它是**前端**算的（接口不下发 pct）：今天 00:00→此刻的均值 对比 昨天截到同一时刻的均值，±10% 以内为灰、超出标橙；今天或昨天在该时段没有点、或昨天均值为 0 时直接不显示
 - 页头的「N/N 个组件有数据」「耗时 / 缓存」「失败 N」三枚标签也都能悬浮：空态与失败都**不计入**「有数据」，失败只算查询报错的组件
 - 「导出 Excel」每个组件一张表，按时刻展开 Day0 / Day1 / Day7 列（只出该组件实际有数据的日子），便于对账
+
+#### cn_hourly_kpi（`cn_hourly_kpi`）
+
+CN 小时 KPI 看板：xGW 会话/吞吐容量与 MGW/MRFP 资源利用率的**小时粒度**视图，可按日期区间（默认最近 7 天、上限 31 天）回看。数据源是 UME 网管「KPI 模板管理」导出件 KPI Template.xlsx（2026-11-17 新建模板批）解析出的 3 个模板，由任务 cn_hourly_kpi_sync 每天 06:20 以 gr=3600 增量拉取，写入 db_ps_cs_cn 的 <模板名>_UME 三张表。口径（2026-11-18 定）：Resource_Utilization 与 Resource_Capacity 两族模板重复，只保留 Utilization 一族；Object Scope=ALL，数据覆盖全部网元。
+
+- 页面 7 张组件卡：xGW PFCP 会话用量、xGW 会话占用率(%)、xGW 吞吐用量(Mbps)、xGW 吞吐占用率(%)、MGW/MRFP 的 TONE/TC/RTP 利用率(%)；前四张的线是 xGWU22/xGWU122 两个网元（占用率为全 NE 合并的 ALL 线），后三张的线是 MGW_91/MGW_92/MRFP_96 三个网元
+- 日期区间用右上角区间选择器改（含端点），改完立即重新取数；上限 31 天（与回补窗口同档）
+- **每张组件卡的标题都能悬浮看这一格怎么算**：ⓘ 按组件写清聚合式 —— 会话/吞吐用量是按网元小时的 SUM，占用率是 SUM(已用)×100÷SUM(授权) 的全网元加权，资源利用率是上游复合 KPI 直接返回的原值（公式如 100*C408230024/(Gr*C408230021)，Gr=3600 秒），页面不做二次换算
+- 首次上线的一个月历史由回补命令生成：python -m backend.services.cn_kpl.cn_hourly_kpi_service --days 31；此后每天 06:20 增量（默认 2 天窗口）自动补新
+- 页头标签「N/N 个组件有数据」「日期区间」「失败 N」都可悬浮：空态与失败不计入「有数据」
+- 「数据口径说明」默认收起（点标题展开）：模板来源、Utilization/Capacity 取舍、Object Scope=ALL 与利用率公式都在里面
+- 「导出 Excel」每个组件一张表，按小时展开各网元列，便于对账
 
 #### UME iMonitor 大屏（`imonitor`，iframe 页）
 

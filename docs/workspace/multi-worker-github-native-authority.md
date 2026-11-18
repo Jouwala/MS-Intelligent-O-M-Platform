@@ -67,6 +67,33 @@ refs/heads/agent-lease/issue-<N>/<token:08d>/<epoch_ms>/<agent>/<instance>/<atte
 - `agent`/`instance`/`attempt` 必须是 ref 安全字符（agent `[a-z0-9-]`、instance/attempt 十六进制）；
 - 同一 token 可能有多条租约 ref（续租产生新 token 后旧 ref 可删）；**有效租约 = token 最大且未过期的那条**。
 
+### 3.2b 心跳（2026-11-18，Phase 3 P3-1，#141）
+
+```
+refs/heads/agent-heartbeat/<agent>/<instance>/<epoch_ms:013d>/<state>
+```
+
+- 与租约同一原理：**存活只看 ref 名里的 epoch_ms**，不读评论、不读 commit；
+- `state` 是 Worker 自报的状态：online / idle / working / waiting / blocked / failed；
+  `list_workers` 由心跳新鲜度 + 自报状态 + 有效租约推导七态
+  ONLINE / IDLE / WORKING / WAITING / BLOCKED / OFFLINE / FAILED
+  （外加从未见过的 unknown）；
+- 每次心跳新建一个 beat ref（锚点 SHA 用 main 头，与 HWM/lease 相同），
+  节流默认 60s（与评论心跳共用一次节流判定）；旧 beat 由写心跳时顺手清理，
+  默认只保留 1 小时内的 beat；
+- **有效租约优先于心跳新鲜度**：租约由活着的进程定期续租，是比心跳更强的
+  存活证据——长任务执行中超 90s 未写 beat 仍算 working，不误判 offline；
+  但自报 failed / blocked 是更具体的状态，优先于租约；
+- **身份归一（#141 复审 P0 教训）**：Linux Worker 认领用租约身份
+  `(ref_agent_id, ref_instance)`，其中 `ref_instance =
+  sha256(instance.lower())[:16]`（`linux_config.py`），注册/心跳用人类身份
+  `(worker_id, instance)`。`list_workers` 判 working 时，对每个事实键同时查
+  原始键与派生租约键，任一持有有效租约即算 working；派生公式的 canonical
+  实现是 `ref_heartbeat.ref_instance_id()`，linux_config 各写一份，须保持一致；
+- 注册表 Issue 评论心跳通道保留作兼容（`registry_issue` 非空时双通道同写），
+  但 `registry_issue` 全仓库默认是 None，refs 是实际生效的通道。
+  注册表文档里“最近 GitHub 活动 = 心跳、90 分钟判失联”的旧口径已废止。
+
 ### 3.3 认领（claim）
 
 1. `list(agent-hwm/issue-N/)` → 当前最大 token `T`；

@@ -64,6 +64,7 @@ from dispatch.github_client import GitHubAPIError, GitHubClient, client_from_env
 from dispatch.protocol import (  # noqa: E402
     ASSIGNED_MARKER,
     CLAIM_MARKERS,
+    EXPIRED_MARKER,
     agent_of,
     build_agent_header,
     comment_has_dispatch_id,
@@ -183,7 +184,32 @@ def is_ready(
 
     bodies = _comment_bodies(client, number)  # 全量分页
     if any(marker in body for body in bodies for marker in CLAIM_MARKERS):
-        return False, "已有认领评论"
+        # P0-2 死锁修复：认领过期后必须能重派。只看“最新一次认领”是否仍活着：
+        # 最新 CLAIM_EXPIRED 晚于最新认领 → 该认领已死，不再阻塞；
+        # 无过期记录、或最新认领晚于最新过期（过期后又被重新认领）→ 仍阻塞；
+        # 认领评论读不到时间戳（老格式）→ 无法判断是否已过期，保守阻塞。
+        claim_times = [
+            parse_marker_time(body)
+            for body in bodies
+            if any(marker in body for marker in CLAIM_MARKERS)
+        ]
+        latest_claim = max((t for t in claim_times if t), default=None)
+        if latest_claim is None:
+            return False, "已有认领评论"
+        expired_times = [
+            parse_marker_time(body)
+            for body in bodies
+            if EXPIRED_MARKER in body
+        ]
+        latest_expired = max((t for t in expired_times if t), default=None)
+        if latest_expired is None or latest_claim > latest_expired:
+            return False, "已有认领评论"
+        print(
+            f"[dispatch] #{number} 最新认领于 {latest_claim:%Y-%m-%dT%H:%M:%SZ} "
+            f"已被 CLAIM_EXPIRED（{latest_expired:%Y-%m-%dT%H:%M:%SZ}）覆盖，"
+            "允许重新分派",
+            flush=True,
+        )
     assigned_times = [
         parse_marker_time(body) for body in bodies if ASSIGNED_MARKER in body
     ]
