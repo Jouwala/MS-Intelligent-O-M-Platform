@@ -428,6 +428,14 @@ if (-not (Test-Path -LiteralPath $pgCtl)) {
             $createdb = Join-Path $PgBin 'createdb.exe'
             & $createdb -h 127.0.0.1 -p $PgPort -U $PgUser $PgDb 2>&1 | ForEach-Object { Write-Host "  $_" }
         }
+        # P1-1：首次启动建 schema。alembic 迁移不带 schema 前缀，依赖 search_path 首位为 app；
+        # 空库默认 search_path 只有 public，表会落错位置。两条语句均幂等，每次启动都跑，
+        # 兼修复此前已建好的库（已有表不搬家，见 docs\workspace\zip-p1-1-clean-pg-record.md）。
+        # 注意：此处 $ErrorActionPreference 为 Continue，失败不会自动抛，必须查 $LASTEXITCODE。
+        $schemaOut = & $psql -w -h 127.0.0.1 -p $PgPort -U $PgUser -d $PgDb -tAc 'CREATE SCHEMA IF NOT EXISTS app' 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "创建 app schema 失败：$schemaOut" }
+        $searchOut = & $psql -w -h 127.0.0.1 -p $PgPort -U $PgUser -d $PgDb -tAc "ALTER DATABASE $PgDb SET search_path TO app, public" 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "设置数据库 search_path 失败：$searchOut" }
     } finally { $ErrorActionPreference = $prevEap }
     Write-Ok "便携 PG 就绪 127.0.0.1:$PgPort / $PgDb"
     Write-Step '若数据库为空，请另跑 ops\deploy\bundle_data.ps1 灌入快照'
