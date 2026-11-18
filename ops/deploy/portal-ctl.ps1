@@ -7,7 +7,7 @@
     三个「自愈任务」每 5 分钟跑的就是同一套逻辑（start_ensure.bat / start_hidden.ps1 /
     nginx_monitor.ps1），直接 `schtasks /run` 它们，等于**手动提前触发一次**——
     路径与定时任务完全一致，不会出现「手动能起、重启后起不来」的两套代码。
-    （apps\my_app\start.bat 不能用于 02：它硬编码转发到 D:\01_olbr_portal。）
+    （apps\my_app\start.bat 现在起的就是本目录这一套；硬编码转发已移除。）
 
   用法：
     powershell -NoProfile -File ops\deploy\portal-ctl.ps1 -Action status
@@ -26,7 +26,9 @@ $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 
 $Root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
-if ($Root -notlike '*02_olbr_portal') { throw "本脚本只用于 D:\02_olbr_portal（当前 $Root）" }
+foreach ($need in @('apps\my_app\start_hidden.ps1', 'apps\portal\start_hidden.ps1', 'nginx-1.28.0\nginx.exe')) {
+    if (-not (Test-Path -LiteralPath (Join-Path $Root $need))) { throw "$Root 不像一个完整的 OLBR 部署目录（缺 $need）" }
+}
 $NginxDir = Join-Path $Root 'nginx-1.28.0'
 $Ports = @(80, 443, 7038, 7090, 9267, 9268)
 $Tasks = @('MyApp_EnsureRunning', 'Portal_EnsureRunning', 'Nginx_EnsureRunning')

@@ -1,4 +1,4 @@
-# check_all.ps1 — 02 隔离副本离线质量检查（完整版，第一轮重构批 E）
+﻿# check_all.ps1 — 02 隔离副本离线质量检查（完整版，第一轮重构批 E）
 #
 # 顺序见《NOC-SOC-Intelligent-Platform最终重构执行方案》第 7 节批 E。
 # 同一份检查也在 CI 里跑（.github/workflows/quality.yml，windows-latest）。
@@ -65,7 +65,7 @@ function Invoke-Checked {
 }
 
 # 1. 当前目录是 02，且存在 ISOLATED_COPY.flag
-if ($Root -notlike '*02_olbr_portal') {
+if ($Root -notlike '*02_olbr_portal*') {
     throw "当前目录不是 02（$Root），拒绝执行。"
 }
 if (-not (Test-Path -LiteralPath (Join-Path $Root 'ISOLATED_COPY.flag'))) {

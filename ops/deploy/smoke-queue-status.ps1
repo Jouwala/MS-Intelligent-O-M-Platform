@@ -24,7 +24,7 @@ $PidFile = Join-Path $TmpDir 'smoke-watcher.pid'
 $LogFile = Join-Path $TmpDir 'smoke-watcher.log'
 $LockPath = Join-Path $TmpDir 'smoke.lock'
 
-if ($Root -notlike '*02_olbr_portal') { throw "当前目录不是 02（$Root），拒绝执行。" }
+if ($Root -notlike '*02_olbr_portal*') { throw "当前目录不是 02（$Root），拒绝执行。" }
 
 $Token = $env:SMOKE_GITHUB_TOKEN
 if (-not $Token) { $Token = $env:GITHUB_TOKEN }
