@@ -93,7 +93,9 @@ jobs:
           while [ -n "$URL" ]; do
             curl -sS -D /tmp/ownerless_headers.txt "${AUTH[@]}" "$URL" \
               | jq -r '.[] | select(.pull_request | not) | select(.labels | map(.name) | map(test("^agent:")) | any | not) | "#\(.number) \(.title)"' >> /tmp/ownerless_list.txt
-            URL="$(grep -i '^Link:' /tmp/ownerless_headers.txt | tr ',' '\n' | sed -n 's/.*<\([^>]*\)>; rel="next".*/\1/p' | head -n 1)"
+            # 单页结果时 GitHub 不返回 Link 头，grep 退出 1；pipefail + set -e
+            # 会直接杀死整个步骤，故管道末尾加 || true（无 next 链接即结束循环）。
+            URL="$(grep -i '^Link:' /tmp/ownerless_headers.txt | tr ',' '\n' | sed -n 's/.*<\([^>]*\)>; rel="next".*/\1/p' | head -n 1 || true)"
           done
           OWNERLESS="$(cat /tmp/ownerless_list.txt)"
           if [ -z "$OWNERLESS" ]; then
