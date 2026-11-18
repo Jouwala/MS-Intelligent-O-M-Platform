@@ -200,6 +200,10 @@ if ($paths.Mode -eq 'external') {
     $derived['QA_LOG_PATH'] = Join-Path $botData 'qa.sqlite'
     $derived['NOTIFY_AUTH_DIR'] = Join-Path $botData 'auth-notify'
     $derived['MYAPP_LOG_DIR'] = $paths.LogsDir
+    # P1-7：业务代码新增的三项路径覆盖（MY_APP_DB_PATH / MW_LINKS_PUBLIC_DIR / BOT_LOG_DIR）。
+    $derived['MY_APP_DB_PATH'] = Join-Path $paths.DataDir 'app.db'
+    $derived['MW_LINKS_PUBLIC_DIR'] = 'off'
+    $derived['BOT_LOG_DIR'] = Join-Path $paths.LogsDir 'bot'
 }
 # 无条件覆盖：派生值必须由副本根推导，不能被父进程残留的生产值顶掉。
 foreach ($k in $derived.Keys) { Set-Cfg $k $derived[$k] }

@@ -126,3 +126,9 @@ START_NGINX=1
 # INDEX_PATH/AUTH_DIR 等派生变量指向上述外部目录，并断言写目标不在版本目录内。
 # bot 的 CA 证书（外部 config 提供，不进 ZIP）：首次启动时放到 <NOC_CONFIG_DIR>\certs\
 # 下，文件名为 liberia-noc-ca.pem（缺失时 bot 只告警，HTTP 场景不受影响）。
+# P1-7 业务代码路径覆盖（外部模式下 start_all.ps1 自动派生，平时不用手设）：
+# MY_APP_DB_PATH=<NOC_DATA_DIR>\app.db（sqlite 库与 uploads/attachments/instance.lock 的根）
+# MW_LINKS_PUBLIC_DIR=off（off = 不写 frontend\public 静态副本；_fe_dist 副本仍写）
+# BOT_LOG_DIR=<NOC_LOGS_DIR>\bot
+# MYAPP_LOG_DIR=<NOC_LOGS_DIR>（portal_qa / realtime_proxy / 看门狗日志根）
+# MY_APP_ENV_FILE=（独立拉起后端时指定 .env 位置；start_all 模式不需要）
