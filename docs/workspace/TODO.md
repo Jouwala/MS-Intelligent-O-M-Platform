@@ -22,6 +22,17 @@
 - [x] **替换门户内的 FineBI 占位链接。**（2026-11-12 已完成：删掉最后两个 FineBI 直链看板 qXUp / B7E3，其余已迁移原生页的过期"链接待更新"标签全部清理，门户内不再有 finebi 平台条目。）
 - [ ] **QC 面板改版的验收闭环。** 卡片改版（左侧状态竖条、纯白底、数字居中、标题/副行左对齐）已提交，需确认线上两档刷新节奏（全量 `:06:30` / 告警每 5 分钟）与失败态展示符合预期，并核对 `MsPortal\QC面板展示优化建议_20260922.md` 中的建议项是否已全部落地或明确不做。
 - [ ] **商用就绪度整改项收口。** 按 `MsPortal 商用就绪度检测 —— 结论与整改方案.md` 逐条确认状态。
+- [ ] **切换脚本补「本地派生数据同步」步骤（2026-11-18 切后事故，Muse 应急处理，待固化）。**
+      切到 02 时只迁了门户状态与 `backend/.env`，`apps/my_app/data/` 仍是 11-16 的隔离副本快照：
+      原版 CXO 看板因此停在 11-16（另叠加 `services/cxo/` 重构后 `_ROOT` 少退一层、读写分叉，
+      已修，见 `docs\workspace\cutover-2026-11-20.md` 22:00–22:30 条）；原生看板镜像的
+      `db_sqlite3.sqlite3` 还是损坏副本，18 个原生看板自 11-11 未更新。
+      应急已完成：补 6 个 sqlite + 66 个文件、替换损坏镜像并重同步（`quick_check=ok`）。
+      **待办**：① 把「按 mtime 从上一版生产补 `data/`、并校验镜像 `quick_check`」写进
+      `ops\deploy\cutover\cutover-to-02.ps1`（否则下次切/回退必再踩）；② 清理
+      `apps\my_app\backend\data\cxo_dashboard/` 这个切前写错位置的孤儿快照；
+      ③ `backend\services\cleanup\log_cleanup.py`、`tmp_cleanup.py` 的 `PROJECT_ROOT` 同样少退一层
+      （只影响 log/TMP 清理）。回归守卫：`apps/my_app/tests/test_cxo_cache_paths.py`。
 
 ### P1 —— 数据正确性与稳定性
 

@@ -54,7 +54,13 @@ from backend.services.atomic_write import atomic_replace_file
 
 logger = logging.getLogger(__name__)
 
-_ROOT = Path(__file__).resolve().parent.parent.parent  # my_app/
+# ⚠ 2026-11-18 修：同 cxo_dashboard_cache.py —— 本模块在 services/cxo/ 子包内，
+# `parent.parent.parent` 只到 backend/，日存会写进 backend/data/vmax_cxo_daily/，
+# 看板（routers/vmax_cxo_daily.py 直接 import DAILY_FILE）表面能读到，但 `data/`
+# 里 70 天的历史归档从此不再增长；切到 02 后第一次运行会用**空 store + 最近 8 天**
+# 重建，超过 8 天的日期永久不可回补（上游小时明细只留约 8 天）。
+# 必须用 parents[3] 回到 my_app/，继续写 data/vmax_cxo_daily/ 的既有归档。
+_ROOT = Path(__file__).resolve().parents[3]  # my_app/
 DATA_DIR = _ROOT / "data" / "vmax_cxo_daily"
 DAILY_FILE = DATA_DIR / "daily.json"
 
