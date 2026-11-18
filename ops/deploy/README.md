@@ -11,6 +11,12 @@
   绝对路径改成本机副本根目录（由 `.githooks/post-checkout`、`post-merge` 调用）
 - `local_authority_tools.py`：迁移时校验 / 复制 SQLite 本地权威三表
   （`credentials`、`task_schedule_config`、`email_recipients`）
+- `cutover/`：**生产切换（D:\01 → D:\02）专用**
+  - `snapshot-prod-state.ps1`：切前只读快照（端口归属 / 守护任务状态 / 02 的 .env
+    端口键 / 两侧 nginx.conf / 三表行数），落 `TMP\cutover\<时间戳>\`，不入库；
+  - `rollback-to-01.ps1`：切换失败时把线上拉回 01（停 02 → 恢复 02 的隔离形态 →
+    恢复并触发 01 的守护任务 → 探活），**不碰数据库**；先 `-DryRun` 再实跑。
+  - 操作底稿见 `docs/workspace/cutover-2026-11-20.md`。
 - `sync-ui-config-from-01.ps1`：把生产（`D:\01_olbr_portal`）的三份「全局 UI 配置」
   （`ui_tool_visibility.json` / `ui_tool_order.json` / `ui_menu_layout.json`）同步到本副本。
   默认试运行，`-Apply` 才写；**写之前先校验**：从本副本自己的代码取真相源
