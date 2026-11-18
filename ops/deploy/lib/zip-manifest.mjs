@@ -82,6 +82,9 @@ export const INCLUDE_FILES = [
   { src: 'ops/deploy/start_all.ps1', required: true },
   { src: 'ops/deploy/stop_all.ps1', required: true },
   { src: 'ops/deploy/noc-paths.ps1', required: true },
+  { src: 'ops/deploy/start.sh', required: true }, // P1-4：Linux 编排器（对标 start_all.ps1）
+  { src: 'ops/deploy/stop.sh', required: true }, // P1-4：Linux 停止器（对标 stop_all.ps1）
+  { src: 'ops/deploy/noc-paths.sh', required: true }, // P1-4：Linux 目录解析（对标 noc-paths.ps1）
   { src: 'ops/deploy/write_nginx_conf.ps1', required: true },
   { src: 'ops/deploy/env_template.txt', required: true },
   { src: 'ops/deploy/agent-done-check.mjs', required: true },
@@ -100,8 +103,8 @@ export const INCLUDE_FILES = [
   { src: 'nginx.conf.template', required: true },
   { src: 'start.bat', required: true },
   { src: 'stop.bat', required: true },
-  { src: 'start.sh', required: false, note: 'P1-4 交付，缺失只警告' },
-  { src: 'stop.sh', required: false, note: 'P1-4 交付，缺失只警告' },
+  { src: 'start.sh', required: true },
+  { src: 'stop.sh', required: true },
   // 部署文档子集（§6.3：不含全量历史文档）。
   { src: 'docs/workspace/部署说明.md', required: false },
   { src: 'docs/architecture/data-source-registry.md', required: false },
