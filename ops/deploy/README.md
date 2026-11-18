@@ -32,8 +32,60 @@
   `GH_TOKEN`，都没有时回落本机 `gh auth token`（只在内存，不落盘）。
   开头有硬守卫：推导出的根目录落在 `D:\01_olbr_portal` 下直接拒绝执行（生产只读）。
 - `install-smoke-watcher.ps1`：把 watcher 注册成常驻计划任务 `OLBR_SmokeWatcher`
-  （登录自启、崩溃每分钟重启、单实例）；`-Status` 查、`-Uninstall` 卸。
+  （登录自启、崩溃每分钟重启、单实例）；`-Status` 查、`-Uninstall` 卸、
+  **改 `smoke-watcher.ps1` 后跑 `-Start` 重启进程**（否则内存里仍是旧逻辑）。
   日志 `TMP\smoke-watcher.log`。
+- `smoke-reload-watcher.ps1`：改 `smoke-watcher.ps1` 后停旧进程并
+  `install-smoke-watcher.ps1 -Start`（避免计划任务 IgnoreNew 仍跑旧代码）。
+
+### 冒烟值班：零 LLM token（推荐）
+
+整条链路设计就是 **本机脚本消耗 GitHub API，不经过对话里的 Agent**：
+
+| 步骤 | 谁做 | token |
+| --- | --- | --- |
+| quality 全绿 | GitHub Actions | 0 |
+| 检出 PR、checkout、跑 `smoke.ps1`、贴评论、打 `smoke-passed` | 计划任务 `OLBR_SmokeWatcher` | 0 |
+| 合并 | `auto-merge.yml`（认评论里的 `smoke-result` + 标签） | 0 |
+
+**值班人 / 你本机只看这三处即可，不必开 Agent 盯：**
+
+```powershell
+# 1) watcher 在不在（每周或怀疑挂了时）
+powershell -NoProfile -File ops\deploy\install-smoke-watcher.ps1 -Status
+
+# 2) 有没有 PR 在等冒烟 / 标签过期（随时，几秒）
+powershell -NoProfile -File ops\deploy\smoke-queue-status.ps1
+
+# 3) 最近一轮发生了什么（失败时）
+Get-Content D:\02_olbr_portal\TMP\smoke-watcher.log -Tail 30
+```
+
+**只有这些情况才值得 @ Agent：** 日志里连续 `smoke-local 退出码=1` 且同一项稳定失败；
+`smoke-queue-status` 长期 `blocked` 且工作树确实干净；watcher 进程不存在且 `-Start` 拉不起来。
+Agent 在对话里长轮询 CI（`gh pr checks` 循环等待）**极耗 token，已停用**——那是给人看的快查，
+应交给 watcher 的 60 秒轮询。
+
+手工补跑（仍 0 Agent token）：`powershell -NoProfile -File ops\deploy\smoke-watcher.ps1 -OnlyPr <N> -Once`
+（`-OnlyPr` 不与常驻 watcher 抢 pid；并发靠 `TMP\smoke.lock`。）
+- `smoke-queue-status.ps1`：只读冒烟队列（待跑 / 等 CI / 阻塞 / 已通过），
+  不抢 watcher 单实例锁；Agent 值班先跑它，有 `ready` 再盯 watcher 或手工
+  `smoke-local.ps1`。`gh pr list` 默认 remote 是别的仓，**查 PR 必须**
+  `--repo Jouwala/noc-soc-intelligent-platform` 或本脚本。
+- **单条 open PR 的 PS 坑（2026-11-18）**：GitHub API 只返回 1 个结果时
+  `Invoke-RestMethod` 是单个对象而不是数组，`foreach` 会枚举属性导致
+  watcher/队列脚本「看不见任何 PR」。统一用 `Normalize-GitHubList` 归一化，
+  **凡是取「列表」的调用点都必须过它**（当前共 10 处：watcher 7 处 — PR 列表
+  ×2、评论 ×2、标签 ×2、workflow_runs ×1；队列脚本 3 处）。漏一处就只在
+  「恰好 1 条」的边界上出错，平时看不出来。
+- **重启 watcher 会强杀进程**：`install-smoke-watcher.ps1 -Start` 会 `Stop-Process -Force`
+  掉正在跑的旧 watcher。若它当时正在冒烟，子进程可能残留 `TMP\smoke.lock`，
+  下一次冒烟会直接 `exit 2`。处理：确认没有 `smoke-local` 在跑之后手动删
+  `TMP\smoke.lock`（脚本刻意不替别人删锁，见 `smoke-local.ps1`）。
+- **进程识别按路径段边界匹配**：判定「这是不是 watcher 进程」用
+  `'(^|[\s\\/])smoke-watcher\.ps1'`，并排除 `$PID`。早先的 `'smoke-watcher\.ps1'`
+  会把 `install-smoke-watcher.ps1` 自己也算成 watcher——`smoke-reload-watcher.ps1`
+  通过安装脚本重启时，安装进程会先把自己杀掉，后面的 `Start-ScheduledTask` 永不执行。
 - **2026-11-14 已与 Grok 对齐**：PR #44 同 head 下本地链路 18/18 逐项一致
   （见 `TMP\smoke-pr-44-vs-grok.md`）。对齐后方可停 Grok；停之前不要动
   agent-orchestrator 的 webhook。

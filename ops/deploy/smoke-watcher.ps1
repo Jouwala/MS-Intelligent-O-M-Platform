@@ -270,7 +270,7 @@ function Enter-WatcherPidGuard {
         try { $old = [int]((Get-Content -LiteralPath $PidFile -Raw).Trim()) } catch { $old = 0 }
         if ($old -gt 0 -and $old -ne $PID) {
             $p = Get-CimInstance Win32_Process -Filter "ProcessId=$old" -ErrorAction SilentlyContinue
-            if ($p -and ("$($p.CommandLine)" -match 'smoke-watcher\.ps1')) {
+            if ($p -and ("$($p.CommandLine)" -match '(^|[\s\\/])smoke-watcher\.ps1')) {
                 throw "已有 smoke-watcher 在跑（pid=$old），本实例退出，避免两个轮询器同时冒烟。"
             }
         }
@@ -310,10 +310,22 @@ function Save-State {
     ($State | ConvertTo-Json -Depth 5) | Out-File -LiteralPath $StateFile -Encoding UTF8
 }
 
+function Normalize-GitHubList {
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value) { return @() }
+    if ($Value -is [System.Management.Automation.PSCustomObject]) {
+        if ($Value.PSObject.Properties.Name -contains 'number') { return @($Value) }
+    }
+    if ($Value -is [System.Array]) { return [object[]]$Value }
+    $asList = @($Value)
+    if ($asList.Count -eq 1 -and $asList[0] -is [System.Array]) { return [object[]]$asList[0] }
+    return $asList
+}
+
 function Test-QualityGreen {
     param([string]$Sha)
     $runs = Invoke-GitHubApi "/repos/$Repo/actions/workflows/quality.yml/runs?head_sha=$Sha&per_page=5"
-    foreach ($run in $runs.workflow_runs) {
+    foreach ($run in (Normalize-GitHubList $runs.workflow_runs)) {
         if ($run.status -eq 'completed' -and $run.conclusion -eq 'success') { return $true }
     }
     return $false
@@ -333,7 +345,8 @@ function Get-UtcNowIso {
 
 function Get-IssueLabelNames {
     param([int]$Number)
-    return @((Invoke-GitHubApi "/repos/$Repo/issues/$Number/labels") | ForEach-Object { $_.name })
+    # 必须过 Normalize-GitHubList：恰好 1 个标签时 API 返回单对象而非数组。
+    return @((Normalize-GitHubList (Invoke-GitHubApi "/repos/$Repo/issues/$Number/labels")) | ForEach-Object { $_.name })
 }
 
 function Set-IssueLabels {
@@ -359,7 +372,7 @@ function Set-IssueQaState {
 function Test-IssueMarker {
     # 去重：Issue 评论里已有同标记就不再发（不依赖本机状态文件）。
     param([int]$Issue, [string]$Marker)
-    $comments = Invoke-GitHubApi "/repos/$Repo/issues/$Issue/comments?per_page=100"
+    $comments = Normalize-GitHubList (Invoke-GitHubApi "/repos/$Repo/issues/$Issue/comments?per_page=100")
     foreach ($c in $comments) {
         if ($c.body -and $c.body.Contains($Marker)) { return $true }
     }
@@ -374,7 +387,7 @@ function Send-IssueComment {
 function Get-SmokeResultBoundSha {
     # 读 PR 评论里最后一条 result=passed 的 smoke-result 标记，返回其绑定的 SHA；没有返回 ''。
     param([int]$PrNumber)
-    $comments = Invoke-GitHubApi "/repos/$Repo/issues/$PrNumber/comments?per_page=100"
+    $comments = Normalize-GitHubList (Invoke-GitHubApi "/repos/$Repo/issues/$PrNumber/comments?per_page=100")
     $bound = ''
     foreach ($c in $comments) {
         if ($c.body -and $c.body -match 'smoke-result:\s*pr-\d+\s+sha-([0-9a-f]{40})\s+result=passed') {
@@ -454,14 +467,30 @@ function Send-QaResult {
     Write-WatchLog "PR #$PrNumber $type 已回写 Issue #$Issue（head $Short）。"
 }
 
+function Test-DirtyTrackedTree {
+    $st = Invoke-Git @('status', '--porcelain', '--untracked-files=no')
+    if ($st.Exit -ne 0) { return @{ Dirty = $true; Why = "git status 失败：$($st.Out)" } }
+    if ($st.Out) {
+        $preview = ($st.Out -replace "`r?`n", ' | ')
+        if ($preview.Length -gt 240) { $preview = $preview.Substring(0, 240) + '…' }
+        return @{ Dirty = $true; Why = $preview }
+    }
+    return @{ Dirty = $false; Why = '' }
+}
+
 function Invoke-OneCycle {
     $state = Get-State
+    $tree = Test-DirtyTrackedTree
+    if ($tree.Dirty) {
+        Write-SkipOnce 'dirty-tree' "工作树有已跟踪未提交改动，本轮跳过所有 PR 的 checkout/冒烟（避免覆盖在途工作）：$($tree.Why)"
+        return
+    }
 
     if ($OnlyPr -gt 0) {
-        $prs = @(Invoke-GitHubApi "/repos/$Repo/pulls/$OnlyPr")
+        $prs = Normalize-GitHubList (Invoke-GitHubApi "/repos/$Repo/pulls/$OnlyPr")
         Write-WatchLog "只处理 PR #$OnlyPr（-OnlyPr，忽略本机已冒烟记录）"
     } else {
-        $prs = Invoke-GitHubApi "/repos/$Repo/pulls?state=open&per_page=100"
+        $prs = Normalize-GitHubList (Invoke-GitHubApi "/repos/$Repo/pulls?state=open&per_page=100")
     }
 
     foreach ($pr in $prs) {
@@ -576,7 +605,7 @@ function Invoke-OneCycle {
         Invoke-GitHubApi "/repos/$Repo/issues/$n/comments" 'POST' @{ body = $report } | Out-Null
         Write-WatchLog "PR #$n 冒烟评论已贴（通过=$passed）。"
         if ($passed) {
-            $current = @((Invoke-GitHubApi "/repos/$Repo/issues/$n/labels") | ForEach-Object { $_.name })
+            $current = @((Normalize-GitHubList (Invoke-GitHubApi "/repos/$Repo/issues/$n/labels")) | ForEach-Object { $_.name })
             if ($current -notcontains 'smoke-passed') { $current += 'smoke-passed' }
             Invoke-GitHubApi "/repos/$Repo/issues/$n/labels" 'PUT' @{ labels = $current } | Out-Null
             $state['smoked'][$key] = $sha
@@ -594,7 +623,9 @@ function Invoke-OneCycle {
 }
 
 Write-WatchLog "smoke-watcher 启动：repo=$Repo remote=$Remote 根=$Root 轮询=${PollSeconds}s Once=$Once DryRun=$DryRun OnlyPr=$OnlyPr token来源=$TokenSource"
-Enter-WatcherPidGuard
+# 干跑只读轮询，不与常驻实例抢 pid 文件（否则排障时 -Once -DryRun 永远起不来）。
+# -OnlyPr 为手工补跑单条 PR，允许与常驻实例并存（靠 smoke.lock 防并发冒烟）。
+if ((-not $DryRun) -and ($OnlyPr -le 0)) { Enter-WatcherPidGuard }
 try {
     if ($Once) {
         Invoke-OneCycle
@@ -608,5 +639,5 @@ try {
         }
     }
 } finally {
-    Exit-WatcherPidGuard
+    if ((-not $DryRun) -and ($OnlyPr -le 0)) { Exit-WatcherPidGuard }
 }
