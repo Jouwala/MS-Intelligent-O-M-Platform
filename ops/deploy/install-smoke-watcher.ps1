@@ -40,6 +40,21 @@ $PsExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.e
 if ($Root -notlike '*02_olbr_portal') { throw "当前目录不是 02（$Root），拒绝执行。" }
 if (-not (Test-Path -LiteralPath $Watcher)) { throw "找不到 watcher：$Watcher" }
 
+function Stop-RunningWatchers {
+    $w = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -match 'smoke-watcher\.ps1' }
+    foreach ($p in @($w)) {
+        if (-not $p) { continue }
+        Write-Host "停止正在运行的 watcher：pid=$($p.ProcessId)"
+        Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+    Start-Sleep -Seconds 1
+    $pidPath = Join-Path $Root 'TMP\smoke-watcher.pid'
+    if (Test-Path -LiteralPath $pidPath) {
+        try { Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue } catch { }
+    }
+}
+
 function Show-Status {
     $t = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     if (-not $t) {
@@ -116,6 +131,8 @@ Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
 Write-Host "已注册计划任务 '$TaskName'（用户 $userId，登录时自启，崩溃每分钟重启）。"
 
 if ($Start) {
+    # 计划任务的 IgnoreNew 不会杀掉已在跑的旧进程；改脚本后必须显式停旧再起。
+    Stop-RunningWatchers
     Start-ScheduledTask -TaskName $TaskName
     Start-Sleep -Seconds 3
     Write-Host "已启动。"

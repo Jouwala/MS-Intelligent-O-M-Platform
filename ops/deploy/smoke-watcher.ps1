@@ -454,14 +454,30 @@ function Send-QaResult {
     Write-WatchLog "PR #$PrNumber $type 已回写 Issue #$Issue（head $Short）。"
 }
 
+function Test-DirtyTrackedTree {
+    $st = Invoke-Git @('status', '--porcelain', '--untracked-files=no')
+    if ($st.Exit -ne 0) { return @{ Dirty = $true; Why = "git status 失败：$($st.Out)" } }
+    if ($st.Out) {
+        $preview = ($st.Out -replace "`r?`n", ' | ')
+        if ($preview.Length -gt 240) { $preview = $preview.Substring(0, 240) + '…' }
+        return @{ Dirty = $true; Why = $preview }
+    }
+    return @{ Dirty = $false; Why = '' }
+}
+
 function Invoke-OneCycle {
     $state = Get-State
+    $tree = Test-DirtyTrackedTree
+    if ($tree.Dirty) {
+        Write-SkipOnce 'dirty-tree' "工作树有已跟踪未提交改动，本轮跳过所有 PR 的 checkout/冒烟（避免覆盖在途工作）：$($tree.Why)"
+        return
+    }
 
     if ($OnlyPr -gt 0) {
         $prs = @(Invoke-GitHubApi "/repos/$Repo/pulls/$OnlyPr")
         Write-WatchLog "只处理 PR #$OnlyPr（-OnlyPr，忽略本机已冒烟记录）"
     } else {
-        $prs = Invoke-GitHubApi "/repos/$Repo/pulls?state=open&per_page=100"
+        $prs = @(Invoke-GitHubApi "/repos/$Repo/pulls?state=open&per_page=100")
     }
 
     foreach ($pr in $prs) {
@@ -594,7 +610,8 @@ function Invoke-OneCycle {
 }
 
 Write-WatchLog "smoke-watcher 启动：repo=$Repo remote=$Remote 根=$Root 轮询=${PollSeconds}s Once=$Once DryRun=$DryRun OnlyPr=$OnlyPr token来源=$TokenSource"
-Enter-WatcherPidGuard
+# 干跑只读轮询，不与常驻实例抢 pid 文件（否则排障时 -Once -DryRun 永远起不来）。
+if (-not $DryRun) { Enter-WatcherPidGuard }
 try {
     if ($Once) {
         Invoke-OneCycle
@@ -608,5 +625,5 @@ try {
         }
     }
 } finally {
-    Exit-WatcherPidGuard
+    if (-not $DryRun) { Exit-WatcherPidGuard }
 }
