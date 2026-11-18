@@ -66,9 +66,12 @@ def test_pr_opened_notify_triggers_on_opened_and_labels_needs_review() -> None:
 
 
 def test_pr_opened_notify_fails_loudly_if_label_missing() -> None:
-    """标签缺失时作业要变红（--fail），不是静默跳过——没标签就等于没通知。"""
+    """标签缺失时作业要变红（--fail），不是静默跳过——没标签就等于没通知。
+
+    断言锚在 curl 调用行：文件头注释里也出现 --fail，笼统断言会空过。
+    """
     text = _read(NOTIFY)
-    assert "--fail" in text or "-f" in text
+    assert "curl -fsS" in text
 
 
 def test_needs_review_label_defined_in_labels_yml() -> None:
