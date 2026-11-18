@@ -13,7 +13,7 @@
 4. **不直接调用对方。** 三个 Muse 之间没有 API、CLI、MCP、共享聊天（已调查确认），三台 VM 不能直接互访。Muse 1 不“派发”任务给谁，只把任务写进共享状态，等对方来拉。
 5. **失败有出口。** 自动修复最多 3 次，超限打 `needs-replan` 标签，由 Muse 1 重新规划，不再自动重派。
 
-## 二、12 类 Agent 消息（全部带 Task ID，以 Issue 评论承载）
+## 二、15 类 Agent 消息（全部带 Task ID，以 Issue 评论承载）
 
 每条评论的第一行必须是机器可读头（HTML 注释），格式固定，时间用 UTC 的 ISO 8601；第二行起是人可读正文。Task ID 就是 Issue 编号（如 `#12`）。
 
@@ -31,6 +31,9 @@
 | 10 | FIX_COMPLETED | `<!-- agent-msg: FIX_COMPLETED, task: #12, from: muse-2, at: ... -->` | Muse 2/3（修复 Agent） | 发在**原 Issue** 上：修复内容、新提交、回归自检结果；修复 PR 重新进入评审与测试。无自动化代发，由修复 Issue 的验收清单要求修复者手工发 |
 | 11 | PR_CREATED | `<!-- agent-msg: PR_CREATED, task: #12, from: muse-2, at: ... -->` | Muse 2/3 | PR 链接、改动摘要、CI 状态；PR 描述须自动汇总改动与测试结果 |
 | 12 | PR_MERGED | `<!-- agent-msg: PR_MERGED, task: #12, from: github-actions, at: ... -->` | github-actions（pr-merged-writeback 工作流） | 合并提交、关闭 Issue；同时打 `state:merged` 标签、摘其余 `state:` 标签 |
+| 13 | REVIEW_PASSED | `<!-- review-result: pr-<N> sha-<40> reviewer-<名> verdict=passed -->` | Muse 1（独立审核） | 审核对象 head、复核的测试命令与结果、结论；格式与判定见 `docs/workspace/review-record-protocol.md`（Phase 2 P2-1，#131） |
+| 14 | REVIEW_FAILED | `<!-- review-result: pr-<N> sha-<40> reviewer-<名> verdict=changes-requested -->` | Muse 1（独立审核） | 逐条阻塞发现（文件:行号 + 证据）与要求的修复 |
+| 15 | REVIEW_BLOCKED | `<!-- review-result: pr-<N> sha-<40> reviewer-<名> verdict=blocked -->` | Muse 1（独立审核） | 阻断原因（如涉生产库、须用户决定）与下一步 |
 
 ### 五类 QA/FIX 消息的落地口径（TASK-06-A #48 / TASK-06-B #49，2026-11-15）
 
@@ -84,6 +87,7 @@ state:todo ──(TASK_ACCEPTED [人/Agent])──▶ state:claimed ──(TASK_
 ```
 
 - **QA 四个标签的进入/退出**：`state:qa-ready` 由 watcher 在冒烟开始时进入；`state:qa-passed` / `state:qa-failed` 由 watcher 在冒烟结束时进入。退出方式统一：watcher 的 `Set-IssueQaState`（`ops/deploy/smoke-watcher.ps1:342`）每次写 QA 状态都先摘掉 `state:in-review` 与其余三个 qa 状态，保证 Issue 任一时刻至多一个 QA 状态标签；合并后 `state:merged` 由 pr-merged-writeback 打上并摘掉其余全部 `state:` 标签。QA 状态的进入全部是 [自动] 边，没有人工打 qa 标签的口径。
+- **审核与 QA 并行**：`state:in-review` 表示“PR 已开、待独立审核”（Phase 2 P2-1，#131），由开发 Agent 在 TASK_COMPLETED 时打上；watcher 在冒烟开始时按上条摘掉它（既有行为，QA 状态单值化），此后审核状态不由 Issue 标签承载，而由 PR 评论里的 review-result 标记承载（passed / changes-requested / blocked，绑定 head SHA），与 QA 标签并行存在、互不覆盖。`state:in-review` 的进入/退出仍是“开发 Agent 打、watcher 摘”，不是审核者打的——这是已知缺口，待 Phase 2 后续收口。
 - `state:blocked` 可从任何状态进入（依赖未满足、等用户决定），解除阻塞后回到原状态。
 - `needs-replan` 不是状态，是终止标记：进入条件是**同一根任务第 4 次 QA 失败**（已有 3 轮修复 Issue 后再失败），由 auto-fix 打上并停手（`.github/workflows/auto-fix.yml:126-146`）；已带 `needs-replan` 的 Issue，auto-fix 整体跳过（`:90-93`）。退出只能靠 Muse 1 重新规划后人工处理 [人/Agent]。
 - `risk:high` 与状态标签并存：涉及生产环境、数据库结构、VMAX、nginx、生产服务重启的任务必须打，合并前须用户明确批准。
