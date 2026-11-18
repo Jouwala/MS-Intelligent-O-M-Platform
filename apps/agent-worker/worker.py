@@ -205,16 +205,16 @@ class AgentWorker:
 
     # -- 主流程 ---------------------------------------------------------------------
     def run_once(self) -> str:
-        """一个轮询周期：心跳线程 + 调度器心跳 + 最多处理一个任务。"""
+        """一个轮询周期：本地心跳线程 + 拉取可认领任务 + 最多处理一个任务。
+
+        调度器心跳在状态已知时写（无任务 → idle，认领后 → working），不再在
+        周期开头写 online——否则 online beat 会抢占 60s 节流窗口，idle/working
+        永远写不进去。连通性探测由 list_claimable 承担（失败即 offline）。
+        """
         writer = self._ensure_heartbeat()
         writer.update(task_id="", state="polling")
         writer.start()
         try:
-            try:
-                self.scheduler.heartbeat_worker(self.config.agent_id, self.config.instance_id)
-            except Exception as exc:  # noqa: BLE001 - 调度器短暂不可用不退出常驻循环
-                self.log(f"[worker] 调度器心跳失败（疑似断网/DB 不可用）：{exc}")
-                return "offline"
             self.lifecycle.drain_mirror()
             try:
                 claimable = self.adapter.list_claimable()
@@ -222,6 +222,13 @@ class AgentWorker:
                 self.log(f"[worker] 拉取任务失败（疑似断网）：{exc}")
                 return "offline"
             if not claimable:
+                try:
+                    self.scheduler.heartbeat_worker(
+                        self.config.agent_id, self.config.instance_id, state="idle"
+                    )
+                except Exception as exc:  # noqa: BLE001 - 调度器短暂不可用不退出常驻循环
+                    self.log(f"[worker] 调度器心跳失败（疑似断网/DB 不可用）：{exc}")
+                    return "offline"
                 return "idle"
             return self.handle_task(claimable[0])
         finally:
@@ -252,7 +259,16 @@ class AgentWorker:
                     attempt_id=attempt_id,
                     lease_ttl=timedelta(seconds=cfg.lease_ttl_s),
                 )
-            except (S.LeaseHeld, S.AlreadyTerminal) as exc:
+            except S.LeaseHeld as exc:
+                self.log(f"[worker] 认领被拒：{exc}")
+                try:
+                    self.scheduler.heartbeat_worker(
+                        cfg.agent_id, cfg.instance_id, state="waiting"
+                    )
+                except Exception:  # noqa: BLE001 - 心跳失败不影响主流程
+                    pass
+                return "claim-conflict"
+            except S.AlreadyTerminal as exc:
                 self.log(f"[worker] 认领被拒：{exc}")
                 return "claim-conflict"
             active.attempt_id = lease.attempt_id or attempt_id
@@ -261,6 +277,12 @@ class AgentWorker:
             self._active = active
             if self._heartbeat is not None:
                 self._heartbeat.update(task_id=task_id, state="running")
+            try:
+                self.scheduler.heartbeat_worker(
+                    cfg.agent_id, cfg.instance_id, state="working"
+                )
+            except Exception as exc:  # noqa: BLE001 - 心跳失败不影响已认领的任务
+                self.log(f"[worker] 调度器心跳失败：{exc}")
             self.log(
                 f"[worker] 已认领 {task_id} attempt={active.attempt_id} "
                 f"token={active.fencing_token}"

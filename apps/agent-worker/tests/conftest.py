@@ -186,8 +186,8 @@ class FakeScheduler:
         self.workers[(agent_id, instance_id)] = snap
         return SimpleNamespace(**snap)
 
-    def heartbeat_worker(self, agent_id, instance_id) -> bool:
-        self._record("heartbeat_worker", agent_id=agent_id, instance_id=instance_id)
+    def heartbeat_worker(self, agent_id, instance_id, state="online") -> bool:
+        self._record("heartbeat_worker", agent_id=agent_id, instance_id=instance_id, state=state)
         return True
 
     def list_workers(self, stale_after=None):
