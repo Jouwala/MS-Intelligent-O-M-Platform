@@ -86,9 +86,16 @@ jobs:
           API="https://api.github.com/repos/$REPO"
           AUTH=(-H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json')
           # 找 open 的 state:todo Issue 里没有 agent:* 标签的（对分派永久不可见）。
-          # 注意：Issue 列表分页只取前 100 条，仓库规模尚小，够用；超限需改分页。
-          OWNERLESS="$(curl -sS "${AUTH[@]}" "$API/issues?state=open&labels=state:todo&per_page=100" \
-            | jq -r '.[] | select(.labels | map(.name) | map(test("^agent:")) | any | not) | "#\(.number) \(.title)"')"
+          # 列表端点也会返回 PR（带 pull_request 键），须排除；跟 Link 分页拉满，
+          # 不只取前 100 条（仓库 Issue 已过 130）。
+          : > /tmp/ownerless_list.txt
+          URL="$API/issues?state=open&labels=state:todo&per_page=100"
+          while [ -n "$URL" ]; do
+            curl -sS -D /tmp/ownerless_headers.txt "${AUTH[@]}" "$URL" \
+              | jq -r '.[] | select(.pull_request | not) | select(.labels | map(.name) | map(test("^agent:")) | any | not) | "#\(.number) \(.title)"' >> /tmp/ownerless_list.txt
+            URL="$(grep -i '^Link:' /tmp/ownerless_headers.txt | tr ',' '\n' | sed -n 's/.*<\([^>]*\)>; rel="next".*/\1/p' | head -n 1)"
+          done
+          OWNERLESS="$(cat /tmp/ownerless_list.txt)"
           if [ -z "$OWNERLESS" ]; then
             echo "无无负责人 state:todo 任务，无需告警。"
             exit 0
@@ -96,7 +103,9 @@ jobs:
           echo "发现无负责人 state:todo 任务："
           echo "$OWNERLESS"
           TITLE="[告警] 存在无负责人任务（分派不可见）"
-          # 去重：已有同名 open 告警 Issue 就追加评论，没有才新建；内容每次重写当前清单。
+          # 去重：已有同名 open 告警 Issue 就地更新最新一条同类评论（PATCH），
+          # 不再每 5 分钟追加一条（否则一日约 288 条重复评论刷屏）；没有同类
+          # 评论时才 POST 新评论，没有同名 Issue 时才新建。
           EXISTING="$(curl -sS "${AUTH[@]}" "$API/search/issues?q=repo:$REPO+state:open+in:title+%22%E5%AD%98%E5%9C%A8%E6%97%A0%E8%B4%9F%E8%B4%A3%E4%BA%BA%E4%BB%BB%E5%8A%A1%22" | jq -r '.items[0].number // empty')"
           NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           {
@@ -108,9 +117,17 @@ jobs:
             echo "请 Muse 1 确认负责人后补 agent 标签，或关闭不需要的任务。"
           } > /tmp/ownerless.md
           if [ -n "$EXISTING" ]; then
-            jq -n --rawfile body /tmp/ownerless.md '{body: $body}' \
-              | curl -sS -X POST "${AUTH[@]}" "$API/issues/$EXISTING/comments" --data-binary @- > /dev/null
-            echo "已在既有告警 Issue #$EXISTING 追加当前清单。"
+            COMMENT_ID="$(curl -sS "${AUTH[@]}" "$API/issues/$EXISTING/comments?per_page=100" \
+              | jq -r '[.[] | select((.body // "") | contains("ownerless-alert:")) | .id] | last // empty')"
+            if [ -n "$COMMENT_ID" ]; then
+              jq -n --rawfile body /tmp/ownerless.md '{body: $body}' \
+                | curl -sS -X PATCH "${AUTH[@]}" "$API/issues/$EXISTING/comments/$COMMENT_ID" --data-binary @- > /dev/null
+              echo "已就地更新既有告警 Issue #$EXISTING 的同类评论（comment $COMMENT_ID）。"
+            else
+              jq -n --rawfile body /tmp/ownerless.md '{body: $body}' \
+                | curl -sS -X POST "${AUTH[@]}" "$API/issues/$EXISTING/comments" --data-binary @- > /dev/null
+              echo "已在既有告警 Issue #$EXISTING 发第一条清单评论。"
+            fi
           else
             jq -n --arg title "$TITLE" --rawfile body /tmp/ownerless.md '{title: $title, body: $body}' \
               | curl -sS -X POST "${AUTH[@]}" "$API/issues" --data-binary @- > /dev/null

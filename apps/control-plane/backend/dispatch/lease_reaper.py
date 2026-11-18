@@ -354,8 +354,10 @@ def _write_github_output(name: str, value: str, values: dict | None = None) -> N
     try:
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(f"{name}={value}\n")
-    except OSError:
-        pass  # 输出写失败不影响回收本身
+    except OSError as exc:
+        # 写失败不影响回收本身，但要留一行日志：否则 reaped 输出为空，
+        # 下游分派步静默跳过（"" > 0 为假），被释放的任务无声等到下一小时巡检。
+        print(f"[reaper] 写 GITHUB_OUTPUT 失败（{name}={value}）：{exc}", flush=True)
 
 
 def main(

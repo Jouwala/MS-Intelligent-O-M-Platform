@@ -235,6 +235,19 @@ def test_cli_writes_zero_when_nothing_reaped(tmp_path):
     assert "reaped=0" in content
 
 
+def test_github_output_write_failure_logs_and_does_not_fail(capsys, tmp_path):
+    """P1-4 审核发现 5：GITHUB_OUTPUT 写失败不抛错，但必须留日志。
+
+    否则 reaped 输出为空，下游分派步静默跳过（"" > 0 为假），无从排查。
+    """
+    env = dict(_env())
+    env["GITHUB_OUTPUT"] = str(tmp_path / "no-such-dir" / "github_output.txt")
+    lease_reaper._write_github_output("reaped", "2", env)
+    captured = capsys.readouterr()
+    assert "写 GITHUB_OUTPUT 失败" in captured.out
+    assert "reaped=2" in captured.out
+
+
 def test_cli_failure_returns_nonzero_and_prints_reason(capsys):
     fake = FakeReapModule([], error=RuntimeError("模拟 refs API 500"))
     code = lease_reaper.main([], env=_env(), ref_store=FakeRefStore(), ref_reap=fake)
