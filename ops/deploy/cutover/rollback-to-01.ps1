@@ -289,10 +289,12 @@ if ($DryRun) {
     $nginxConf = Join-Path $Root01 'nginx-1.28.0\conf\nginx.conf'
     if (Test-Path -LiteralPath $nginxConf) {
         Push-Location (Join-Path $Root01 'nginx-1.28.0')
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'   # nginx -t 走 stderr，Stop 会打死脚本
         try {
             $t = & .\nginx.exe -t 2>&1
             Add-Result '01 nginx -t' ($LASTEXITCODE -eq 0) (($t | Select-Object -Last 1) -replace "`r?`n", ' ')
-        } finally { Pop-Location }
+        } finally { $ErrorActionPreference = $prevEap; Pop-Location }
     } else {
         Add-Result '01 nginx -t' $false '找不到 01 的 nginx.conf'
     }

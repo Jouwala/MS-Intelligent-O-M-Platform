@@ -285,10 +285,14 @@ Write-Step '7/9 生成 02 的生产 nginx 配置'
 $confScript = Join-Path $Root02 'ops\deploy\write_nginx_conf.ps1'
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $confScript -HttpPort 80 -HttpsPort 443 -BePort 7038 -FePort 7090 -PortalPort 9267 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
 Push-Location (Join-Path $Root02 'nginx-1.28.0')
+$prevEap = $ErrorActionPreference
+# nginx -t 把结果写到 stderr，PS5.1 会把 native stderr 变成 ErrorRecord；
+# 脚本全局是 Stop，直接用 2>&1 会把整个脚本打死（2026-11-18 21:16 实测，死在 7/9）。
+$ErrorActionPreference = 'Continue'
 try {
     $t = & .\nginx.exe -t 2>&1
     $tOk = ($LASTEXITCODE -eq 0)
-} finally { Pop-Location }
+} finally { $ErrorActionPreference = $prevEap; Pop-Location }
 Add-Result 'nginx 配置' $tOk (($t | Select-Object -Last 1) -replace "`r?`n", ' ')
 
 # ---------- 8. 起 02 ----------
