@@ -40,12 +40,16 @@
 - `bundle_data.ps1`：把生产 PostgreSQL 快照灌进副本便携实例
 - `my_portal_ctl.ps1`、`write_nginx_conf.ps1`：§11-5 自仓库根归位至此；
   两者都按自身位置向上推导仓库根，`ops/shortcuts/` 的 bat 已指向新位置
-  - `build-zip.mjs`（+ `lib/zip-package.mjs`、`lib/zip-writer.mjs`、`lib/zip-dir.mjs`）：
-    ZIP 交付 Phase 1（#146）的构建脚本——白名单组装 + 排除断言 + 凭据扫描 +
-    行尾规范化 + `build-info.json`/SHA256，产出可重复构建的应用 ZIP；
-    流程见 `docs/workspace/zip-build-release.md`
-    - `runtime-manifest.json`：运行时发行包清单（`runtime-build.yml` 驱动下载与
-      SHA256 校验；`url`/`sha256` 为空的条目禁止构建，须从官方渠道核实后补齐）
+- `build-zip.mjs`（+ `lib/zip-package.mjs`、`lib/zip-writer.mjs`、`lib/zip-dir.mjs`）：
+  ZIP 交付 Phase 1（#146）的构建脚本——白名单组装 + 排除断言 + 凭据扫描 +
+  行尾规范化 + `build-info.json`/SHA256，产出可重复构建的应用 ZIP；
+  流程见 `docs/workspace/zip-build-release.md`
+- `noc-paths.ps1`：ZIP 交付 Phase 1（#146，P1-6）的外部目录解析——`start_all.ps1` /
+  `stop_all.ps1` 共用（唯一真相源）；设了 `NOC_HOME` 时配置/数据/日志/运行时一律
+  走部署根下的外部目录，版本目录零写入；不设则与旧行为一致。见
+  `docs/workspace/zip-external-dirs.md`
+- `runtime-manifest.json`：运行时发行包清单（`runtime-build.yml` 驱动下载与
+  SHA256 校验；`url`/`sha256` 为空的条目禁止构建，须从官方渠道核实后补齐）
 
 ## 已停用：从 RPA（主仓库）来的同步
 
