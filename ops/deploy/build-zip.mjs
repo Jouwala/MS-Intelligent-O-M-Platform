@@ -22,7 +22,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { writeZip } from './lib/zip-writer.mjs'
 import {
-  GateError, assemble, assertExclusions, collectEntries, gitInfo, makeBuildInfo,
+  GateError, assemble, assertExclusions, collectEntries, gitInfo, isPathInside, makeBuildInfo,
   resolveAlembicHead, resolveMtimeMs, resolveVersion, scanCredentials, sha256Hex,
   writeSha256Sums, zipFileName, normalizeStaging,
 } from './lib/zip-package.mjs'
@@ -63,8 +63,9 @@ function main() {
   const staging = resolve(opts.staging ?? join(root, 'TMP/zip-build'))
   const outDir = resolve(opts.out ?? join(root, 'TMP/zip-dist'))
   // 安全：暂存区只能在仓库内或系统临时目录内，rm -rf 绝不碰别处。
-  const allowed = [root, tmpdir()].map((p) => resolve(p))
-  if (!allowed.some((base) => staging === base || staging.startsWith(`${base}/`))) {
+  // P0-2：用 isPathInside（path.relative 判定），旧 startsWith(`${base}/`) 在 Windows 上恒为假。
+  const allowed = [root, tmpdir()]
+  if (!allowed.some((base) => isPathInside(base, staging))) {
     throw new Error(`--staging 须在仓库内或系统临时目录内: ${staging}`)
   }
 
