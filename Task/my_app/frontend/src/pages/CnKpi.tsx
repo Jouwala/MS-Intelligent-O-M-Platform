@@ -50,6 +50,14 @@ interface CnWidget {
   fallback_from: string
   /** 实际数据的粒度：'day' | 'month' | '' */
   granularity: 'day' | 'month' | ''
+  /** 混源归因（仅 c1/c4）：日期 → 'EMS' | 'UME'。由后端按两张表的实际覆盖判定 */
+  source_days?: Record<string, string>
+  /** 换源日及换后的来源（如 10-19 → EMS），用于图上竖线与告警条 */
+  source_switches?: { day: string; source: string }[]
+  /** 首末点之间没有任何来源数据的日期（断档），不是 0 值 */
+  missing_days?: string[]
+  /** 区间内是否混用了两个来源 */
+  source_mixed?: boolean
 }
 
 /** 这个组件卡片「数怎么来」的说明，逐行拼自接口既有字段（不重算任何数字）。
@@ -61,6 +69,19 @@ function widgetExplainText(w: CnWidget, t: (k: string, p?: Record<string, string
     w.granularity === 'month' ? t('cnkpi.tip.granMonth') : (w.granularity === 'day' ? t('cnkpi.tip.granDay') : ''),
     w.degraded === 'monthly' ? t('cnkpi.tip.degradedMonthly', { from: w.fallback_from || '—' }) : '',
     w.degraded === 'day_ume' ? t('cnkpi.tip.degradedDay', { from: w.fallback_from || '—' }) : '',
+    // 混源：换源日 + 各来源天数（后端 source_days 原样统计，前端不重算）
+    w.source_mixed
+      ? t('cnkpi.tip.sourceMixed', {
+          days: (w.source_switches ?? []).map((s) => `${s.day}→${s.source}`).join('、'),
+        })
+      : '',
+    (w.missing_days?.length ?? 0) > 0
+      ? t('cnkpi.tip.sourceGap', {
+          n: w.missing_days!.length,
+          from: w.missing_days![0],
+          to: w.missing_days![w.missing_days!.length - 1],
+        })
+      : '',
     w.sql ? t('cnkpi.tip.sql', { sql: w.sql }) : '',
   ].filter(Boolean).join('\n')
 }
@@ -129,8 +150,38 @@ function buildAxisOption(w: CnWidget, isDark: boolean) {
   const cats = w.rows.map((r) => String(r[0]))
   const rest = w.columns.slice(1)
   const dense = cats.length > 120
+  const switches = w.source_switches ?? []
+  const srcMap = w.source_days ?? {}
+  const hasSrc = switches.length > 0
+  // 混源组件（c1/c4）在 tooltip 里带上该点来源：台阶当天能一眼看出「换表了」。
+  // 只展示后端回传的 source_days，不在前端推断。
+  const axisTooltip = {
+    ...darkTooltip(isDark),
+    trigger: 'axis' as const,
+    formatter: hasSrc
+      ? (ps: unknown) => {
+          const arr = (Array.isArray(ps) ? ps : [ps]) as {
+            axisValue?: string
+            marker?: string
+            seriesName?: string
+            value?: unknown
+            data?: { value?: unknown }
+          }[]
+          if (!arr.length) return ''
+          const x = String(arr[0].axisValue ?? '')
+          const src = srcMap[x] || srcMap[x.slice(0, 10)] || ''
+          const head = `<b>${x}${src ? ' · ' + src : ''}</b>`
+          const lines = arr.map((p) => {
+            const raw = p.data && typeof p.data === 'object' ? p.data.value : p.value
+            const val = raw === null || raw === undefined || raw === '' ? '—' : raw
+            return `${p.marker || ''}${p.seriesName ?? ''}: ${val}`
+          })
+          return [head, ...lines].join('<br/>')
+        }
+      : undefined,
+  }
   return {
-    tooltip: { ...darkTooltip(isDark), trigger: 'axis' as const },
+    tooltip: axisTooltip,
     legend: {
       bottom: 0,
       type: 'scroll' as const,
@@ -170,6 +221,18 @@ function buildAxisOption(w: CnWidget, isDark: boolean) {
         w.pct,
       ),
       label: { show: true, position: 'top' as const, fontSize: 10 },
+      // 换源竖线：只画在第一条序列上，避免多序列重复。
+      // 混源组件的台阶（如 10-19 EMS 接管）必须能在图内定位，而不是只在告警条里说。
+      markLine: i === 0 && switches.length
+        ? {
+            symbol: 'none' as const,
+            silent: true,
+            animation: false,
+            lineStyle: { type: 'dashed' as const, width: 1, color: isDark ? '#f0b429' : '#b7791f' },
+            label: { position: 'insideEndTop' as const, fontSize: 10, color: isDark ? '#f0b429' : '#b7791f' },
+            data: switches.map((s) => ({ xAxis: s.day, label: { formatter: s.source } })),
+          }
+        : undefined,
     })),
   }
 }
@@ -395,6 +458,15 @@ export default function CnKpi() {
     (w) => w.degraded || (w.granularity === 'month' && w.rows.length > 0),
   )
 
+  /**
+   * 混源/断档组件：c1 VLR 与 c4 Voice 的取数规则是「同日优先 EMS、缺日取 UME」。
+   * 两个来源覆盖面不同，换源日会有台阶 —— 这是**数据状态异常**（会被当成业务突变），
+   * 按 AGENTS.md 三.3b 的例外条款必须常驻可见，不能收进口径说明。
+   */
+  const sourceWidgets = widgets.filter(
+    (w) => Boolean(w.source_mixed) || (w.missing_days?.length ?? 0) > 0,
+  )
+
   /** 区间文案：优先用后端回传的实际生效区间，便于导出时写明口径 */
   const rangeLabel = useMemo(() => {
     if (!data) return ''
@@ -530,6 +602,11 @@ export default function CnKpi() {
           { title: t('cnkpi.calc.secSource'), lines: [t('cnkpi.calc.src1'), t('cnkpi.calc.src2')] },
           { title: t('cnkpi.calc.secTier'), lines: [t('cnkpi.calc.tier1'), t('cnkpi.calc.tier2')] },
           { title: t('cnkpi.calc.secGran'), lines: [t('cnkpi.calc.gran1'), t('cnkpi.calc.gran2')] },
+          // 2026-11-18：VLR / Voice 混源的来龙去脉（异常本身由上方常驻告警条说）
+          { title: t('cnkpi.calc.secMix'), lines: [t('cnkpi.calc.mix1'), t('cnkpi.calc.mix2')] },
+          // 2026-11-18：Data Subscribers 改制式命名（2G/3G/4G）并新增 5G(NSA) 序列。
+          // 「5G 为什么不进 Total」是**口径解释**（不是异常），按三.3b 放这个收起块里。
+          { title: t('cnkpi.calc.secData'), lines: [t('cnkpi.calc.data1'), t('cnkpi.calc.data2')] },
         ]}
       />
 
@@ -568,6 +645,40 @@ export default function CnKpi() {
                 </Text>
               ))}
               <Text type="secondary" style={{ fontSize: 12 }}>{t('cnkpi.degradedWhy')}</Text>
+            </Space>
+          }
+        />
+      )}
+
+      {/* 混源/断档告警条（常驻）：换源日的台阶与整段缺日都会让曲线看起来
+          「数据错了」，但根因是两张表覆盖面不同。必须当场说清，避免被读成业务突变。 */}
+      {sourceWidgets.length > 0 && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message={t('cnkpi.srcMixTitle', { n: sourceWidgets.length })}
+          description={
+            <Space direction="vertical" size={2}>
+              {sourceWidgets.map((w) => (
+                <Text key={w.id} style={{ fontSize: 12 }}>
+                  <Text strong style={{ fontSize: 12 }}>{w.title}</Text>
+                  {' — '}
+                  {w.source_mixed
+                    ? t('cnkpi.srcMixLine', {
+                        days: (w.source_switches ?? []).map((s) => `${s.day}→${s.source}`).join('、'),
+                      })
+                    : ''}
+                  {(w.missing_days?.length ?? 0) > 0
+                    ? ' ' + t('cnkpi.srcGapLine', {
+                        n: w.missing_days!.length,
+                        from: w.missing_days![0],
+                        to: w.missing_days![w.missing_days!.length - 1],
+                      })
+                    : ''}
+                </Text>
+              ))}
+              <Text type="secondary" style={{ fontSize: 12 }}>{t('cnkpi.srcMixWhy')}</Text>
             </Space>
           }
         />

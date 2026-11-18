@@ -504,6 +504,21 @@ TASK_SPECS = [
          description_en="CNN UME core-network KPI sync at 5-minute granularity (same 8 templates, incremental window of the last 120 minutes by default; falls back to the full yesterday-00:00-to-now window after a failed run), API write to DB CNN 5mins_* tables for the 5-minute Day0/Day1/Day7 board",
          default_cron="*/15 * * * *", category="cnn_kpi"),
 
+    # 11c. CN 小时粒度 KPI 同步（每天 06:20，与 11 的 06:00 错开 20 分钟）
+    #      模板来自 UME「KPI 模板管理」导出件 KPI Template.xlsx（2026-11-17 新建一批），
+    #      由 cn_kpl/cn_hourly_kpi_service.py 解析后交给既有 CNN 查询管线组包。
+    #      用户 2026-11-18 定的口径：Utilization/Capacity 两族重复只留 Utilization；
+    #      Object Scope=ALL（payload filterlayer="all"，实测覆盖全部 NE）；
+    #      gr=3600（1 小时）；首次回补 31 天（python -m ... --days 31）。
+    #      写入 <模板名>_UME 三张新表，供 ?page=cn_hourly_kpi 按日期区间出图。
+    #      排 06:20：cnn_kpi_sync（06:00）与 5 分钟任务都在用同一 UME 会话体系，
+    #      错开高峰；小时行 append-only，2 天窗口足够补齐跨天档。
+    dict(task_id="cn_hourly_kpi_sync", name="CN 小时KPI同步", name_en="CN Hourly KPI Sync",
+         loader=("backend.services.cn_kpl.cn_hourly_kpi_service", "run_cn_hourly_kpi_sync"),
+         description="CN UME 小时粒度 KPI 同步（KPI Template.xlsx 模板：xGW 会话/吞吐容量 + MGW/MRFP 资源利用率，gr=3600，默认 2 天增量窗口），API 写入 DB CNN 的 <模板名>_UME 表，供小时 KPI 看板按日期区间出图",
+         description_en="CN UME hourly KPI sync (templates from KPI Template.xlsx: xGW session/throughput capacity + MGW/MRFP resource utilization, gr=3600, 2-day incremental window by default), API write to DB CNN <template>_UME tables for the hourly KPI board",
+         default_cron="20 6 * * *", category="cnn_kpi"),
+
     # 12. SP 备件数据同步（2026-09-20 起改为每小时 :10，原为每天 07:00）
     #     为什么改小时级：上游 SFTP（sp/inbound、sp/outbound）本来就是**每小时 :00:03
     #     导出一份**（每天 24 个时间戳目录），而 MsPortal 的 QC 面板 SPMS 卡读的正是本任务

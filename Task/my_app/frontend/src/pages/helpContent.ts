@@ -54,6 +54,7 @@ export const PAGE_LIST: { key: string; iframe?: boolean }[] = [
   { key: 'ume_in_kpi' },
   { key: 'cn_kpi' },
   { key: 'cn_kpi_5mins' },
+  { key: 'cn_hourly_kpi' },
   { key: 'imonitor', iframe: true },
   { key: 'ip_trace', iframe: true },
   { key: 'vmax_user_query' },
@@ -128,6 +129,7 @@ export const NAV_KEY_MAP: Record<string, string> = {
   ume_in_kpi: 'nav.umeInKpi',
   cn_kpi: 'nav.cnKpi',
   cn_kpi_5mins: 'nav.cnKpi5mins',
+  cn_hourly_kpi: 'nav.cnHourlyKpi',
   imonitor: 'nav.imonitor',
   ip_trace: 'nav.ipTrace',
   vmax_user_query: 'nav.vmaxUserQuery',
@@ -154,7 +156,7 @@ export const CATEGORIES: { id: string; pages: string[] }[] = [
   { id: 'tasks', pages: ['sync', 'email_reports', 'upload', 'tables', 'overview'] },
   {
     id: 'boards',
-    pages: ['alarm', 'ttwo', 'v1_ttwo', 'tt', 'wo', 'nur', 'ms_nur_only', 'ms_sla', 'ms_sla_only', 'ms_wo_sla', 'ms_contract_kpi', 'cxoDashboard', 'vmaxCxoDashboard', 'vmaxCxoDashboard_Daily', 'vmaxCxoDashboard_90Days', 'socTrendDashboard', 'mwUmeTopology', 'ipranTopo', 'olibTopo', 'olibTopo_v2', 'mwRealTime', 'alarmManagement', 'fme_ranking', 'site_avail', 'avail_ms', 'avail_flm', 'avail_county', 'bm_speedtest', 'bm_meta', 'noc_analyst', 'repeat_site_down', 'cr_analysis', 'pm_analysis', 'bp_report', 'ran_cells_kpi', 'packet_loss', 'battery', 'ume_in_kpi', 'cn_kpi', 'cn_kpi_5mins', 'imonitor', 'gis', 'realtime_alarm', 'person', 'incident_overview', 'warehouse', 'sp_material', 'sp_details', 'sp_report', 'com_report', 'warehouse_summary'],
+    pages: ['alarm', 'ttwo', 'v1_ttwo', 'tt', 'wo', 'nur', 'ms_nur_only', 'ms_sla', 'ms_sla_only', 'ms_wo_sla', 'ms_contract_kpi', 'cxoDashboard', 'vmaxCxoDashboard', 'vmaxCxoDashboard_Daily', 'vmaxCxoDashboard_90Days', 'socTrendDashboard', 'mwUmeTopology', 'ipranTopo', 'olibTopo', 'olibTopo_v2', 'mwRealTime', 'alarmManagement', 'fme_ranking', 'site_avail', 'avail_ms', 'avail_flm', 'avail_county', 'bm_speedtest', 'bm_meta', 'noc_analyst', 'repeat_site_down', 'cr_analysis', 'pm_analysis', 'bp_report', 'ran_cells_kpi', 'packet_loss', 'battery', 'ume_in_kpi', 'cn_kpi', 'cn_kpi_5mins', 'cn_hourly_kpi', 'imonitor', 'gis', 'realtime_alarm', 'person', 'incident_overview', 'warehouse', 'sp_material', 'sp_details', 'sp_report', 'com_report', 'warehouse_summary'],
   },
   { id: 'analysis', pages: ['eflow_qa', 'eflow_flow', 'dashboard', 'archive', 'ip_trace', 'vmax_user_query', 'vmax_user_cca', 'ipt_power'] },
   { id: 'workflow', pages: ['ap_center', 'feedback'] },
@@ -515,6 +517,18 @@ export const PAGE_DOCS: Record<Locale, Record<string, PageDoc>> = {
         '「vs 昨日 ±%」点开后先说明它是**前端**算的（接口不下发 pct）：今天 00:00→此刻的均值 对比 昨天截到同一时刻的均值，±10% 以内为灰、超出标橙；今天或昨天在该时段没有点、或昨天均值为 0 时直接不显示',
         '页头的「N/N 个组件有数据」「耗时 / 缓存」「失败 N」三枚标签也都能悬浮：空态与失败都**不计入**「有数据」，失败只算查询报错的组件',
         '「导出 Excel」每个组件一张表，按时刻展开 Day0 / Day1 / Day7 列（只出该组件实际有数据的日子），便于对账',
+      ],
+    },
+    cn_hourly_kpi: {
+      desc: 'CN 小时 KPI 看板：xGW 会话/吞吐容量与 MGW/MRFP 资源利用率的**小时粒度**视图，可按日期区间（默认最近 7 天、上限 31 天）回看。数据源是 UME 网管「KPI 模板管理」导出件 KPI Template.xlsx（2026-11-17 新建模板批）解析出的 3 个模板，由任务 cn_hourly_kpi_sync 每天 06:20 以 gr=3600 增量拉取，写入 db_ps_cs_cn 的 <模板名>_UME 三张表。口径（2026-11-18 定）：Resource_Utilization 与 Resource_Capacity 两族模板重复，只保留 Utilization 一族；Object Scope=ALL，数据覆盖全部网元。',
+      usage: [
+        '页面 7 张组件卡：xGW PFCP 会话用量、xGW 会话占用率(%)、xGW 吞吐用量(Mbps)、xGW 吞吐占用率(%)、MGW/MRFP 的 TONE/TC/RTP 利用率(%)；前四张的线是 xGWU22/xGWU122 两个网元（占用率为全 NE 合并的 ALL 线），后三张的线是 MGW_91/MGW_92/MRFP_96 三个网元',
+        '日期区间用右上角区间选择器改（含端点），改完立即重新取数；上限 31 天（与回补窗口同档）',
+        '**每张组件卡的标题都能悬浮看这一格怎么算**：ⓘ 按组件写清聚合式 —— 会话/吞吐用量是按网元小时的 SUM，占用率是 SUM(已用)×100÷SUM(授权) 的全网元加权，资源利用率是上游复合 KPI 直接返回的原值（公式如 100*C408230024/(Gr*C408230021)，Gr=3600 秒），页面不做二次换算',
+        '首次上线的一个月历史由回补命令生成：python -m backend.services.cn_kpl.cn_hourly_kpi_service --days 31；此后每天 06:20 增量（默认 2 天窗口）自动补新',
+        '页头标签「N/N 个组件有数据」「日期区间」「失败 N」都可悬浮：空态与失败不计入「有数据」',
+        '「数据口径说明」默认收起（点标题展开）：模板来源、Utilization/Capacity 取舍、Object Scope=ALL 与利用率公式都在里面',
+        '「导出 Excel」每个组件一张表，按小时展开各网元列，便于对账',
       ],
     },
     imonitor: {
@@ -1225,6 +1239,18 @@ export const PAGE_DOCS: Record<Locale, Record<string, PageDoc>> = {
         'The "vs yesterday ±%" tag opens with the admission that it is computed **by the frontend** (the API sends no pct): today\'s mean from 00:00 to now against yesterday\'s mean truncated to the same clock time, ±10% grey and beyond orange. It disappears entirely when either day has no point in that span, or yesterday\'s mean is 0',
         'The header tags "N/N widgets with data", "elapsed / cache" and "N failed" are hover-explainable too: empty and failed widgets are both **excluded** from "with data", and the failure count covers query errors only',
         '"Export Excel" writes one sheet per widget, expanded as Day0 / Day1 / Day7 columns by time of day (only the days that widget actually has)',
+      ],
+    },
+    cn_hourly_kpi: {
+      desc: 'CN Hourly KPI board: an HOURLY-granularity view of xGW session/throughput capacity and MGW/MRFP resource utilization, with a selectable date range (last 7 days by default, up to 31 days). The data comes from 3 templates parsed out of the UME "KPI Template" export file KPI Template.xlsx (templates created 2026-11-17); task cn_hourly_kpi_sync pulls them at gr=3600 every day at 06:20 into the <template>_UME tables in db_ps_cs_cn. Caliber (set 2026-11-18): the Resource_Utilization and Resource_Capacity template families duplicate each other, so only Utilization is kept; Object Scope=ALL, covering every network element.',
+      usage: [
+        'Seven widget cards: xGW PFCP sessions used, xGW session occupancy(%), xGW throughput used(Mbps), xGW throughput occupancy(%), and MGW/MRFP TONE/TC/RTP utilization(%). The first four plot xGWU22/xGWU122 (occupancy is a single merged ALL line), the last three plot MGW_91/MGW_92/MRFP_96',
+        'Change the date range with the range picker (inclusive endpoints); the board refetches immediately and is capped at 31 days (same tier as the backfill window)',
+        '**Every widget title explains its value on hover**: the ⓘ spells out the aggregate per card — session/throughput usage is a SUM over NE-hours, occupancy is SUM(Used)×100÷SUM(Authorized) weighted across NEs, and resource utilization is the upstream composite-KPI value as-is (e.g. 100*C408230024/(Gr*C408230021), Gr=3600s) with no recomputation on the page',
+        'The first month of history comes from the backfill command: python -m backend.services.cn_kpl.cn_hourly_kpi_service --days 31; afterwards the daily 06:20 run appends new hours automatically (2-day window by default)',
+        'The header tags "N/N widgets with data", "date range" and "N failed" are hover-explainable too: empty and failed widgets are both excluded from "with data"',
+        '"Data caliber notes" is collapsed by default (click the title to expand): template origin, the Utilization/Capacity choice, Object Scope=ALL and the utilization formulas are all in there',
+        '"Export Excel" writes one sheet per widget, expanded per NE column by hour, for reconciliation',
       ],
     },
     imonitor: {

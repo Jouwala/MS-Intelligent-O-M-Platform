@@ -76,6 +76,7 @@ import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from datetime import date, timedelta
 from typing import Any, Dict, List, Optional
 
 from backend.config.remote_host import get_api_base_url
@@ -159,6 +160,15 @@ WIDGETS: List[Dict[str, Any]] = [
         # 一旦对端降级就会整页报错。LEFT JOIN 无此约束，故取此写法。
         "source_table": "VLR_SUBSCRIBERS_TEMPLATE_OSS_EMS",
         "fallback": "VLR_SUBSCRIBERS_TEMPLATE_OSS_UME",
+        # 2026-11-18 报障「图中间老是跳一下，估计少 UME 或 EMS 的数据」：
+        # 这条 SQL 是**混源**的（同日优先 EMS、缺日取 UME），两个来源覆盖面不同，
+        # 切换日必然出现台阶。这里显式标出两张表，_fetch_widget 会据此回传
+        # source_days / source_switches / missing_days，页面把「换源」与「断档」
+        # 常驻说清（口径本身不改 —— 优先级是业务决定，见 11-feature-guide §33.3a）。
+        "source_split": {
+            "ems": "VLR_SUBSCRIBERS_TEMPLATE_OSS_EMS",
+            "ume": "VLR_SUBSCRIBERS_TEMPLATE_OSS_UME",
+        },
         "sql": (
             'SELECT e.d AS t, e.v AS "VLR Subscribers" FROM (\n'
             'SELECT substr("End Time",1,10) AS d, SUM("Number of Subscribers in VLR") AS v '
@@ -183,6 +193,12 @@ WIDGETS: List[Dict[str, Any]] = [
         # 写 UME 是因为它覆盖更长（121 天 vs 30 天），月度兜底表也挂在 UME 侧。
         "source_table": "VOICE_TRAFFIC_TEMPLATE_OSS_UME",
         "monthly_table": "1month_VOICE_TRAFFIC_TEMPLATE_OSS_UME",
+        # 与 c1 同一套混源标记（voice 的主表写的是 UME，但 SQL 仍显式引用两张表，
+        # 不能靠 source_table 推 —— 必须显式声明，否则会把 EMS 日误标成 UME）。
+        "source_split": {
+            "ems": "VOICE_TRAFFIC_TEMPLATE_OSS_EMS",
+            "ume": "VOICE_TRAFFIC_TEMPLATE_OSS_UME",
+        },
         "sql": (
             'SELECT e.d AS t, e.v AS "Voice Traffic(Erl)" FROM (\n'
             'SELECT substr("End Time",1,10) AS d, SUM("Seized Traffic(Erl)") AS v '
@@ -242,15 +258,26 @@ WIDGETS: List[Dict[str, Any]] = [
         "chart": "line",
         # 主表是自动同步的 UME（通常也够新）；DATA_SUBSCRIBERS 的 _EMS 实测已被
         # 人工导出覆盖成月粒度，说明这条人工链路不稳定，故再兜一层月表。
+        #
+        # 2026-11-18 按业务要求改口径与命名：
+        #   · 序列名改成制式名（GSM→2G、UMTS→3G、EPS→4G），并新增 5G；
+        #   · 5G 取自 C466010001（导出列 "Mean Number of EPS Attach NSA subscribers"，
+        #     该指标项与位置已加入 ccn_ume_kpi_service.CNN_KPI_QUERY_CONFIGS 的
+        #     DATA_SUBSCRIBERS，同步写库后才会有这一列）。
+        # ⚠ Total **仍只合计 2G+3G+4G**，不含 5G：5G NSA 用户是「EPS 附着里支持 NSA
+        # 的那部分」，与 4G EPS Attach 是**包含关系而非并列**，加进去会重复计数
+        # （实测同一 NE 同日 4G=293027 / 5G=20879，5G 从未大于 4G）。
+        # 因此图上 5G 单列一条曲线用于看趋势，Total 保持"不重复计数的用户总数"。
         "source_table": "DATA_SUBSCRIBERS_TEMPLATE_OSS_UME",
         "monthly_table": "1month_DATA_SUBSCRIBERS_TEMPLATE_OSS_UME",
         "sql": (
-            'SELECT substr("End Time",1,10) AS t, SUM(gsm) AS "GSM", '
-            'SUM(umts) AS "UMTS", SUM(eps) AS "EPS", '
+            'SELECT substr("End Time",1,10) AS t, SUM(gsm) AS "2G", '
+            'SUM(umts) AS "3G", SUM(eps) AS "4G", SUM(nsa) AS "5G", '
             'SUM(gsm+umts+eps) AS "Total" FROM (\n'
             'SELECT "End Time", "Mean number of attached subscribers(GSM)" AS gsm, '
             '"Mean number of attached subscribers(UMTS)" AS umts, '
-            '"Mean Number of EPS Attach subscribers" AS eps '
+            '"Mean Number of EPS Attach subscribers" AS eps, '
+            '"Mean Number of EPS Attach NSA subscribers" AS nsa '
             'FROM "DATA_SUBSCRIBERS_TEMPLATE_OSS_UME"\n'
             ")  GROUP BY substr(\"End Time\",1,10) "
             "HAVING t >= {{LO}} AND t < {{HI}} ORDER BY t"
@@ -662,6 +689,76 @@ def _resolve_fallback(src: str) -> Optional[str]:
     return cand
 
 
+def _table_days(table: str) -> set:
+    """取一张表里出现过的日期集合（YYYY-MM-DD）。
+
+    只发 SELECT DISTINCT，命中远端只读守卫；表名来自 WIDGETS 内置配置，
+    经 _TABLE_NAME_RE 校验，不存在注入面。
+    """
+    if not _TABLE_NAME_RE.match(str(table)):
+        raise ValueError(f"表名不合法：{table!r}")
+    res = query_remote(
+        f'SELECT DISTINCT substr("End Time",1,10) AS d FROM "{table}"', limit=5000)
+    if not res.get("success", True):
+        raise RuntimeError(res.get("error") or "远端返回 success=false")
+    return {str(r[0])[:10] for r in (res.get("rows") or []) if r and r[0]}
+
+
+def _source_breakdown(w: Dict[str, Any], rows: List[List[Any]]) -> Optional[Dict[str, Any]]:
+    """标出每一天的值来自 EMS 还是 UME，并列出换源日与断档日。
+
+    为什么要有（2026-11-18 报障：VLR / Voice 两张图「中间老是跳一下」）：
+    这两条的 SQL 是「同日优先 EMS、缺日取 UME」，两个来源**覆盖面与口径都不同**
+    （实测 2026-10-19：EMS VLR=1,231,875 / UME=1,008,806，差 22%；
+    Voice 43,504 / 34,803，差 25%），所以换源处会出现台阶。
+    接口此前只回 granularity=day，页面无法解释台阶，用户只能猜「是不是少数据」。
+
+    只做归因、不重算数值：来源判定与 SQL 的优先级保持一致（EMS 命中即 EMS），
+    断档只统计首末点之间（窗口外的空缺由用户选的区间决定，不在图上报）。
+    """
+    split = w.get("source_split") or {}
+    ems_t, ume_t = split.get("ems"), split.get("ume")
+    if not (ems_t and ume_t) or not rows:
+        return None
+    try:
+        ems_days = _table_days(ems_t)
+        ume_days = _table_days(ume_t)
+    except Exception as e:  # noqa: BLE001 — 归因查询失败不应拖垮出图
+        logger.info("CN KPI 组件 %s 来源拆分查询失败（不影响出图）：%s", w["id"], e)
+        return None
+
+    days = [str(r[0])[:10] for r in rows]
+    src: Dict[str, str] = {}
+    for d in days:
+        src[d] = "EMS" if d in ems_days else ("UME" if d in ume_days else "")
+
+    switches = [
+        {"day": d, "source": src[d]}
+        for i, d in enumerate(days)
+        if i > 0 and src[d] != src[days[i - 1]]
+    ]
+
+    missing: List[str] = []
+    try:
+        first, last = date.fromisoformat(days[0]), date.fromisoformat(days[-1])
+        present = set(days)
+        cur = first
+        while cur <= last:
+            s = cur.isoformat()
+            if s not in present:
+                missing.append(s)
+            cur += timedelta(days=1)
+    except ValueError:
+        missing = []
+
+    return {
+        "source_days": src,
+        "source_switches": switches,
+        "missing_days": missing,
+        "source_mixed": len({v for v in src.values() if v}) > 1,
+    }
+
+
 def _fetch_widget(w: Dict[str, Any], start: Optional[str] = None,
                   end: Optional[str] = None) -> Dict[str, Any]:
     """取单个组件的数据；失败只标记该组件，不影响整页。
@@ -689,6 +786,11 @@ def _fetch_widget(w: Dict[str, Any], start: Optional[str] = None,
         "degraded": "",
         "fallback_from": "",
         "granularity": "",
+        # 混源归因（只对带 source_split 的组件，如 c1 VLR / c4 Voice 填充）
+        "source_days": {},
+        "source_switches": [],
+        "missing_days": [],
+        "source_mixed": False,
     }
     if w["chart"] == "text":
         return out
@@ -746,6 +848,17 @@ def _fetch_widget(w: Dict[str, Any], start: Optional[str] = None,
                 # 主表本身就是月粒度：不算「降级」，但必须标注粒度
                 logger.info("CN KPI 组件 %s(%s) 主表为月粒度数据（%d 行）",
                             w["id"], w["title"], len(rows))
+            # 混源组件（c1/c4）：标出每天来自 EMS 还是 UME、换源日、断档日。
+            # 只做归因，不改数值；失败不影响出图（helper 内部已兜住）。
+            if kind == "day" and gran == "day" and w.get("source_split"):
+                extra = _source_breakdown(w, rows)
+                if extra:
+                    out.update(extra)
+                    if extra["source_mixed"] or extra["missing_days"]:
+                        logger.info(
+                            "CN KPI 组件 %s(%s) 混源：换源 %d 处、断档 %d 天",
+                            w["id"], w["title"], len(extra["source_switches"]),
+                            len(extra["missing_days"]))
             return out
 
     # 所有级别都没有数据

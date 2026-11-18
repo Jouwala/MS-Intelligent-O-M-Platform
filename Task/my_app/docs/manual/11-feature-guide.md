@@ -40,6 +40,7 @@
 | 25 | RAN 小区 KPI | `ran_cells_kpi` | React |
 | 26 | CN KPI | `cn_kpi` | React |
 | 27 | CN KPI 5分钟 | `cn_kpi_5mins` | React |
+| 27b | CN 小时KPI | `cn_hourly_kpi` | React |
 | 28 | 客户业务 KPI | `ume_in_kpi` | React |
 | 29 | CXO 经营看板 | `cxoDashboard` | **iframe** |
 | 30 | VMAX CXO 原版看板 | `vmaxCxoDashboard` | **iframe** |
@@ -4745,6 +4746,73 @@ UME 只是自动同步的补充。**这个优先级是口径决定，不是性�
 > **只改生成物不改生成器，下次重新生成就会把 bug 带回来。**
 > 两者的 SQL 必须**逐字节一致**（含 `\n`），校验脚本 `TMP\_probe_cnkpi_override_sync.py`。
 
+### 33.3b Data Subscribers 的制式命名与 5G NSA 序列（2026-11-18）
+
+按业务要求，`c3 Data Subscribers` 的序列名改成**制式名**并新增 5G：
+
+| 图上序列 | 端口径 | 上游指标项 |
+| --- | --- | --- |
+| `2G` | GSM 附着用户 | `C405080015`（列 `Mean number of attached subscribers(GSM)`） |
+| `3G` | UMTS 附着用户 | `C405080016`（列 `Mean number of attached subscribers(UMTS)`） |
+| `4G` | EPS 附着用户 | `C431000001`（列 `Mean Number of EPS Attach subscribers`） |
+| `5G` | 5G NSA 附着用户 | `C466010001`（列 `Mean Number of EPS Attach NSA subscribers`） |
+| `Total` | **2G+3G+4G** | 同上三列相加 |
+
+**`Total` 刻意不含 5G** —— 5G NSA 用户是「EPS 附着里支持 NSA 的那一部分」，与 4G
+是**包含关系而非并列**，加进去会重复计数（实测同一 NE 同日 4G=293027 / 5G=20879，
+5G 从未大于 4G）。所以 5G 单列一条曲线看趋势，`Total` 保持「不重复计数的用户总数」。
+这个口径同时写进了页面口径条（`cnkpi.calc.secData` / `cnkpi.calc.data1` / `cnkpi.calc.data2`）。
+
+⚠ **`items` 与 `itemsposition` / `itemsposition1` 是按位置一一对应的平行数组，长度必须相等**
+（`ccn_ume_kpi_service.CNN_KPI_QUERY_CONFIGS["DATA_SUBSCRIBERS"]`）。实测 2026-11-18：
+只加 `items` 不补 positions（4 个指标配 3 个位置）时，UME 查询照常 200、导出照常成功，
+但 **GSM/UMTS 两列会从导出表头里整体消失**，只剩 EPS 与 5G —— 写库是 upsert，
+旧列于是停在最后一次有值的那天，看板不报错、只是曲线不再更新（静默丢数）。
+现在 `build_cnn_kpi_payload()` 会先调 `_validate_item_positions()` 拦住长度不等/位置越界，
+让任务带着明确原因失败。**加指标项时务必同时补 positions**（5G 与 EPS 同属 MME，
+即 `motid` 第 2 项 50300，索引 0）。
+
+回补说明：日常任务 `days_back=7`，新增列只有最近 7 天有值；看板默认窗口是 31 天，
+所以首次上线时用 `TMP\_sync_datasub_5g.py`（只跑 DATA_SUBSCRIBERS 的日表+月表、
+`days_back` 临时 31）回补了一次。日表与月表都要写 —— 否则降级到月表那一级会因缺列报错。
+
+### 33.3c 混源的可见性：VLR / Voice 的「台阶」与「断档」（2026-11-18）
+
+**报障原话**：「VLR Subscribers 和 Voice Traffic(Erl) 两个图以一个粒度的数据老是异常，
+估计少 UME 或者 EMS 的数据。」—— 与 §33.3b 的翻倍 bug 是**两件事**：
+翻倍已修（极差 2.03x → 1.02x），这次是**两个来源本身对不上**。
+
+实测归因（2026-11-18，`db_ps_cs_cn`）：
+
+| 事实 | 数值 |
+| --- | --- |
+| 默认窗口（近 31 天）里只有 1 天来自 UME，其余 31 天来自 EMS | `source_days`：10-18→UME，10-19..11-18→EMS |
+| 换源日台阶（VLR） | 10-18 UME 1,002,263 → 10-19 EMS 1,231,875（**+22.9%**） |
+| 换源日台阶（Voice） | 10-18 UME 33,392.6 → 10-19 EMS 43,504.3（**+30.3%**） |
+| 同一天两源差多少（10-19） | VLR：EMS 1,231,875 / UME 1,008,806（差 18%）；Voice：EMS 43,504 / UME 34,803（差 20%） |
+| 拉宽到 09-01 起的断档 | Voice 在 **09-07 ~ 09-25 连续 19 天无任何来源数据**；VLR 无断档 |
+| 上游脏行 | Voice 的 UME 表在 09-02~09-06 只有 MSC71 且值为 **90001~90005**（逐日 +1，明显是测试/占位写入，不是真实话务） |
+
+**根因不是「少了一天」，而是「两个来源不是同一把尺」**：EMS 是人工按原看板口径导出，
+UME 是自动同步；两者的 NE 覆盖与采集时点都不同，所以「同日优先 EMS、缺日取 UME」
+在换源处必然出现台阶。断档日则是两边都没有数 —— 线条会直接连过去，看起来像平滑下降。
+
+**处理（2026-11-18 落地，不改口径）**：
+
+- 后端 `cn_kpi_service._source_breakdown()` 对 `c1` / `c4` 回传四个字段：
+  `source_days`（日期→EMS/UME）、`source_switches`（换源日）、`missing_days`（首末点
+  之间无任何来源的日期）、`source_mixed`。来源判定与 SQL 优先级严格一致（EMS 命中即 EMS）。
+- 前端 `CnKpi.tsx` 据此：① 在图上画**换源竖线**（虚线 + 来源标签）；② 换源/断档时
+  给**常驻告警条**（AGENTS.md 三.3b 的「异常」例外，不收进口径说明）；③ tooltip 每个点
+  标出来源；④ 口径说明里新增「EMS / UME 混源」一节（收起）。
+- **没有改数据、也没有插值**：把 UME 优先或 EMS 优先改掉是业务口径决定（§33.3a
+  末段：优先级是口径决定，不是性能决定）。要真正消除台阶，只有两条路 ——
+  业务确认后改优先级，或把 UME 的覆盖补齐（含上面那 5 行测试脏数据）。
+
+> 判据速查：图上竖线出现在哪天 = 那天开始换源；断档天数 = `missing_days.length`。
+> 接口自查：`GET /api/cn-kpi/overview?start=2026-09-01&end=2026-11-18`，
+> 看 c1/c4 的 `source_switches` 与 `missing_days`。
+
 ### 33.4 界面必须显示的粒度提示（不要删）
 
 上游粒度会漂移，**用户看到「9-01 / 10-01 两个点」会读成「最近两天」**。因此：
@@ -4793,6 +4861,7 @@ UME 只是自动同步的补充。**这个优先级是口径决定，不是性�
 | `TMP\_probe_vlr_window.py` | 并排对比某区间内 EMS 与 UME **各自有没有那天**，并给出「当前结果取自谁」，用于定位台阶位置 |
 | `TMP\_probe_vlr_oldvsnew.py` | **对比线上运行中的后端与修复后代码的逐日值**，直接打印倍数与极差。改完代码未重启时用它确认"是不是还没生效"（重启后两者应一致，倍数恒为 1.00x） |
 | `TMP\_probe_restart_ready.py` | 按 `main.py` 的导入顺序重新 import 相关模块，**确认重启不会起不来**；改动模块级常量后、重启前跑一次 |
+| `TMP\_sync_datasub_5g.py` | **回补工具**（不是探针）：只跑 DATA_SUBSCRIBERS 的日表+月表，`days_back` 临时 31，用于把新加的指标项（如 2026-11-18 的 C466010001 / 5G NSA）回补进库。详见 §33.3b |
 
 ---
 
@@ -4975,6 +5044,60 @@ FROM "5mins_3G_FDD_DATA_TRAFFIC_TEMPLATE_OSS_UME"
 
 > 运行前记得 `$env:PYTHONIOENCODING='utf-8'`，否则中文日志在 GBK 控制台会抛
 > `UnicodeEncodeError`。
+
+## 33c. CN 小时 KPI 看板（`?page=cn_hourly_kpi`）—— KPI Template.xlsx 的小时粒度数据（2026-11-18 新增）
+
+xGW 会话/吞吐容量与 MGW/MRFP 资源利用率的**小时粒度**（gr=3600）看板，可按日期区间
+（默认最近 7 天、上限 31 天）回看。数据源是 UME 网管「KPI 模板管理」导出件
+`backend\services\cn_kpl\KPI Template.xlsx`（2026-11-17 新建的 8 个模板批），
+由 `cn_kpl\cn_hourly_kpi_service.py` 解析 `template` sheet 后**复用既有 CNN 查询管线**
+组包（`build_cnn_kpi_payload` → create/poll/export → `read_xlsx_bytes`），
+写库走 `DbWriterClient` upsert 进 `db_ps_cs_cn` 的 `<模板名>_UME` 三张新表。
+
+### 33c.1 口径决定（用户 2026-11-18 定）
+
+1. **Resource_Utilization 与 Resource_Capacity 两族模板重复，只保留 Utilization 一族**
+   —— 三个 MGW/MRFP Utilization 模板（items/motid/grouplayer 完全一致）取
+   `CS_MRFP96_Resource_Utilization_OSS` 一个即可，实测导出自动包含全部网元
+   （MGW_91/MGW_92/MRFP_96）；Capacity 族为 6 个原始 counter，弃用。
+2. **Object Scope = ALL**：payload 的 `filterlayer="all"` 即对应此选择。
+3. 参与模板共 3 个：`PS_xGW_Session_Capacity_OSS` / `PS_xGW_Throughput_Capacity_OSS` /
+   `CS_MRFP96_Resource_Utilization_OSS`，全部 gr=3600（一小时档）。
+4. **首次回补一个月**（31 天）：`python -m backend.services.cn_kpl.cn_hourly_kpi_service --days 31`；
+   日常由任务 `cn_hourly_kpi_sync` 每天 06:20 增量（默认 2 天窗口）。
+
+### 33c.2 解析坑（实测踩过，改代码前必读）
+
+- xlsx 布尔列是**字符串** `"false"`/`"true"`，`bool("false")` 是 True —— 必须显式判
+  （`_cell_bool`）；motid/templateid/gr 保持字符串；items/itemsposition 是 JSON
+  字符串且两数组长度必须一致。
+- 登录链路（auth_manager → cryptography）只能用 my_app 实际运行环境（系统 Python312）；
+  DSH 内置 python 缺 `cryptography` 会登录失败。
+- 导出 0 行视为空态跳过（与 5 分钟任务同约定），不算失败。
+- 任务必须登记 `worker_watchdog.py` 的 `GROUP_TASK_MAP["n"]`（与 `cnn_kpi_sync` /
+  `cnn_kpi_sync_5mins` 同登 CNN UME 共享会话，同组串行避免互踢）——漏了队列 pending 卡死。
+
+### 33c.3 页面与 API
+
+- `GET /api/cn-hourly-kpi/overview?start=&end=&force=`：7 个组件，每个一条
+  `[Hour, Series(NE 或 ALL), Value]` 三列 SQL，前端按第 2 列 pivot 成线；
+  列名守卫复用 `cn_kpi_5mins_service` 的实现（SQLite 未知双引号标识符不报错恒为 0 的防线）。
+- 组件清单：xGW PFCP 会话用量/占用率、xGW 吞吐用量/占用率、MGW/MRFP TONE/TC/RTP 利用率。
+  占用率 = Σ已用×100÷Σ授权（全网元加权）；资源利用率是上游复合 KPI 直接返回的原值
+  （公式见 xlsx `index` sheet，如 `100*C408230024/(Gr*C408230021)`），页面不二次换算。
+- 卡头 ⓘ 口径文案在 `i18n.tsx` 的 `cnhourly.explain.*`（中英双份），**与
+  `cn_hourly_kpi_service._widgets` 的 SQL 逐条对应**，改 SQL 必须同步改。
+
+### 33c.4 相关文件
+
+| 文件 | 作用 |
+| --- | --- |
+| `backend\services\cn_kpl\KPI Template.xlsx` | UME 模板导出件（模板真相源，上游改模板后重新导出即可） |
+| `backend\services\cn_kpl\cn_hourly_kpi_service.py` | xlsx 解析 + 同步（写库）+ 页面读取侧 |
+| `backend\routers\cn_hourly_kpi.py` | `/api/cn-hourly-kpi/*` |
+| `frontend\src\pages\CnHourlyKpi.tsx` | 页面（日期区间 + 7 组件 pivot 线图） |
+| `backend\task_registry.py` | `TASK_SPECS` 登记 `cn_hourly_kpi_sync` |
+| `backend\worker_watchdog.py` | `GROUP_TASK_MAP["n"]` 加入该任务 |
 
 ## 34. WO 清理 —— 批量关闭待确认工单（`?page=eflow_qa` 左栏，2026-10-01 新增）
 
