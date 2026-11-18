@@ -22,6 +22,8 @@
 """
 from typing import Any, Dict, List
 
+from backend.services.tt.tt_severity import norm_alarm_severity
+
 __all__ = ["s", "dash", "norm_alarm_code", "split_multi", "build_tt_message",
            "reminder_banner"]
 
@@ -93,7 +95,8 @@ def build_tt_message(row: Dict[str, Any]) -> str:
     code = row.get("_alarm_code_norm")
     if code is None:
         code = norm_alarm_code(row.get("alarm_code"))
-    alarm_sev = s(row.get("alarm_severity"))
+    # 上游给的是数字码（1005001…），这里换成 Critical/Major/…（见 tt_severity 模块）
+    alarm_sev = norm_alarm_severity(row.get("alarm_severity"))
     alarm_type = s(row.get("alarm_type")) or s(row.get("alarm_category"))
     # ⚠️ 2026-10-08：把 `alarm_description`（eFlow 的告警码中文名/codename，如
     # "MW LINK DOWN" / "3G SITE DOWN"）拼在 `Alarm:` 行 `domain | alarm_type` 段。

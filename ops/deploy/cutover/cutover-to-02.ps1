@@ -12,11 +12,17 @@
     2. 停 01 my_app（01 的 stop.bat）
     3. 停 01_RPA 门户（9267/9268/9269 的真正主人）
     4. 搬门户状态：portal-default.json + auth-data\ -> 02\apps\portal
-    5. 停 01 nginx，等 80/443 释放
-    6. 迁移后端配置：用 01 的 backend\.env 生成 02 的（路径改写 + SCHEDULER=0），并拷 CA 证书
-    7. 用生产端口生成 02 的 nginx.conf 并 nginx -t
-    8. 起 02：my_app start_hidden -> portal start_hidden -> nginx
-    9. 逐项探活 + 写 manifest（回退脚本据此恢复）
+    5. 同步本地派生数据：按 mtime 补 01\Task\my_app\data\ 与任务产物（eflow_rules 等），
+       并校验原生看板镜像 quick_check（sync-derived-data.ps1）
+    6. 停 01 nginx，等 80/443 释放
+    7. 迁移后端配置：用 01 的 backend\.env 生成 02 的（路径改写 + SCHEDULER=0），并拷 CA 证书
+    8. 用生产端口生成 02 的 nginx.conf 并 nginx -t
+    9. 起 02：my_app start_hidden -> portal start_hidden -> nginx
+    10. 逐项探活 + 写 manifest（回退脚本据此恢复）
+
+  ⚠ 第 5 步是 2026-11-18 首次切换事故补上的：当时只搬了门户状态与 .env，没搬 data\，
+    结果原版 CXO 看板停在 11-16、原生看板镜像还是损坏副本、任务报告页 eFlow TT 规则检查 404。
+    详见 docs\workspace\cutover-2026-11-20.md 22:00–22:30 条。
 
   用法：
     powershell -NoProfile -File ops\deploy\cutover\cutover-to-02.ps1                 # 干跑（默认，不改任何东西）
@@ -115,7 +121,7 @@ if ($SnapshotDir) { Write-Host ("快照：{0}" -f $SnapshotDir) -ForegroundColor
 Write-Host ''
 
 # ---------- 0. 预检 ----------
-Write-Step '0/9 预检'
+Write-Step '0/10 预检'
 $pre = $true
 $h80 = Get-PortExe 80
 $h7038 = Get-PortExe 7038
@@ -124,7 +130,7 @@ if (-not ($h7038 -like '*dbg*' -or $h7038 -like '*python*')) { Write-Warn2 "7038
 foreach ($p in 7039, 7091, 9277, 55432) {
     if ((Get-PortPid $p) -ne 0) { Write-Warn2 "隔离端口 $p 被占用（02 现在不该在跑）"; $pre = $false }
 }
-foreach ($f in 'apps\my_app\start_hidden.ps1', 'apps\portal\start_hidden.ps1', 'ops\deploy\write_nginx_conf.ps1') {
+foreach ($f in 'apps\my_app\start_hidden.ps1', 'apps\portal\start_hidden.ps1', 'ops\deploy\write_nginx_conf.ps1', 'ops\deploy\cutover\sync-derived-data.ps1') {
     if (-not (Test-Path -LiteralPath (Join-Path $Root02 $f))) { Write-Bad "缺 $f"; $pre = $false }
 }
 foreach ($f in 'Task\my_app\stop.bat', 'Task\my_app\backend\.env', 'Task\whatsapp-kb-bot\certs\liberia-noc-ca.pem') {
@@ -164,18 +170,19 @@ if (-not $Apply) {
     Write-Host '    2) cmd /c D:\01_olbr_portal\Task\my_app\stop.bat' -ForegroundColor DarkGray
     Write-Host '    3) cmd /c D:\01_RPA\...\stop.bat（9267/9268/9269）' -ForegroundColor DarkGray
     Write-Host '    4) 复制 portal-default.json + auth-data 到 02\apps\portal' -ForegroundColor DarkGray
-    Write-Host '    5) cd D:\01_olbr_portal\nginx-1.28.0; .\nginx.exe -s quit' -ForegroundColor DarkGray
-    Write-Host '    6) 用 01 的 backend\.env 生成 02 的（路径改写 + SCHEDULER=0），拷 CA 证书' -ForegroundColor DarkGray
-    Write-Host '    7) write_nginx_conf.ps1 -HttpPort 80 -HttpsPort 443 -BePort 7038 -FePort 7090 -PortalPort 9267 + nginx -t' -ForegroundColor DarkGray
-    Write-Host '    8) apps\my_app\start_hidden.ps1 -Quiet -Force -> apps\portal\start_hidden.ps1 -Quiet -> nginx' -ForegroundColor DarkGray
-    Write-Host '    9) 探活 + 写 manifest' -ForegroundColor DarkGray
+    Write-Host '    5) sync-derived-data.ps1 -Apply（按 mtime 补 data\ 与 eflow_rules 等任务产物，并校验镜像）' -ForegroundColor DarkGray
+    Write-Host '    6) cd D:\01_olbr_portal\nginx-1.28.0; .\nginx.exe -s quit' -ForegroundColor DarkGray
+    Write-Host '    7) 用 01 的 backend\.env 生成 02 的（路径改写 + SCHEDULER=0），拷 CA 证书' -ForegroundColor DarkGray
+    Write-Host '    8) write_nginx_conf.ps1 -HttpPort 80 -HttpsPort 443 -BePort 7038 -FePort 7090 -PortalPort 9267 + nginx -t' -ForegroundColor DarkGray
+    Write-Host '    9) apps\my_app\start_hidden.ps1 -Quiet -Force -> apps\portal\start_hidden.ps1 -Quiet -> nginx' -ForegroundColor DarkGray
+    Write-Host '    10) 探活 + 写 manifest' -ForegroundColor DarkGray
     Write-Host ''
     Write-Host '干跑结束：未做任何改动。' -ForegroundColor Yellow
     exit 0
 }
 
 # ---------- 1. 停 01 自愈 ----------
-Write-Step '1/9 停 01 自愈任务'
+Write-Step '1/10 停 01 自愈任务'
 $fail = @()
 $disabled = @()
 foreach ($n in $TaskNames) {
@@ -199,14 +206,14 @@ if ($fail.Count -gt 0) {
 Add-Result '停 01 自愈' $true ('已禁用：' + ($disabled -join ', '))
 
 # ---------- 2. 停 01 my_app ----------
-Write-Step '2/9 停 01 my_app'
+Write-Step '2/10 停 01 my_app'
 & cmd.exe /c (Join-Path $Root01 'Task\my_app\stop.bat') | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
 $left = Wait-PortFree -Ports @(7038, 7090) -Seconds 60
 Add-Result '停 01 my_app' ($left.Count -eq 0) $(if ($left.Count -eq 0) { '7038/7090 已释放' } else { '仍占用：' + ($left -join ',') })
 if ($left.Count -gt 0) { Write-Bad '01 没停干净，已中止（先手动处理再重跑）。'; exit 1 }
 
 # ---------- 3. 停 01_RPA 门户 ----------
-Write-Step '3/9 停 01_RPA 门户（9267/9268/9269）'
+Write-Step '3/10 停 01_RPA 门户（9267/9268/9269）'
 # 不能调门户的 stop.bat：它最后一行是 `pause >nul`，在无人值守的管道里会永久挂起。
 # stop_services.ps1 是它的实质实现，支持 -Quiet 且不 pause。
 $stopSvc = Join-Path $Portal01 'stop_services.ps1'
@@ -218,7 +225,7 @@ Add-Result '停 01_RPA 门户' ($left.Count -eq 0) $(if ($left.Count -eq 0) { '9
 if ($left.Count -gt 0) { Write-Bad '旧门户没停干净，已中止。'; exit 1 }
 
 # ---------- 4. 搬门户状态 ----------
-Write-Step '4/9 搬门户状态到 02'
+Write-Step '4/10 搬门户状态到 02'
 $pdst = Join-Path $Root02 'apps\portal'
 foreach ($name in @('portal-default.json', 'auth-data')) {
     $src = Join-Path $Portal01 $name
@@ -232,16 +239,34 @@ foreach ($name in @('portal-default.json', 'auth-data')) {
 }
 Add-Result '搬门户状态' (Test-Path -LiteralPath (Join-Path $pdst 'auth-data\portal-auth.db')) 'portal-default.json + auth-data（含 portal-auth.db）'
 
-# ---------- 5. 停 01 nginx ----------
-Write-Step '5/9 停 01 nginx'
+# ---------- 5. 同步本地派生数据 ----------
+# 2026-11-18 事故：只搬门户状态与 .env，data\ 仍是 11-16 的隔离快照 —— 原版 CXO 停在
+# 11-16 08:41、原生看板镜像还是损坏件；eflow_rules 的矫正表在 data\ 之外，更没搬，
+# 任务报告页「eFlow TT 规则检查」直接 404。这里统一交给 sync-derived-data.ps1。
+Write-Step '5/10 同步本地派生数据（data\ + 任务产物 + 镜像校验）'
+$syncScript = Join-Path $Root02 'ops\deploy\cutover\sync-derived-data.ps1'
+$prevEapSync = $ErrorActionPreference
+# 子进程把告警/错误写 stderr 时，PS5.1 会转成 ErrorRecord；全局是 Stop 会直接打死脚本
+# （2026-11-18 21:16 的 nginx -t 就是这么死的）。这里临时放宽，只看退出码。
+$ErrorActionPreference = 'Continue'
+try {
+    $syncOut = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $syncScript -SourceRoot (Join-Path $Root01 'Task\my_app') -TargetRoot (Join-Path $Root02 'apps\my_app') -Apply 2>&1
+    $syncCode = $LASTEXITCODE
+} finally { $ErrorActionPreference = $prevEapSync }
+$syncOut | Select-Object -Last 6 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+Add-Result '同步本地派生数据' ($syncCode -eq 0) $(if ($syncCode -eq 0) { 'data\ 已按 mtime 补齐，镜像 quick_check=ok' } else { '失败，见上（镜像损坏时先用 01 的健康库替换）' })
+if ($syncCode -ne 0) { Write-Bad '派生数据没补齐，继续会带病上线。已中止，按提示处理后重跑。'; exit 1 }
+
+# ---------- 6. 停 01 nginx ----------
+Write-Step '6/10 停 01 nginx'
 Push-Location (Join-Path $Root01 'nginx-1.28.0')
 try { & .\nginx.exe -s quit | Out-Null } catch { Write-Warn2 "nginx -s quit 报错：$($_.Exception.Message)" } finally { Pop-Location }
 $left = Wait-PortFree -Ports @(80, 443) -Seconds 45
 Add-Result '停 01 nginx' ($left.Count -eq 0) $(if ($left.Count -eq 0) { '80/443 已释放' } else { '仍占用：' + ($left -join ',') })
 if ($left.Count -gt 0) { Write-Bad '80/443 没释放，已中止。'; exit 1 }
 
-# ---------- 6. 迁移后端配置 ----------
-Write-Step '6/9 迁移 02 的后端配置'
+# ---------- 7. 迁移后端配置 ----------
+Write-Step '7/10 迁移 02 的后端配置'
 $env01 = Join-Path $Root01 'Task\my_app\backend\.env'
 $env02 = Join-Path $Root02 'apps\my_app\backend\.env'
 $bakEnv = '{0}.bak_cutover_{1}' -f $env02, $Stamp
@@ -280,8 +305,8 @@ if (-not (Test-Path -LiteralPath $caDstDir)) { New-Item -ItemType Directory -Pat
 Copy-Item -LiteralPath $caSrc -Destination (Join-Path $caDstDir 'liberia-noc-ca.pem') -Force
 Add-Result '迁移后端配置' (Test-Path -LiteralPath (Join-Path $caDstDir 'liberia-noc-ca.pem')) ('已生成 backend\.env（{0} 个键，备份 {1}）' -f (@($out | Where-Object { $_ -match '^[A-Za-z_][A-Za-z0-9_]*=' }).Count), (Split-Path $bakEnv -Leaf))
 
-# ---------- 7. nginx 配置 ----------
-Write-Step '7/9 生成 02 的生产 nginx 配置'
+# ---------- 8. nginx 配置 ----------
+Write-Step '8/10 生成 02 的生产 nginx 配置'
 $confScript = Join-Path $Root02 'ops\deploy\write_nginx_conf.ps1'
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $confScript -HttpPort 80 -HttpsPort 443 -BePort 7038 -FePort 7090 -PortalPort 9267 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
 Push-Location (Join-Path $Root02 'nginx-1.28.0')
@@ -295,8 +320,8 @@ try {
 } finally { $ErrorActionPreference = $prevEap; Pop-Location }
 Add-Result 'nginx 配置' $tOk (($t | Select-Object -Last 1) -replace "`r?`n", ' ')
 
-# ---------- 8. 起 02 ----------
-Write-Step '8/9 起 02'
+# ---------- 9. 起 02 ----------
+Write-Step '9/10 起 02'
 $flagMy = Join-Path $Root02 'apps\my_app\backend\stopped.flag'
 if (Test-Path -LiteralPath $flagMy) { Remove-Item -LiteralPath $flagMy -Force }
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root02 'apps\my_app\start_hidden.ps1') -Quiet -Force | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
@@ -314,8 +339,8 @@ try { Start-Process -FilePath (Join-Path $Root02 'nginx-1.28.0\nginx.exe') -Argu
 $missing = Wait-PortListen -Ports @(80, 443) -Seconds 30
 Add-Result '起 02 nginx' ($missing.Count -eq 0) $(if ($missing.Count -eq 0) { '80/443 已监听' } else { '未起来：' + ($missing -join ',') })
 
-# ---------- 9. 探活 + manifest ----------
-Write-Step '9/9 探活'
+# ---------- 10. 探活 + manifest ----------
+Write-Step '10/10 探活'
 $lack = Wait-PortListen -Ports @(7038, 7090, 9267, 80, 443) -Seconds $WaitSeconds
 Add-Result '端口齐全' ($lack.Count -eq 0) $(if ($lack.Count -eq 0) { '7038/7090/9267/80/443 都在听' } else { '缺：' + ($lack -join ',') })
 Add-Result '后端 /api/health' (Test-HttpOk 'http://127.0.0.1:7038/api/health') 'http://127.0.0.1:7038/api/health'

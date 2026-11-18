@@ -22,19 +22,41 @@
 - [x] **替换门户内的 FineBI 占位链接。**（2026-11-12 已完成：删掉最后两个 FineBI 直链看板 qXUp / B7E3，其余已迁移原生页的过期"链接待更新"标签全部清理，门户内不再有 finebi 平台条目。）
 - [ ] **QC 面板改版的验收闭环。** 卡片改版（左侧状态竖条、纯白底、数字居中、标题/副行左对齐）已提交，需确认线上两档刷新节奏（全量 `:06:30` / 告警每 5 分钟）与失败态展示符合预期，并核对 `MsPortal\QC面板展示优化建议_20260922.md` 中的建议项是否已全部落地或明确不做。
 - [ ] **商用就绪度整改项收口。** 按 `MsPortal 商用就绪度检测 —— 结论与整改方案.md` 逐条确认状态。
-- [ ] **切换脚本补「本地派生数据同步」步骤（2026-11-18 切后事故，Muse 应急处理，待固化）。**
+- [x] **切换脚本补「本地派生数据同步」步骤（2026-11-18 切后事故，Muse 应急处理；2026-11-18 23:00 复核已固化）。**
       切到 02 时只迁了门户状态与 `backend/.env`，`apps/my_app/data/` 仍是 11-16 的隔离副本快照：
       原版 CXO 看板因此停在 11-16（另叠加 `services/cxo/` 重构后 `_ROOT` 少退一层、读写分叉，
       已修，见 `docs\workspace\cutover-2026-11-20.md` 22:00–22:30 条）；原生看板镜像的
       `db_sqlite3.sqlite3` 还是损坏副本，18 个原生看板自 11-11 未更新。
       应急已完成：补 6 个 sqlite + 66 个文件、替换损坏镜像并重同步（`quick_check=ok`）。
-      **待办**：① 把「按 mtime 从上一版生产补 `data/`、并校验镜像 `quick_check`」写进
-      `ops\deploy\cutover\cutover-to-02.ps1`（否则下次切/回退必再踩）；② 清理
-      `apps\my_app\backend\data\cxo_dashboard/` 这个切前写错位置的孤儿快照；
-      ③ `backend\services\cleanup\log_cleanup.py`、`tmp_cleanup.py` 的 `PROJECT_ROOT` 同样少退一层
-      （只影响 log/TMP 清理）。回归守卫：`apps/my_app/tests/test_cxo_cache_paths.py`。
+      **2026-11-18 23:00 复核补齐（三项原来只写在 TODO 里）：**
+      ① 新增 `ops\deploy\cutover\sync-derived-data.ps1`（默认干跑，按 mtime 把上一版生产的
+      `data/` 与白名单任务产物补进新树，并对 `data/native_board_mirror/*.sqlite3` 跑
+      `PRAGMA quick_check`），接进 `cutover-to-02.ps1` 第 5 步（脚本已从 9 步改成 10 步）；
+      ② `apps\my_app\backend\data\cxo_dashboard/` 孤儿快照已移到 `apps\my_app\TMP\_cxo_orphan_20261118_backend_data\`
+      （保留证据、不再被任何代码读到）；
+      ③ `log_cleanup.py` / `tmp_cleanup.py` 的 `PROJECT_ROOT` 改为 `parents[3]`，回归守卫
+      `apps/my_app/tests/test_cleanup_paths.py`（与 `test_cxo_cache_paths.py` 同一类事故）。
+      **复核时新发现并已修**：`backend/services/eflow_rules/` 下的任务产物（`eflow_tt_severity_correction.xlsx`、
+      `eflow_tt_rules_check_latest.json`、`eflow_push_rules_check*.xlsx/json` 等）**不在 `data/` 下**，
+      首次切换没搬 → 任务报告页「eFlow TT 规则检查」所有接口 404「矫正表尚未生成」。
+      已从 01 补齐并实测该页 200（1,000 条 TT / 46 条需变更）；这些路径已加进
+      `sync-derived-data.ps1` 的 `$ArtifactPaths` 白名单。
 
 ### P1 —— 数据正确性与稳定性
+
+- [x] **告警级别数字码与排除名单元信息（2026-11-18 复核发现，同日已修）。**
+      ① `eflow_tt.alarm_severity` 上游改成了数字码（生产 PG 41k 行全是 1005001~1005004），
+      告警消息里直接显示 `Alarm: 9910(1005001)`。已在展示层映射为
+      `Critical/Major/Minor/Warning/Info`：`backend/services/tt/tt_severity.py` +
+      引擎 `apps/whatsapp-kb-bot/scripts/tt-analyze.py::norm_alarm_severity`（两处映射必须同改），
+      快照与兜底模板同时生效；守卫 `apps/my_app/tests/test_tt_severity.py`。
+      ② `tt_exclude.py` 的「上传人」列写死 `_uploaded_by`，实际列名是 `uploaded_by`
+      → 元信息查询报错被吞、页面把 **998 条**名单显示成 0 条，上传名单的 INSERT 也会失败。
+      已改为按 `cursor.description` 探测真实列名（SQLite/PG 通用），
+      守卫 `apps/my_app/tests/test_tt_exclude_meta.py`。
+      ⚠ NUR 排除名单已从 46 条涨到 998 条（10-18 FTP 播种），
+      `test_nur_exclude_semantics.py` 的「窗口不涉及名单」假设失效，属数据漂移，
+      已记入 pytest 基线，**待用户决定是否重新校准用例窗口**。
 
 - [ ] **eFlow 对账删除需在 `n` 组 worker 重启后才自动生效（2026-11-16 立）。**
       代码与文档已落地并通过回归（`backend/services/eflow_reconcile.py` + `sync_from_eflow_api.py::_reconcile_delete`，

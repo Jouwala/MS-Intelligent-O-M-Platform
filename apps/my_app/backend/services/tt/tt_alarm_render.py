@@ -56,6 +56,8 @@ import threading
 from pathlib import Path
 from typing import Optional
 
+from backend.services.tt.tt_severity import norm_alarm_severity
+
 logger = logging.getLogger("tt_alarm_render")
 
 # my_app 根：本文件在 backend/services/ 下，向上三级即仓库里的 apps/my_app
@@ -262,6 +264,19 @@ def _snapshot_tt(tt_no: str, row: Optional[dict] = None) -> Optional[Path]:
             # 拿不到权威列集（库异常）：退回稀疏结构，宁可降级也不中断发送。
             col_names = [c for c in row.keys() if not str(c).startswith("_")]
             row_tuples = [tuple(None if row[c] is None else str(row[c]) for c in col_names)]
+
+    # 展示层归一化：上游 `eflow_tt.alarm_severity` 是数字码（1005001…），
+    # 而渲染契约要 `Critical/Major/…`。快照是「引擎」与「消息模板」的共同数据源，
+    # 在这里统一转一次（2026-11-18 复核；引擎侧另有一份等价映射做兜底）。
+    if "alarm_severity" in col_names:
+        _sev_idx = col_names.index("alarm_severity")
+
+        def _norm_row(t):
+            vals = list(t)
+            vals[_sev_idx] = norm_alarm_severity(vals[_sev_idx]) or None
+            return tuple(vals)
+
+        row_tuples = [_norm_row(t) for t in row_tuples]
 
     import tempfile
 
