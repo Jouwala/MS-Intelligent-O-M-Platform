@@ -223,9 +223,16 @@ CNN_KPI_QUERY_CONFIGS = {
         "grouplayer": "me,fservice",
         "motid": "50900,50300",
         "nfctid": "cn.umac.amfmmegngpsgsn",
-        "items": ["C405080015", "C405080016", "C431000001"],
-        "itemsposition": [1, 1, 0],
-        "itemsposition1": [0, 0, 0],
+        # 2026-11-18 新增 C466010001（5G NSA 附着用户，导出列名
+        # "Mean Number of EPS Attach NSA subscribers"）。
+        # ⚠️ items 与 itemsposition / itemsposition1 是**按位置一一对应**的平行数组，
+        # 长度必须相等：实测只加 items 不加 positions（4 个指标配 3 个位置）时，
+        # UME 不报错，但 GSM/UMTS 两列会**从导出里整体消失**（只回 EPS 与 5G 两列），
+        # 写库后旧列不再更新 —— 是不报错的静默丢数。故 added 项同时补齐位置：
+        # 5G NSA 与 EPS Attach 同属 MME（motid 第 2 项 50300，索引 0）。
+        "items": ["C405080015", "C405080016", "C431000001", "C466010001"],
+        "itemsposition": [1, 1, 0, 0],
+        "itemsposition1": [0, 0, 0, 0],
         "groupchoice": "cn_service_group_choice=normal",
         "invaliditems": [],
         "table_name": "DATA_SUBSCRIBERS_TEMPLATE_OSS_UME",
@@ -742,7 +749,42 @@ def _subtract_months(dt, months):
     return dt.replace(year=year, month=month, day=day)
 
 
+def _validate_item_positions(cfg: dict) -> None:
+    """校验 items 与 itemsposition/itemsposition1 的长度与取值范围。
+
+    为什么必须有这道守卫（2026-11-18 实测）：这三个数组是**按位置一一对应**的平行
+    数组，UME 侧不校验长度。给 Data Subscribers 只加 items 而不补 positions 时，
+    查询照常 200、导出照常成功，但缺失位置的那几个指标项会**从导出表头里整体消失**
+    （实测 GSM/UMTS 两列没了，只剩 EPS 与 5G）。写库是 upsert，于是旧列停在最后一次
+    有值的那天，新数据只更新剩下的列 —— 看板不会报错，只会画出一条"看起来还在、
+    其实已经不再更新"的曲线。这种静默丢数比直接失败更难发现，所以在构造 payload
+    时显式拦住，让任务带着明确原因失败。
+    """
+    items = list(cfg.get("items") or [])
+    mot_ids = [x for x in str(cfg.get("motid") or "").split(",") if x.strip()]
+    mot_count = max(1, len(mot_ids))
+    for field in ("itemsposition", "itemsposition1"):
+        positions = cfg.get(field)
+        if positions is None:
+            continue
+        positions = list(positions)
+        if len(positions) != len(items):
+            raise ValueError(
+                f"模板 {cfg.get('templatename') or cfg.get('key')} 的 {field} 长度 "
+                f"{len(positions)} 与 items 长度 {len(items)} 不一致；"
+                f"UME 会静默丢弃位置缺失的指标项（导致导出少了列且不报错），"
+                f"请为该字段补齐 {len(items)} 个值。"
+            )
+        bad = [p for p in positions if not (0 <= int(p) < mot_count)]
+        if bad:
+            raise ValueError(
+                f"模板 {cfg.get('templatename') or cfg.get('key')} 的 {field} 含越界值 "
+                f"{bad}（motid={cfg.get('motid')!r} 共 {mot_count} 项）"
+            )
+
+
 def build_cnn_kpi_payload(cfg: dict, start_iso: str = None, end_iso: str = None, monthly: bool = False) -> dict:
+    _validate_item_positions(cfg)
     now = datetime.now(timezone.utc)
     if end_iso is None:
         end_iso = now.replace(hour=0, minute=0, second=0, microsecond=0).strftime("%Y-%m-%dT%H:%M:%S.000Z")

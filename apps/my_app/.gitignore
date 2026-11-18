@@ -229,6 +229,15 @@ _probe_file.txt
 # 留在磁盘上供复刻，不上版本库。忽略跟踪 ≠ 可以删除。
 /backend/services/ipran_topo/url_*.txt
 
+# RAN 资产台账取数抓包 —— 2026-11-18。
+# url.txt / online_url.txt 是 RAN UME（10.100.28.27:28001）三类资产接口与网元表的
+# curl 导出，`-b` 里带**有效会话 cookie**（Z-AUTH-CODE-28001 / x-dexmesh-user-28001 /
+# forgerydefense-28001），按 AGENTS.md 四.2「绝不写敏感值」禁止入库；
+# 取数方法已写进 services/ran_inventory/ran_inventory_service.py 顶部注释。
+# 忽略跟踪 ≠ 可以删除：抓包留在磁盘上供复刻，不上版本库。
+/backend/services/ran_inventory/url*.txt
+/backend/services/ran_inventory/online_url*.txt
+
 
 # 拓扑图是**源级静态参考数据**（与 backend/data/gis/*.geojson 同理），不是运行时产物：
 # 根 .gitignore 的 `*.svg` 会把 frontend/public/topology/ 下的矢量图一起挡掉，

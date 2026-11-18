@@ -328,6 +328,10 @@ GROUP_TASK_MAP = {
         # （10.121.1.2:28808，凭据组 ccn_ume），共用一个共享会话；同组串行可避免
         # 两个任务各自登录同一账号而互踢。实测单轮约 105s，15 分钟节拍余量充足。
         "cnn_kpi_sync_5mins,"
+        # cn_hourly_kpi_sync 2026-11-18 注册：KPI Template.xlsx 的 3 个新模板（gr=3600），
+        # 登同一台 CNN UME（10.121.1.2:28808，凭据组 ccn_ume）共用共享会话，
+        # 必须与 cnn_kpi_sync / cnn_kpi_sync_5mins 同组串行避免互踢。
+        "cn_hourly_kpi_sync,"
         # sp_online_sync 2026-09-02 补录：SP 在线工单走 eFlow API 同源会话，归入 eFlow 组
         "sp_online_sync,"
         # sp_material_sync 2026-09-09 补录：SP 物料主数据同样走 eFlow API 同源会话，

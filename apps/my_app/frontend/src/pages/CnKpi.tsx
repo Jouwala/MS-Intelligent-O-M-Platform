@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Alert, Button, Card, Col, DatePicker, Empty, Row, Space, Spin, Statistic, Tag, Tooltip, Typography } from 'antd'
+import { Alert, Button, Card, Checkbox, Col, DatePicker, Empty, Row, Space, Spin, Statistic, Tag, Tooltip, Typography } from 'antd'
 import { DownloadOutlined, InfoCircleOutlined, ReloadOutlined } from '@ant-design/icons'
 import dayjs, { Dayjs } from 'dayjs'
 import { exportReport, type ReportSheetSpec } from '../utils/excelReport'
@@ -50,6 +50,21 @@ interface CnWidget {
   fallback_from: string
   /** 实际数据的粒度：'day' | 'month' | '' */
   granularity: 'day' | 'month' | ''
+  /** 分源覆盖（仅 c1/c4）：{ 'EMS'|'UME': {from,to,days} }，由后端按日历骨架统计 */
+  coverage?: Record<string, { from: string; to: string; days: number }>
+  /** 两源都没有数据的日期（断档），不是 0 值 */
+  missing_days?: string[]
+}
+
+/** 把后端 coverage 拼成「EMS 31 天（10-19 ~ 11-18）· UME 80 天（08-31 ~ 11-18）」。
+ *  文案走 i18n（cnkpi.covPart），天数/起止全部来自接口，前端不重算。 */
+function coverageText(
+  cov: Record<string, { from: string; to: string; days: number }>,
+  t: (k: string, p?: Record<string, string | number>) => string,
+): string {
+  return Object.entries(cov)
+    .map(([name, c]) => t('cnkpi.covPart', { name, days: c.days, from: c.from, to: c.to }))
+    .join(' · ')
 }
 
 /** 这个组件卡片「数怎么来」的说明，逐行拼自接口既有字段（不重算任何数字）。
@@ -61,6 +76,17 @@ function widgetExplainText(w: CnWidget, t: (k: string, p?: Record<string, string
     w.granularity === 'month' ? t('cnkpi.tip.granMonth') : (w.granularity === 'day' ? t('cnkpi.tip.granDay') : ''),
     w.degraded === 'monthly' ? t('cnkpi.tip.degradedMonthly', { from: w.fallback_from || '—' }) : '',
     w.degraded === 'day_ume' ? t('cnkpi.tip.degradedDay', { from: w.fallback_from || '—' }) : '',
+    // 分源覆盖：EMS / UME 各覆盖多少天（后端 coverage 原样，前端不重算）
+    w.coverage && Object.keys(w.coverage).length
+      ? t('cnkpi.tip.coverage', { parts: coverageText(w.coverage, t) })
+      : '',
+    (w.missing_days?.length ?? 0) > 0
+      ? t('cnkpi.tip.gapDays', {
+          n: w.missing_days!.length,
+          from: w.missing_days![0],
+          to: w.missing_days![w.missing_days!.length - 1],
+        })
+      : '',
     w.sql ? t('cnkpi.tip.sql', { sql: w.sql }) : '',
   ].filter(Boolean).join('\n')
 }
@@ -161,6 +187,9 @@ function buildAxisOption(w: CnWidget, isDark: boolean) {
       type: 'line' as const,
       smooth: false,
       showSymbol: false,
+      // 分源组件（c1/c4）某天某来源没有数时该点为 null：**必须断线**，
+      // 不能把相邻两天连起来 —— 否则「少数」会被画成一条平滑下坡，反而看不出来。
+      connectNulls: false,
       sampling: dense ? ('lttb' as const) : undefined,
       data: extremeData(
         w.rows.map((r) => {
@@ -356,6 +385,9 @@ export default function CnKpi() {
   const [err, setErr] = useState('')
   // 默认近 31 天（与原版 FineBI 口径一致）；null = 未自定义，交给后端默认
   const [range, setRange] = useState<[Dayjs, Dayjs] | null>(null)
+  // 「仅显示两源都有数据的日期」：默认开 —— 用户 2026-11-18 的要求。
+  // 只影响分源组件（c1/c4）的横轴范围，不改任何数值；取消勾选可看完整历史。
+  const [bothOnly, setBothOnly] = useState(true)
 
   const load = useCallback(async (force = false, r: [Dayjs, Dayjs] | null = range) => {
     setLoading(true)
@@ -385,6 +417,21 @@ export default function CnKpi() {
   const headerKpis = kpiWidgets.filter(isHeaderKpi)
   const rowKpis = kpiWidgets.filter((w) => !isHeaderKpi(w))
   const chartWidgets = widgets.filter((w) => w.chart !== 'kpi')
+  // 「仅两源都有数」：只对分源组件生效，把横轴裁到 EMS∩UME 的日期交集。
+  // 其余组件（单一来源）原样返回 —— 裁剪没有意义。
+  const shownChartWidgets = useMemo(() => {
+    if (!bothOnly) return chartWidgets
+    return chartWidgets.map((w) => {
+      if (!w.coverage || Object.keys(w.coverage).length === 0) return w
+      const nVal = w.columns.length - 1
+      const rows = w.rows.filter((r) =>
+        Array.from({ length: nVal }, (_, i) => r[i + 1])
+          .every((v) => v !== null && v !== undefined && v !== ''),
+      )
+      // 交集为空时保留原样，让空态/告警条去说明，而不是给一张没有横轴的图
+      return rows.length ? { ...w, rows } : w
+    })
+  }, [chartWidgets, bothOnly])
   const chartHeight = 320
 
   /**
@@ -393,6 +440,15 @@ export default function CnKpi() {
    */
   const degradedWidgets = widgets.filter(
     (w) => w.degraded || (w.granularity === 'month' && w.rows.length > 0),
+  )
+
+  /**
+   * 分源覆盖组件：c1 VLR 与 c4 Voice 现在把 EMS / UME 各画一条线
+   * （只在各自有数据的日期有点，缺数即断线）。覆盖天数与断档日期是
+   * **数据状态**（会让人误判业务量），按 AGENTS.md 三.3b 例外条款常驻可见。
+   */
+  const coverageWidgets = widgets.filter(
+    (w) => (w.coverage && Object.keys(w.coverage).length > 0) || (w.missing_days?.length ?? 0) > 0,
   )
 
   /** 区间文案：优先用后端回传的实际生效区间，便于导出时写明口径 */
@@ -501,6 +557,11 @@ export default function CnKpi() {
                   load(false, next)
                 }}
               />
+              {/* 「只从两源都有数据的时候开始显示」：默认勾选，把 EMS / UME 的
+                  日期交集作为横轴；取消勾选看完整历史（例如 9 月只有 UME）。 */}
+              <Checkbox checked={bothOnly} onChange={(e) => setBothOnly(e.target.checked)}>
+                <Text style={{ fontSize: 12 }}>{t('cnkpi.bothOnly')}</Text>
+              </Checkbox>
               <Button icon={<ReloadOutlined />} onClick={() => load(true)} loading={loading} size="small">
                 {t('cnkpi.refresh')}
               </Button>
@@ -530,6 +591,11 @@ export default function CnKpi() {
           { title: t('cnkpi.calc.secSource'), lines: [t('cnkpi.calc.src1'), t('cnkpi.calc.src2')] },
           { title: t('cnkpi.calc.secTier'), lines: [t('cnkpi.calc.tier1'), t('cnkpi.calc.tier2')] },
           { title: t('cnkpi.calc.secGran'), lines: [t('cnkpi.calc.gran1'), t('cnkpi.calc.gran2')] },
+          // 2026-11-18：VLR / Voice 混源的来龙去脉（异常本身由上方常驻告警条说）
+          { title: t('cnkpi.calc.secMix'), lines: [t('cnkpi.calc.mix1'), t('cnkpi.calc.mix2')] },
+          // 2026-11-18：Data Subscribers 改制式命名（2G/3G/4G）并新增 5G(NSA) 序列。
+          // 「5G 为什么不进 Total」是**口径解释**（不是异常），按三.3b 放这个收起块里。
+          { title: t('cnkpi.calc.secData'), lines: [t('cnkpi.calc.data1'), t('cnkpi.calc.data2')] },
         ]}
       />
 
@@ -573,11 +639,44 @@ export default function CnKpi() {
         />
       )}
 
+      {/* 分源覆盖告警条（常驻）：EMS / UME 各画一条线，某来源缺数即断线。
+          这里把两源的天数与起止直接摊开 —— 哪条线短、短多少，一眼可见；
+          断档（两源都没有数）单独列出，避免被当成 0 或平滑下坡。 */}
+      {coverageWidgets.length > 0 && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message={t('cnkpi.covTitle', { n: coverageWidgets.length })}
+          description={
+            <Space direction="vertical" size={2}>
+              {coverageWidgets.map((w) => (
+                <Text key={w.id} style={{ fontSize: 12 }}>
+                  <Text strong style={{ fontSize: 12 }}>{w.title}</Text>
+                  {' — '}
+                  {w.coverage && Object.keys(w.coverage).length
+                    ? t('cnkpi.covLine', { parts: coverageText(w.coverage, t) })
+                    : ''}
+                  {(w.missing_days?.length ?? 0) > 0
+                    ? ' ' + t('cnkpi.covGap', {
+                        n: w.missing_days!.length,
+                        from: w.missing_days![0],
+                        to: w.missing_days![w.missing_days!.length - 1],
+                      })
+                    : ''}
+                </Text>
+              ))}
+              <Text type="secondary" style={{ fontSize: 12 }}>{t('cnkpi.covWhy')}</Text>
+            </Space>
+          }
+        />
+      )}
+
       {loading && !data ? (
         <div style={{ textAlign: 'center', padding: 60 }}><Spin size="large" /></div>
       ) : (
         <Row gutter={[12, 12]}>
-          {chartWidgets.map((w) => (
+          {shownChartWidgets.map((w) => (
             <Col key={w.id} xs={24} md={12} xl={8}>
               <WidgetCard w={w} height={chartHeight} />
             </Col>
