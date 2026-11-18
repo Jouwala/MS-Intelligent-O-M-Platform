@@ -36,6 +36,9 @@ on:
     types: [opened, edited, closed, labeled, unlabeled]
   schedule:
     - cron: "0 * * * *"
+  # 手动触发：GitHub 定时器偶发漏跑（2026-11-18：11:24 之后 12:00–17:00 的
+  # 定时巡检全部未触发），有此入口才能手动恢复巡检，不必等下一档。
+  workflow_dispatch:
 
 permissions:
   contents: read
