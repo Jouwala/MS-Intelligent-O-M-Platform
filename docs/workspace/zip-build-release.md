@@ -29,6 +29,14 @@ node ops/deploy/build-zip.mjs --mode source --dry-run
 
 产物默认落在仓库内 `TMP/zip-dist/`（已忽略，不入库）。`--staging` 只能在仓库内或系统临时目录内。
 
+## 回归测试
+
+```bash
+node --test ops/deploy/lib/zip-package.test.mjs
+```
+
+覆盖：Windows 路径守卫（含 `path.win32` 模拟）、拒绝规则（嵌套源码目录保留、应用根级数据目录拦住）、嵌套 `node_modules`/`dist` 保留、符号链接策略、门禁植入（凭据/`.env`/`pgdata` 均被拦截）、真实仓库组装含回归 8 文件、ZIP 写出确定性。`release-build.yml` 在构建前跑本文件。
+
 ## CI 流程（release-build.yml）
 
 1. 标签推送（`v*`）或手动 dispatch 触发。
@@ -43,9 +51,12 @@ node ops/deploy/build-zip.mjs --mode source --dry-run
 仅手动 dispatch。清单 `ops/deploy/runtime-manifest.json` 驱动下载与 SHA256 校验；**清单里 `url`/`sha256` 为空的条目会直接失败**，禁止无哈希构建。当前状态：
 
 - Node.js：URL 与哈希已从 nodejs.org 的 SHASUMS256.txt 核实。
-- Python / PostgreSQL / nginx：哈希或 URL 待从官方渠道核实后补齐，补齐前运行时构建跑不通（故意的）。
+- Python（Windows）：哈希已核实——下载字节的 MD5 与 python.org 发布页公布的 MD5 一致，SHA256 由同一下载字节算得。
+- PostgreSQL / nginx：哈希或 URL 待从官方渠道核实后补齐，补齐前运行时构建跑不通（故意的）。
 - Linux 侧 Python 与 nginx 的来源待定（系统包 vs 捆绑发行包），见 Phase 0 附录 B 第 14 项。
 - 地图瓦片 `liberia.pmtiles` 不在 v1 内（来源未核实）。
+
+工具假定：`runtime-build.yml` 用 Git Bash 跑，要求 runner 提供 `tar`、`jq`、`sha256sum`、`curl`（GitHub 托管的 windows/ubuntu runner 均预装；工作流有预检步骤，自托管 runner 缺工具会明确失败）。Windows 上 `tar -xf` 解 `.zip` 靠系统自带 bsdtar。
 
 布局差异（P1-6 收口）：运行时 ZIP 解压到 `<NOC_HOME>/runtime/`，内含 `nginx-1.28.0/`；现行 `start_all.ps1` 期望 nginx 在版本根目录。启动脚本改造时统一。
 
