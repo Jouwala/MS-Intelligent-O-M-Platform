@@ -120,10 +120,17 @@ def review_gate_passes(
 
 
 def fetch_comment_bodies(repo: str, pr_number: int, token: str) -> list[str]:
-    """读 PR 的全部 Issue 评论正文（分页拉满，顺序即时间顺序）。"""
+    """读 PR 的全部 Issue 评论正文（分页拉满，顺序即时间顺序）。
+
+    最多拉 100 页（10000 条评论）：服务端若永远返回满页就不再是
+    “分页”，而是异常——此时抛错，门禁 fail-closed（main 捕获后
+    exit 1），不让门禁脚本无限循环。
+    """
     bodies: list[str] = []
     page = 1
     while True:
+        if page > 100:
+            raise RuntimeError(f"评论分页超过 100 页，疑似服务端异常")
         url = (
             f"https://api.github.com/repos/{repo}/issues/{pr_number}"
             f"/comments?per_page=100&page={page}"

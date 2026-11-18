@@ -171,6 +171,7 @@ def test_fetch_comment_bodies_paginates(monkeypatch) -> None:
     """两页评论（第 1 页满 100 条）都要拉到，顺序即时间顺序。"""
     import io
     import json as _json
+    import urllib.parse
     import urllib.request as _request
 
     from dispatch import review_gate
@@ -194,8 +195,14 @@ def test_fetch_comment_bodies_paginates(monkeypatch) -> None:
     seen_urls: list[str] = []
 
     def _fake_urlopen(request, timeout=30):
+        # 必须按页码精确匹配：URL 里 `per_page=100` 本身就含有子串
+        # `page=1`，用 `"page=1" in url` 判断会在每一页都返回第 1 页，
+        # 循环永不终止（复审抓到的死循环 bug，三次 OOM 正是它造成的）。
+        query = urllib.parse.parse_qs(
+            urllib.parse.urlparse(request.full_url).query
+        )
         seen_urls.append(request.full_url)
-        if "page=1" in request.full_url:
+        if query.get("page") == ["1"]:
             return _FakeResponse(page1)
         return _FakeResponse(page2)
 
@@ -205,3 +212,36 @@ def test_fetch_comment_bodies_paginates(monkeypatch) -> None:
     assert bodies[0] == "第 1 页第 0 条"
     assert bodies[-1] == "第 2 页唯一一条"
     assert any("page=2" in url for url in seen_urls)
+
+
+def test_fetch_comment_bodies_stops_after_100_pages(monkeypatch) -> None:
+    """服务端永远返回满页时抛错（fail-closed），不无限循环。"""
+    import json as _json
+    import urllib.request as _request
+
+    from dispatch import review_gate
+
+    class _FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def read(self):
+            return _json.dumps(self._payload).encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    full_page = [{"body": "永远满页"} for _ in range(100)]
+    calls = {"n": 0}
+
+    def _always_full(request, timeout=30):
+        calls["n"] += 1
+        return _FakeResponse(full_page)
+
+    monkeypatch.setattr(_request, "urlopen", _always_full)
+    with pytest.raises(RuntimeError, match="超过 100 页"):
+        review_gate.fetch_comment_bodies("Jouwala/repo", 123, "tok")
+    assert calls["n"] == 100
