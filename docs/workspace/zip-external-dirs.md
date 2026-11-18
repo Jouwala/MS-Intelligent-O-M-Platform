@@ -1,7 +1,7 @@
 # ZIP 交付外部目录（P1-6）：NOC_HOME 模式
 
 > 适用：ZIP 交付 Phase 1（Issue #146，P1-6）。设计依据：Phase 0 审查报告 §6.5
-> （`docs/workspace/zip-delivery-phase0-review.md`，PR #106 未合入前见任务分支）。
+> （`docs/workspace/zip-delivery-phase0-review.md`，PR #106 已于 2026-11-18 合入）。
 > 本文件只写 P1-6 落地后的行为与核查法，不重复设计论证。
 
 ## 1. 两种模式
@@ -119,9 +119,21 @@ find <版本目录> -newer /tmp/p16-mark -print
 | 看门狗日志 `PROJECT_ROOT/log` | `backend_watchdog.py`（看门狗链专用，副本不跑） | `MYAPP_LOG_DIR` 覆盖 |
 
 注：`FE_DIST_OUT` 在外部模式下仍指向版本目录内的预构建 `_fe_dist`（vite
-preview 就从那里提供服务），geojson 刷新是目前唯一已知的运行时写版本目录
-行为，仅限一个可再生的静态文件；将 `_fe_dist` 整体外移需首次启动复制
-（体积大），留待后续事项。
+preview 就从那里提供服务），geojson 刷新会写版本目录内的一个可再生静态文件。
+除它之外，下列运行时写版本目录行为也已逐项核实（B3：Muse 1 17:20Z 评审指出
+的反例 + 启动路径核查，main 9dad10e 全文检索为证；「唯一已知」的说法不实，
+已删除）：
+
+| 写路径 | 证据 | 副本内是否触发 | 覆盖口 / 处置 |
+|---|---|---|---|
+| `_fe_dist` 内 geojson 文件 | `mw_links_store.py`（写 `FE_DIST_OUT`） | 是（geojson 刷新时） | `MW_LINKS_PUBLIC_DIR=off` 只停 public 副本；整体外移需首次启动复制，留待后续 |
+| `data/cxo_dashboard/`、`data/vmax_cxo_daily/` 缓存 | `services/cxo/cxo_dashboard_cache.py:46,192`、`vmax_cxo_daily_cache.py:58,465` | 是：缓存服务含写盘路径（mkdir + 原子写），由看板路由与主程序引用 | 无覆盖口；后续事项（需业务代码改动 + 实测，不静默修） |
+| `data/olib_soc_report/`（sqlite/xlsx/json） | `services/olib_soc_report/olib_soc_kpi_store.py:38`、`olib_soc_report_service.py:86,639,991` | 是：报表服务含写盘路径（mkdir + sqlite/xlsx 落盘） | 无覆盖口；后续事项（同上） |
+| `data/sp_material_report/` 等邮件报表 Excel | `services/email/kpi_email_report.py:92`（同文件另有 `sp_email`、`sp_weekly`、`ms_sla`、`in_data`、`_remote_kpi`） | 仅任务触发（调度器关闭时定时不触发；手动触发/补跑时会写） | 无数据目录覆盖口；后续事项 |
+| `log/worker_restart_marker.*` | `backend/restart_marker.py:37-39,121`（`append_marker` 写） | 仅任务/看门狗链调用时；副本常规运行不触发，手动触发任务时可能写 | 无覆盖口（不读 `MYAPP_LOG_DIR`）；后续事项 |
+| `log/`（worker_watchdog 日志） | `backend/worker_watchdog.py:62` | 否：该进程只由生产 `start_hidden.ps1:331` 拉起，副本启动器不拉它 | 生产路径，不在 ZIP 交付范围 |
+| `TMP/`（清理任务作用目录） | `services/cleanup/tmp_cleanup.py:44` | 仅每日定时任务；副本调度器关闭不触发 | 无 TMP 目录覆盖口（仅保留天数/干跑两个变量）；后续事项 |
+| 各包目录下 `__pycache__` | 启动路径无 `PYTHONDONTWRITEBYTECODE` / `dont_write_bytecode`（grep 核实） | 是：首启 import 即写 | 无；§4 零写入核查须把 `__pycache__` 排除在外 |
 
 不在 P1-7 内：`battery_dashboard.py:39` 的 `d:\01_RPA\...` 硬编码路径是历史遗留，
 `env_template.txt` 已有警告，另立事项处理。
@@ -134,7 +146,7 @@ Linux 侧对标 `start_all.ps1` / `stop_all.ps1` 的编排器，入口为副本�
 
 | Windows（`.ps1`） | Linux（`.sh`） |
 | --- | --- |
-| 六步：PG → nginx 配置 → 后端 → 前端 → 门户 → nginx | 相同六步、相同顺序、相同参数 |
+| 六步：PG →（D1：alembic upgrade head）→ nginx 配置 → 后端 → 前端 → 门户 → nginx | 相同六步、相同顺序、相同参数，D1 位置一致 |
 | pid 文件 `pid\|进程名\|ticks` | pid 文件 `pid\|comm\|starttime`（`/proc/<pid>/comm` + `/proc/<pid>/stat` 字段 22） |
 | 端口熔断（生产端口集 + 去重） | 相同端口集与规则 |
 | `Test-PortListening`（TcpClient） | Python socket 直连探测（用副本 Python） |
