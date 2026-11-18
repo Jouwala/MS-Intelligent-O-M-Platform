@@ -41,7 +41,7 @@ PID_FILE = Path(os.environ.get(
     "MY_APP_BACKEND_WATCHDOG_PID",
     str(BACKEND_DIR / "backend_watchdog.pid")
 ))
-LOG_DIR = PROJECT_ROOT / "log"
+LOG_DIR = Path(os.environ.get("MYAPP_LOG_DIR", "") or PROJECT_ROOT / "log")
 # 2026-09-11：日志文件名带启动日期，配合 log_cleanup 定时任务做 7 天保留。
 # Windows 下被进程占用的文件无法被外部重命名/删除，因此必须在「写入方」按日期分文件
 # （此前 backend_runtime.log 等 4 个文件合计 466MB 且无大小上限，只能靠重启截断）。

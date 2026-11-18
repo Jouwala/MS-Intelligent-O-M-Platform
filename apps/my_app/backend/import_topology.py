@@ -3,11 +3,10 @@ import sqlite3
 import openpyxl
 import time
 import os
-from backend.database import get_raw_connection
+from backend.database import get_raw_connection, DB_PATH
 
 start = time.time()
 
-DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'db', 'app.db')
 XLSX_PATH = os.path.join(os.path.dirname(__file__), '..', 'db', 'ZTE OLR MS MW Topology _OSS.xlsx')
 
 with get_raw_connection(DB_PATH) as conn:
