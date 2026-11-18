@@ -236,7 +236,10 @@ Add-Report '----- 2) WhatsApp local analysis service (9268) -----'
 function Test-WaHealthy {
     try {
         $r = Invoke-WebRequest -Uri 'http://127.0.0.1:9268/api/health' -TimeoutSec 10 -UseBasicParsing -ErrorAction Stop
-        return ([string]$r.Content -match '"status"\s*:\s*"ok"')
+        $body = [string]$r.Content
+        # 两种健康响应都算健康：老格式 {"status":"ok"}，当前分析服务返回 {"ok":true,...}
+        # （2026-11-18 实测：只认前者会让 02 自己的服务每 5 分钟报一条假 WARN）。
+        return (($body -match '"status"\s*:\s*"ok"') -or ($body -match '"ok"\s*:\s*true'))
     } catch {
         return $false
     }
