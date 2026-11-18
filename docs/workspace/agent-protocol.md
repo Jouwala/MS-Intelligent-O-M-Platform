@@ -145,8 +145,8 @@ state:todo ──(TASK_ACCEPTED [人/Agent])──▶ state:claimed ──(TASK_
   自动 POST webhook 请 Grok 冒烟的路径已随 Grok 退役摘除（工作流在
   Actions 层面 disabled、只剩手动 dispatch，待删除），不再生效。
 - PR 合并后自动分派下一个任务（2026-11-14 新增）：`auto-dispatch.yml`
-  在 PR 合入 main 后找下一个就绪任务（`state:todo` + `agent:muse-2/3` +
-  依赖全关 + 无认领/分派评论），发第 1 类 TASK_ASSIGNED 评论
+  在 PR 合入 main 后找下一个就绪任务（`state:todo` + 注册表白名单
+  `agent:muse-2/3/4/5` + 依赖全关 + 无认领/分派评论），发第 1 类 TASK_ASSIGNED 评论
   （机器可读头 `from: github-actions`），优先派给本次合并空闲出来的
   builder；不再等每小时巡逻（`dispatch-check.yml` 只做检查与标签，
   不分派任务）。

@@ -30,6 +30,12 @@ labels:
   - name: agent:muse-3
     color: "5319e7"
     description: "Coding Worker Muse 3：独立 VM，负责分配给它的开发任务"
+  - name: agent:muse-4
+    color: "d93f0b"
+    description: "生产构建与打包 Worker Muse 4：ZIP 交付构建与打包任务（Phase 1–2）"
+  - name: agent:muse-5
+    color: "6e5494"
+    description: "生产部署与发布 QA Worker Muse 5：ZIP 交付部署与发布 QA 任务（Phase 3–4）"
   - name: agent:grok
     color: "006b75"
     description: "已退役（2026-11-14）：QA 由 D:\02 本机 smoke-watcher 自动执行，不再有 Grok 实例"

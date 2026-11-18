@@ -9,8 +9,8 @@
 | Muse 1 | 总指挥 / Orchestrator：拆解、分配、协调、审核、决策 | 独立 VM | 用户 Jouwala 经 Muse 连接器（GitHub 账号 Jouwala） | 已注册 | — |
 | Muse 2 | Coding Worker：负责分配给它的开发任务 | 独立 VM | 现与 Muse 3 共用 jouwalamiaoyin@gmail.com 身份 | 独立身份过渡中 | 机器身份标记：认领评论头写 `agent-claim: muse-2`，提交信息写 `muse-2:` 前缀，PR 描述注明负责人 |
 | Muse 3 | Coding Worker：负责分配给它的开发任务 | 独立 VM | 现与 Muse 2 共用 jouwalamiaoyin@gmail.com 身份；计划独立身份 miaoyinwajila@gmail.com，待确认 | 独立身份过渡中 | 机器身份标记：认领评论头写 `agent-claim: muse-3`，提交信息写 `muse-3:` 前缀，PR 描述注明负责人 |
-| Muse 4 | 只读审查 Worker：ZIP 交付生产构建与打包审查（Phase 0，Issue #99） | 待确认 | 现与 Muse 2/3 共用 jouwalamiaoyin@gmail.com 身份 | 已注册（2026-11-16） | 机器身份标记：认领评论头写 `agent-claim: muse-4`，提交信息写 `muse-4:` 前缀，PR 描述注明负责人 |
-| Muse 5 | 只读审查 Worker：ZIP 交付生产部署与发布 QA 审查（Phase 0，Issue #100） | 待确认 | 现与 Muse 2/3 共用 jouwalamiaoyin@gmail.com 身份 | 已注册（2026-11-16） | 机器身份标记：认领评论头写 `agent-claim: muse-5`，提交信息写 `muse-5:` 前缀，PR 描述注明负责人 |
+| Muse 4 | 生产构建与打包 Worker：ZIP 交付构建与打包（Phase 1–2）；Phase 0 报告 PR #106 待合入 | 待确认 | 现与 Muse 2/3 共用 jouwalamiaoyin@gmail.com 身份 | 已注册（2026-11-16） | 机器身份标记：认领评论头写 `agent-claim: muse-4`，提交信息写 `muse-4:` 前缀，PR 描述注明负责人 |
+| Muse 5 | 生产部署与发布 QA Worker：ZIP 交付部署与发布 QA（Phase 3–4）；Phase 0 报告已合入 PR #104 | 待确认 | 现与 Muse 2/3 共用 jouwalamiaoyin@gmail.com 身份 | 已注册（2026-11-16） | 机器身份标记：认领评论头写 `agent-claim: muse-5`，提交信息写 `muse-5:` 前缀，PR 描述注明负责人 |
 | Grok Bot | QA Worker：冒烟测试、功能验证、测试报告、失败反馈；不写代码（第一阶段） | Routine webhook 触发，D:\02 执行（已停用） | 机器人身份（待确认是否支持独立身份） | **已退役（2026-11-14，PR #46）** | QA 职责已转 D:\02 本机 smoke-watcher（本机脚本，非跨 VM Agent）；本行保留为历史登记，不再接任务 |
 
 > **本表是自动分派白名单的机器可读来源**：`apps/control-plane/backend/dispatch/builder_registry.py`
@@ -32,17 +32,15 @@
 > 冒烟职责原属 Grok Bot（2026-11-14 退役，PR #46），现由 D:\02 本机 smoke-watcher 承接——它是本机脚本服务，不是跨 VM Agent，不走 Issue 分派，故不占注册表上表的 Agent 行，只在能力表登记。
 > 能力标签是认领匹配的依据，不是硬限制：任务需要的能力超出负责人已有能力时，由 Muse 1 改派，不硬上。
 
-## 最近活动（Muse 1 每次检查后更新）
+## 最近活动（已删除，2026-11-18，#133）
 
-| Agent | 最近 GitHub 活动 | 状态 |
-| --- | --- | --- |
-| Muse 1 | 2026-11-14：PR #46（Grok 退役）合入、TASK-06 子任务拆分派发 | 在线 |
-| Muse 2 | 2026-11-14：多 Worker 调度线推进（PR #52 中央调度器于当夜合入） | 在线 |
-| Muse 3 | 2026-11-14：TASK-04 交付 PR #47 合入，Issue #19 由回写自动化自动关闭（派发链首次端到端跑通） | 在线 |
-| Muse 4 | 2026-11-16：注册登记，试验 Issue #99 待认领 | 已注册，待认领 |
-| Muse 5 | 2026-11-16：注册登记，试验 Issue #100 待认领 | 已注册，待认领 |
-| Grok Bot | 2026-11-14：已退役（PR #46），冒烟职责转 D:\02 本机 smoke-watcher | 已退役 |
-| D:\02 本机 smoke-watcher | 2026-11-14：接管冒烟，给 PR #44–#47 打 `smoke-passed` | 运行中（本机服务） |
+本节原是一张手填的“最近 GitHub 活动”表（约定“Muse 1 每次检查后更新”），
+但没有人维护——最后一条真实记录停在 2026-11-16（Muse 4/5 注册登记），
+之后 Muse 2/3/4/5 的认领、PR、合入一概没有更新，表里写的“在线”全是
+过期信息。手填的状态表一旦过期就是误导，不如没有：**本节整表删除**，
+不再恢复。实时状态以 GitHub 本身为准（Issue / PR / 评论时间线），
+统一状态视图与心跳机制是 Phase 3（P3-1/P3-2）的事，届时由机器生成，
+不再手填。
 
 ## 注册 / 注销规则
 
