@@ -26,6 +26,11 @@ _CLAIM_TIME_RE = re.compile(r"agent-claim:\s*[^,\n>]+,\s*(" + ISO_TS_PATTERN + r
 # 认领标记：协议第二节的 agent-claim 与 TASK_ACCEPTED 两种写法都算已认领。
 CLAIM_MARKERS = ("agent-claim:", "agent-msg: TASK_ACCEPTED")
 
+# 过期标记：lease-reaper 发出的认领过期评论头（claim_expiry.py）。
+# is_ready 用它判断“最新一次认领是否已被过期覆盖”（P0-2 死锁修复）：
+# 最新 CLAIM_EXPIRED 晚于最新认领时，该认领已死，不再阻塞重新分派。
+EXPIRED_MARKER = "agent-msg: CLAIM_EXPIRED"
+
 # 分派标记：auto-dispatch 发出的分派评论头。
 ASSIGNED_MARKER = "agent-msg: TASK_ASSIGNED"
 
