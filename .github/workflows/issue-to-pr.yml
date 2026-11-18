@@ -19,8 +19,9 @@
 #   4. 在 Issue 下留一条自动化评论（带 issue-to-pr 标记），写明分支与 PR。
 #
 # 安全阀：
-#   - 只处理 open 状态、且带 agent:muse-2 / agent:muse-3 标签的 Issue
-#     （开发任务才需要分支；QA 任务、Muse 1 的协调任务跳过。QA 自 2026-11-14 起由 D:\02 本机 smoke-watcher 承担）。
+#   - 只处理 open 状态、且带 agent:muse-2 / agent:muse-3 / agent:muse-4 /
+#     agent:muse-5 标签的 Issue（开发任务才需要分支；QA 任务、Muse 1 的
+#     协调任务跳过。QA 自 2026-11-14 起由 D:\02 本机 smoke-watcher 承担）。
 #   - 幂等：分支已存在不重建，PR 已存在不开第二个，Issue 下已有本工作流
 #     的完成标记评论时整体跳过——重复打标签、手动重跑都不会重复建。
 #   - 分支名必须通过 ^(agent|refactor|fix|feat|chore|task)/[A-Za-z0-9._/-]+$ 校验且不含 ..，防注入。
@@ -70,8 +71,8 @@ jobs:
           mv /tmp/issue-body-clean.md /tmp/issue-body.md
 
           if [ "$STATE" != "open" ]; then echo "Issue #$ISSUE_NUMBER 已关闭，跳过"; exit 0; fi
-          if ! echo "$LABELS" | grep -qE '^agent:muse-[23]$'; then
-            echo "没有 agent:muse-2 / agent:muse-3 标签（非开发任务），跳过"; exit 0
+          if ! echo "$LABELS" | grep -qE '^agent:muse-[2-5]$'; then
+            echo "没有 agent:muse-2 / agent:muse-3 / agent:muse-4 / agent:muse-5 标签（非开发任务），跳过"; exit 0
           fi
 
           # 幂等：Issue 下已有本工作流的完成标记则整体跳过。
