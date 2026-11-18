@@ -165,14 +165,29 @@ Write-Host ('模式：{0}' -f $(if ($DryRun) { '干跑（不改任何东西）' 
 Write-Host ("02：{0}" -f $Root02) -ForegroundColor DarkGray
 Write-Host ("01：{0}" -f $Root01) -ForegroundColor DarkGray
 
-# ---------- 1. 停 02 ----------
+# ---------- 1. 停 02（用它自己的生产型 stop 脚本，不是 stop_all） ----------
 Write-Step '1/6 停止 02 栈'
 if ($DryRun) {
-    Write-Host '    [干跑] 将执行：powershell -NoProfile -File ops\deploy\stop_all.ps1' -ForegroundColor DarkGray
+    Write-Host '    [干跑] cmd /c apps\my_app\stop.bat' -ForegroundColor DarkGray
+    Write-Host '    [干跑] cmd /c apps\portal\stop.bat' -ForegroundColor DarkGray
+    Write-Host '    [干跑] cd nginx-1.28.0; .\nginx.exe -s quit' -ForegroundColor DarkGray
 } else {
-    $stopScript = Join-Path $Root02 'ops\deploy\stop_all.ps1'
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $stopScript
-    Add-Result '停止 02 栈' ($LASTEXITCODE -eq 0) ("stop_all.ps1 退出码=$LASTEXITCODE")
+    $stopMy = Join-Path $Root02 'apps\my_app\stop.bat'
+    $stopPortal = Join-Path $Root02 'apps\portal\stop.bat'
+    if (Test-Path -LiteralPath $stopMy) {
+        & cmd.exe /c $stopMy | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+        Add-Result '停 02 my_app' $true 'stop.bat 已执行（7038/7090）'
+    } else { Add-Result '停 02 my_app' $false "缺 $stopMy" }
+    if (Test-Path -LiteralPath $stopPortal) {
+        & cmd.exe /c $stopPortal | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+        Add-Result '停 02 门户' $true 'stop.bat 已执行（9267/9268）'
+    } else { Add-Result '停 02 门户' $false "缺 $stopPortal" }
+    $ng02 = Join-Path $Root02 'nginx-1.28.0'
+    if (Test-Path -LiteralPath (Join-Path $ng02 'nginx.exe')) {
+        Push-Location $ng02
+        try { & .\nginx.exe -s quit 2>&1 | Out-Null } catch { } finally { Pop-Location }
+        Add-Result '停 02 nginx' $true 'nginx -s quit'
+    } else { Add-Result '停 02 nginx' $false '找不到 02 的 nginx.exe' }
 }
 
 # ---------- 2. 等端口释放 ----------
@@ -185,20 +200,46 @@ if ($DryRun) {
 }
 
 # ---------- 3. 02 退回隔离形态 ----------
-Write-Step '3/6 恢复 02 的 .env 端口并重生成 02 的 nginx.conf'
+Write-Step '3/6 恢复 02 的后端配置与 nginx.conf'
 $envPath = Join-Path $Root02 '.env'
 $restore = @{}
 foreach ($k in $envMap.PSObject.Properties.Name) { $restore[$k] = [string]$envMap.$k }
+
+# 3a) backend\.env：切的时候被改成了生产库 + 调度器 0，必须还原（含 DATABASE_URL）
+$manifestPath = if ($SnapshotDir) { Join-Path $SnapshotDir 'cutover-manifest.json' } else { '' }
+$backupEnv = ''
+if ($manifestPath -and (Test-Path -LiteralPath $manifestPath)) {
+    try {
+        $m = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $backupEnv = [string]$m.backupEnv
+    } catch { $backupEnv = '' }
+}
+if (-not $backupEnv -or -not (Test-Path -LiteralPath $backupEnv)) {
+    $cand = Get-ChildItem -LiteralPath (Join-Path $Root02 'apps\my_app\backend') -Filter '.env.bak_cutover_*' -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($cand) { $backupEnv = $cand.FullName }
+}
+if ($DryRun) {
+    Write-Host ("    [干跑] 还原 backend\.env <- {0}" -f $(if ($backupEnv) { $backupEnv } else { '(未找到备份)' })) -ForegroundColor DarkGray
+} elseif ($backupEnv -and (Test-Path -LiteralPath $backupEnv)) {
+    $envBak02 = Join-Path $Root02 'apps\my_app\backend\.env'
+    Copy-Item -LiteralPath $backupEnv -Destination $envBak02 -Force
+    Add-Result '还原 02 后端配置' $true ("已从 {0} 还原 backend\.env" -f (Split-Path $backupEnv -Leaf))
+} else {
+    Add-Result '还原 02 后端配置' $false '找不到 .env.bak_cutover_*（02 会保留生产库配置，隔离运行前需人工改回）'
+}
+
+# 3b) 根 .env：新流程不改它，但按快照写回一次，保证端口是隔离值
 if ($restore.Count -eq 0) {
-    Write-Warn2 '快照里没有 .env 记录，跳过（02 可能仍是生产端口，请人工确认）'
-    Add-Result '恢复 02 .env' $false '快照无 env02'
+    Write-Warn2 '快照里没有 .env 记录，跳过根 .env'
 } elseif ($DryRun) {
     foreach ($k in $restore.Keys) { Write-Host ("    [干跑] {0}={1}" -f $k, $restore[$k]) -ForegroundColor DarkGray }
 } else {
-    if (-not (Test-Path -LiteralPath $envPath)) { throw "02 没有 .env：$envPath" }
-    Copy-Item -LiteralPath $envPath -Destination ($envPath + '.bak_rollback') -Force
-    Set-EnvValues -Path $envPath -Values $restore
-    Add-Result '恢复 02 .env' $true ('已写回 ' + ($restore.Keys -join ', ') + '（备份 .env.bak_rollback）')
+    if (Test-Path -LiteralPath $envPath) {
+        Copy-Item -LiteralPath $envPath -Destination ($envPath + '.bak_rollback') -Force
+        Set-EnvValues -Path $envPath -Values $restore
+        Add-Result '恢复 02 根 .env' $true ('已写回 ' + $restore.Count + ' 个键（备份 .env.bak_rollback）')
+    } else { Add-Result '恢复 02 根 .env' $false "02 没有 $envPath" }
     $confScript = Join-Path $Root02 'ops\deploy\write_nginx_conf.ps1'
     if (Test-Path -LiteralPath $confScript) {
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $confScript *> $null
