@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Alert, Button, Card, Col, DatePicker, Empty, Row, Space, Spin, Statistic, Tag, Tooltip, Typography } from 'antd'
+import { Alert, Button, Card, Checkbox, Col, DatePicker, Empty, Row, Space, Spin, Statistic, Tag, Tooltip, Typography } from 'antd'
 import { DownloadOutlined, InfoCircleOutlined, ReloadOutlined } from '@ant-design/icons'
 import dayjs, { Dayjs } from 'dayjs'
 import { exportReport, type ReportSheetSpec } from '../utils/excelReport'
@@ -50,14 +50,21 @@ interface CnWidget {
   fallback_from: string
   /** 实际数据的粒度：'day' | 'month' | '' */
   granularity: 'day' | 'month' | ''
-  /** 混源归因（仅 c1/c4）：日期 → 'EMS' | 'UME'。由后端按两张表的实际覆盖判定 */
-  source_days?: Record<string, string>
-  /** 换源日及换后的来源（如 10-19 → EMS），用于图上竖线与告警条 */
-  source_switches?: { day: string; source: string }[]
-  /** 首末点之间没有任何来源数据的日期（断档），不是 0 值 */
+  /** 分源覆盖（仅 c1/c4）：{ 'EMS'|'UME': {from,to,days} }，由后端按日历骨架统计 */
+  coverage?: Record<string, { from: string; to: string; days: number }>
+  /** 两源都没有数据的日期（断档），不是 0 值 */
   missing_days?: string[]
-  /** 区间内是否混用了两个来源 */
-  source_mixed?: boolean
+}
+
+/** 把后端 coverage 拼成「EMS 31 天（10-19 ~ 11-18）· UME 80 天（08-31 ~ 11-18）」。
+ *  文案走 i18n（cnkpi.covPart），天数/起止全部来自接口，前端不重算。 */
+function coverageText(
+  cov: Record<string, { from: string; to: string; days: number }>,
+  t: (k: string, p?: Record<string, string | number>) => string,
+): string {
+  return Object.entries(cov)
+    .map(([name, c]) => t('cnkpi.covPart', { name, days: c.days, from: c.from, to: c.to }))
+    .join(' · ')
 }
 
 /** 这个组件卡片「数怎么来」的说明，逐行拼自接口既有字段（不重算任何数字）。
@@ -69,14 +76,12 @@ function widgetExplainText(w: CnWidget, t: (k: string, p?: Record<string, string
     w.granularity === 'month' ? t('cnkpi.tip.granMonth') : (w.granularity === 'day' ? t('cnkpi.tip.granDay') : ''),
     w.degraded === 'monthly' ? t('cnkpi.tip.degradedMonthly', { from: w.fallback_from || '—' }) : '',
     w.degraded === 'day_ume' ? t('cnkpi.tip.degradedDay', { from: w.fallback_from || '—' }) : '',
-    // 混源：换源日 + 各来源天数（后端 source_days 原样统计，前端不重算）
-    w.source_mixed
-      ? t('cnkpi.tip.sourceMixed', {
-          days: (w.source_switches ?? []).map((s) => `${s.day}→${s.source}`).join('、'),
-        })
+    // 分源覆盖：EMS / UME 各覆盖多少天（后端 coverage 原样，前端不重算）
+    w.coverage && Object.keys(w.coverage).length
+      ? t('cnkpi.tip.coverage', { parts: coverageText(w.coverage, t) })
       : '',
     (w.missing_days?.length ?? 0) > 0
-      ? t('cnkpi.tip.sourceGap', {
+      ? t('cnkpi.tip.gapDays', {
           n: w.missing_days!.length,
           from: w.missing_days![0],
           to: w.missing_days![w.missing_days!.length - 1],
@@ -150,38 +155,8 @@ function buildAxisOption(w: CnWidget, isDark: boolean) {
   const cats = w.rows.map((r) => String(r[0]))
   const rest = w.columns.slice(1)
   const dense = cats.length > 120
-  const switches = w.source_switches ?? []
-  const srcMap = w.source_days ?? {}
-  const hasSrc = switches.length > 0
-  // 混源组件（c1/c4）在 tooltip 里带上该点来源：台阶当天能一眼看出「换表了」。
-  // 只展示后端回传的 source_days，不在前端推断。
-  const axisTooltip = {
-    ...darkTooltip(isDark),
-    trigger: 'axis' as const,
-    formatter: hasSrc
-      ? (ps: unknown) => {
-          const arr = (Array.isArray(ps) ? ps : [ps]) as {
-            axisValue?: string
-            marker?: string
-            seriesName?: string
-            value?: unknown
-            data?: { value?: unknown }
-          }[]
-          if (!arr.length) return ''
-          const x = String(arr[0].axisValue ?? '')
-          const src = srcMap[x] || srcMap[x.slice(0, 10)] || ''
-          const head = `<b>${x}${src ? ' · ' + src : ''}</b>`
-          const lines = arr.map((p) => {
-            const raw = p.data && typeof p.data === 'object' ? p.data.value : p.value
-            const val = raw === null || raw === undefined || raw === '' ? '—' : raw
-            return `${p.marker || ''}${p.seriesName ?? ''}: ${val}`
-          })
-          return [head, ...lines].join('<br/>')
-        }
-      : undefined,
-  }
   return {
-    tooltip: axisTooltip,
+    tooltip: { ...darkTooltip(isDark), trigger: 'axis' as const },
     legend: {
       bottom: 0,
       type: 'scroll' as const,
@@ -212,6 +187,9 @@ function buildAxisOption(w: CnWidget, isDark: boolean) {
       type: 'line' as const,
       smooth: false,
       showSymbol: false,
+      // 分源组件（c1/c4）某天某来源没有数时该点为 null：**必须断线**，
+      // 不能把相邻两天连起来 —— 否则「少数」会被画成一条平滑下坡，反而看不出来。
+      connectNulls: false,
       sampling: dense ? ('lttb' as const) : undefined,
       data: extremeData(
         w.rows.map((r) => {
@@ -221,18 +199,6 @@ function buildAxisOption(w: CnWidget, isDark: boolean) {
         w.pct,
       ),
       label: { show: true, position: 'top' as const, fontSize: 10 },
-      // 换源竖线：只画在第一条序列上，避免多序列重复。
-      // 混源组件的台阶（如 10-19 EMS 接管）必须能在图内定位，而不是只在告警条里说。
-      markLine: i === 0 && switches.length
-        ? {
-            symbol: 'none' as const,
-            silent: true,
-            animation: false,
-            lineStyle: { type: 'dashed' as const, width: 1, color: isDark ? '#f0b429' : '#b7791f' },
-            label: { position: 'insideEndTop' as const, fontSize: 10, color: isDark ? '#f0b429' : '#b7791f' },
-            data: switches.map((s) => ({ xAxis: s.day, label: { formatter: s.source } })),
-          }
-        : undefined,
     })),
   }
 }
@@ -419,6 +385,9 @@ export default function CnKpi() {
   const [err, setErr] = useState('')
   // 默认近 31 天（与原版 FineBI 口径一致）；null = 未自定义，交给后端默认
   const [range, setRange] = useState<[Dayjs, Dayjs] | null>(null)
+  // 「仅显示两源都有数据的日期」：默认开 —— 用户 2026-11-18 的要求。
+  // 只影响分源组件（c1/c4）的横轴范围，不改任何数值；取消勾选可看完整历史。
+  const [bothOnly, setBothOnly] = useState(true)
 
   const load = useCallback(async (force = false, r: [Dayjs, Dayjs] | null = range) => {
     setLoading(true)
@@ -448,6 +417,21 @@ export default function CnKpi() {
   const headerKpis = kpiWidgets.filter(isHeaderKpi)
   const rowKpis = kpiWidgets.filter((w) => !isHeaderKpi(w))
   const chartWidgets = widgets.filter((w) => w.chart !== 'kpi')
+  // 「仅两源都有数」：只对分源组件生效，把横轴裁到 EMS∩UME 的日期交集。
+  // 其余组件（单一来源）原样返回 —— 裁剪没有意义。
+  const shownChartWidgets = useMemo(() => {
+    if (!bothOnly) return chartWidgets
+    return chartWidgets.map((w) => {
+      if (!w.coverage || Object.keys(w.coverage).length === 0) return w
+      const nVal = w.columns.length - 1
+      const rows = w.rows.filter((r) =>
+        Array.from({ length: nVal }, (_, i) => r[i + 1])
+          .every((v) => v !== null && v !== undefined && v !== ''),
+      )
+      // 交集为空时保留原样，让空态/告警条去说明，而不是给一张没有横轴的图
+      return rows.length ? { ...w, rows } : w
+    })
+  }, [chartWidgets, bothOnly])
   const chartHeight = 320
 
   /**
@@ -459,12 +443,12 @@ export default function CnKpi() {
   )
 
   /**
-   * 混源/断档组件：c1 VLR 与 c4 Voice 的取数规则是「同日优先 EMS、缺日取 UME」。
-   * 两个来源覆盖面不同，换源日会有台阶 —— 这是**数据状态异常**（会被当成业务突变），
-   * 按 AGENTS.md 三.3b 的例外条款必须常驻可见，不能收进口径说明。
+   * 分源覆盖组件：c1 VLR 与 c4 Voice 现在把 EMS / UME 各画一条线
+   * （只在各自有数据的日期有点，缺数即断线）。覆盖天数与断档日期是
+   * **数据状态**（会让人误判业务量），按 AGENTS.md 三.3b 例外条款常驻可见。
    */
-  const sourceWidgets = widgets.filter(
-    (w) => Boolean(w.source_mixed) || (w.missing_days?.length ?? 0) > 0,
+  const coverageWidgets = widgets.filter(
+    (w) => (w.coverage && Object.keys(w.coverage).length > 0) || (w.missing_days?.length ?? 0) > 0,
   )
 
   /** 区间文案：优先用后端回传的实际生效区间，便于导出时写明口径 */
@@ -573,6 +557,11 @@ export default function CnKpi() {
                   load(false, next)
                 }}
               />
+              {/* 「只从两源都有数据的时候开始显示」：默认勾选，把 EMS / UME 的
+                  日期交集作为横轴；取消勾选看完整历史（例如 9 月只有 UME）。 */}
+              <Checkbox checked={bothOnly} onChange={(e) => setBothOnly(e.target.checked)}>
+                <Text style={{ fontSize: 12 }}>{t('cnkpi.bothOnly')}</Text>
+              </Checkbox>
               <Button icon={<ReloadOutlined />} onClick={() => load(true)} loading={loading} size="small">
                 {t('cnkpi.refresh')}
               </Button>
@@ -650,27 +639,26 @@ export default function CnKpi() {
         />
       )}
 
-      {/* 混源/断档告警条（常驻）：换源日的台阶与整段缺日都会让曲线看起来
-          「数据错了」，但根因是两张表覆盖面不同。必须当场说清，避免被读成业务突变。 */}
-      {sourceWidgets.length > 0 && (
+      {/* 分源覆盖告警条（常驻）：EMS / UME 各画一条线，某来源缺数即断线。
+          这里把两源的天数与起止直接摊开 —— 哪条线短、短多少，一眼可见；
+          断档（两源都没有数）单独列出，避免被当成 0 或平滑下坡。 */}
+      {coverageWidgets.length > 0 && (
         <Alert
           type="warning"
           showIcon
           style={{ marginBottom: 12 }}
-          message={t('cnkpi.srcMixTitle', { n: sourceWidgets.length })}
+          message={t('cnkpi.covTitle', { n: coverageWidgets.length })}
           description={
             <Space direction="vertical" size={2}>
-              {sourceWidgets.map((w) => (
+              {coverageWidgets.map((w) => (
                 <Text key={w.id} style={{ fontSize: 12 }}>
                   <Text strong style={{ fontSize: 12 }}>{w.title}</Text>
                   {' — '}
-                  {w.source_mixed
-                    ? t('cnkpi.srcMixLine', {
-                        days: (w.source_switches ?? []).map((s) => `${s.day}→${s.source}`).join('、'),
-                      })
+                  {w.coverage && Object.keys(w.coverage).length
+                    ? t('cnkpi.covLine', { parts: coverageText(w.coverage, t) })
                     : ''}
                   {(w.missing_days?.length ?? 0) > 0
-                    ? ' ' + t('cnkpi.srcGapLine', {
+                    ? ' ' + t('cnkpi.covGap', {
                         n: w.missing_days!.length,
                         from: w.missing_days![0],
                         to: w.missing_days![w.missing_days!.length - 1],
@@ -678,7 +666,7 @@ export default function CnKpi() {
                     : ''}
                 </Text>
               ))}
-              <Text type="secondary" style={{ fontSize: 12 }}>{t('cnkpi.srcMixWhy')}</Text>
+              <Text type="secondary" style={{ fontSize: 12 }}>{t('cnkpi.covWhy')}</Text>
             </Space>
           }
         />
@@ -688,7 +676,7 @@ export default function CnKpi() {
         <div style={{ textAlign: 'center', padding: 60 }}><Spin size="large" /></div>
       ) : (
         <Row gutter={[12, 12]}>
-          {chartWidgets.map((w) => (
+          {shownChartWidgets.map((w) => (
             <Col key={w.id} xs={24} md={12} xl={8}>
               <WidgetCard w={w} height={chartHeight} />
             </Col>

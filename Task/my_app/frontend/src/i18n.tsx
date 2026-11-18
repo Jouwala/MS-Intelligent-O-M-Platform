@@ -6134,9 +6134,9 @@ const translations: Record<Locale, Record<string, string>> = {
     'cnkpi.calc.secGran': '粒度是推断出来的',
     'cnkpi.calc.gran1': 'granularity 由 _detect_granularity() 看返回数据的日期间隔判定，不写死；只有月表那一级直接记为 month。',
     'cnkpi.calc.gran2': '同一个 KPI 在库里有 OSS / EMS 两张同名表：EMS 停更时会降级到 UME 或月表，于是曲线从 31 个点塌成 1~2 个点。这是**数据源状态**，不是取数错 —— 页面上有「月粒度」角标与降级告警条明示。',
-    'cnkpi.calc.secMix': 'EMS / UME 混源（VLR / Voice）',
-    'cnkpi.calc.mix1': '这两条 SQL 同时引用两张表：先取 EMS 的日值，EMS 没有的日期用 UME 补。接口按 source_days 回传每天的来源，页面据此画换源竖线，并在换源日与断档时给出常驻告警。',
-    'cnkpi.calc.mix2': '优先级是**口径决定**（EMS 更贴近 FineBI 原值），不是性能决定；改成 UME 优先必须业务确认。两个来源的覆盖面不同 —— 实测 2026-10-19 EMS VLR 1,231,875 / UME 1,008,806（差 22%），Voice 43,504 / 34,803（差 25%）。',
+    'cnkpi.calc.secMix': 'VLR / Voice 的分源显示',
+    'cnkpi.calc.mix1': '这两张图**不再合并两源**：SQL 用日历骨架把窗口内每一天都列出来，EMS 与 UME 各占一列——某天某来源没有行就是 NULL，前端**断线**（不用另一来源顶替、不插值）。因此哪条线短、哪里断开，就是那个来源缺数。',
+    'cnkpi.calc.mix2': '口径提醒：EMS 是人工导出的原看板口径，UME 是自动同步（含量与覆盖都不同，实测同一天可差 20% 以上），**不能相加、也不应互相顶替**。2026-11-18 已按 80 天窗口回补 UME 的 9 月数据（含 09-07~09-25 与 09-02~09-06 的测试脏行）。',
     'cnkpi.calc.secData': 'Data Subscribers 的制式口径',
     'cnkpi.calc.data1': '图上 **2G / 3G / 4G / 5G** 分别是 GSM / UMTS / EPS / 5G NSA 附着用户数。5G 取自指标项 C466010001（列 `Mean Number of EPS Attach NSA subscribers`），与其它三条同表同源、同一粒度。',
     'cnkpi.calc.data2': '**Total 只合计 2G+3G+4G，不含 5G** —— 5G NSA 用户是 EPS 附着里「支持 NSA」的那一部分，与 4G 是**包含关系而不是并列**，加进去会重复计数（同一网元同一天 4G 恒大于 5G）。要看 5G 自身走势，请看 5G 这条线。',
@@ -6144,13 +6144,15 @@ const translations: Record<Locale, Record<string, string>> = {
     'cnkpi.degradedMonthly': '日粒度数据缺失，已降级为月粒度（原表 {{table}}）。每个点代表一个月，请勿当作当日值。',
     'cnkpi.degradedFallback': '原表 {{table}} 近期无数据，已自动改用同名的自动同步数据源。',
     'cnkpi.degradedWhy': '原因：上游 _EMS 表由人工从网管导出（选择的时间区间会决定表的粒度），未导出时数据即停更。',
-    // 混源归因（c1 VLR / c4 Voice，2026-11-18）：换源与断档属「这次算不全」，常驻可见
-    'cnkpi.srcMixTitle': '{{n}} 个图表混用了 EMS / UME 两个数据源',
-    'cnkpi.srcMixLine': '换源日：{{days}}（该日值改由新来源提供）',
-    'cnkpi.srcGapLine': '断档 {{n}} 天（{{from}} ~ {{to}}），这段没有任何来源的数据',
-    'cnkpi.srcMixWhy': '取数规则是「同日优先 EMS（人工导出）、没有 EMS 的日期用 UME（自动同步）补」。两个来源的覆盖面与口径不同（实测同一天可差 20% 以上），所以换源处会有台阶 —— 是换表造成的，不代表当天业务量突变；断档日则是两个来源都没有数，不是 0。',
-    'cnkpi.tip.sourceMixed': '换源日：{{days}}。EMS 与 UME 是同量异源，换源处存在台阶。',
-    'cnkpi.tip.sourceGap': '断档：{{from}} ~ {{to}}（{{n}} 天无任何来源数据）。',
+    // 分源覆盖（c1 VLR / c4 Voice，2026-11-18）：谁缺数属「这次算不全」，常驻可见
+    'cnkpi.covTitle': '{{n}} 个图表按数据源分线显示（EMS / UME）',
+    'cnkpi.bothOnly': '仅显示两源都有数据的日期',
+    'cnkpi.covPart': '{{name}} {{days}} 天（{{from}} ~ {{to}}）',
+    'cnkpi.covLine': '覆盖：{{parts}}',
+    'cnkpi.covGap': '两源都缺 {{n}} 天（{{from}} ~ {{to}}）',
+    'cnkpi.covWhy': 'EMS 与 UME 各画一条线：只在各自有数据的日期有点，缺数即断线（不用另一来源顶替、不插值）。哪条线短、哪里断开，就是那个来源缺数；两源都没有数的日期单独列出，避免被当成 0。',
+    'cnkpi.tip.coverage': '来源覆盖：{{parts}}',
+    'cnkpi.tip.gapDays': '两源都缺：{{from}} ~ {{to}}（{{n}} 天）。',
 
     // ===== Meta 基准报告（ORANGE vs MTN 速率 PK + FDD 网络侧 KPI）=====
     // 数据源 meta_data；口径见 backend/services/bm_meta_caliber.py
@@ -12885,9 +12887,9 @@ const translations: Record<Locale, Record<string, string>> = {
     'cnkpi.calc.secGran': 'Granularity is inferred',
     'cnkpi.calc.gran1': 'granularity comes from _detect_granularity() looking at the date spacing in the returned rows, never hard-coded; only the monthly tier is recorded as month directly.',
     'cnkpi.calc.gran2': 'Each KPI has two same-named tables (OSS and EMS): when EMS stops updating, the widget falls back to UME or the monthly table and the curve collapses from 31 points to 1-2. That is **source state**, not a fetch bug — the "monthly" tag and the standing downgrade banner say so.',
-    'cnkpi.calc.secMix': 'Mixed EMS / UME sources (VLR / Voice)',
-    'cnkpi.calc.mix1': 'These two SQLs reference both tables: EMS daily values first, then UME for days EMS does not cover. The API returns the per-day source in source_days; the page draws a switch line and shows a standing warning on switch/gap days.',
-    'cnkpi.calc.mix2': 'The priority is a **caliber decision** (EMS matches the original FineBI values more closely), not a performance one; switching to UME-first needs business sign-off. The two sources differ in coverage — measured 2026-10-19: EMS VLR 1,231,875 vs UME 1,008,806 (22%), Voice 43,504 vs 34,803 (25%).',
+    'cnkpi.calc.secMix': 'VLR / Voice split by source',
+    'cnkpi.calc.mix1': 'These two charts **no longer merge the sources**: the SQL builds a calendar skeleton for every day in the window and puts EMS and UME in separate columns — a day missing from one source is NULL, so the frontend **breaks the line** (no substitution, no interpolation). Whichever line is shorter or broken is the source that lacks data.',
+    'cnkpi.calc.mix2': 'Caliber note: EMS is the manual export matching the original board, UME is the auto sync (different coverage and level — measured up to 20%+ apart on the same day); they must not be added, nor substitute for each other. On 2026-11-18 UME was backfilled for 80 days (including the 09-07~09-25 gap and the 09-02~09-06 test rows).',
     'cnkpi.calc.secData': 'Data Subscribers by technology',
     'cnkpi.calc.data1': '**2G / 3G / 4G / 5G** are the GSM / UMTS / EPS / 5G NSA attach subscriber counts. 5G comes from counter C466010001 (column `Mean Number of EPS Attach NSA subscribers`) — same table, same source and same granularity as the other three.',
     'cnkpi.calc.data2': '**Total sums 2G+3G+4G only and excludes 5G** — 5G NSA users are the NSA-capable subset of EPS attach, so they are **contained in 4G rather than additive**; including them would double count (on any NE/day, 4G always exceeds 5G). Read the 5G line for the 5G trend itself.',
@@ -12895,14 +12897,16 @@ const translations: Record<Locale, Record<string, string>> = {
     'cnkpi.degradedMonthly': 'Daily data is missing; degraded to monthly granularity (original table {{table}}). Each point is one month — do not read it as a daily value.',
     'cnkpi.degradedFallback': 'The original table {{table}} has no recent data; an auto-synced source of the same name is used instead.',
     'cnkpi.degradedWhy': 'Cause: upstream _EMS tables are exported manually from the NMS (the chosen range determines the table granularity), so data stalls whenever no export runs.',
-    // Mixed-source attribution (c1 VLR / c4 Voice, 2026-11-18): switching and gaps are
-    // "this run is incomplete", so they stay permanently visible.
-    'cnkpi.srcMixTitle': '{{n}} chart(s) mix two data sources (EMS / UME)',
-    'cnkpi.srcMixLine': 'Source switch: {{days}} (values from that day come from the new source)',
-    'cnkpi.srcGapLine': 'Gap of {{n}} day(s) ({{from}} ~ {{to}}) — no data from either source',
-    'cnkpi.srcMixWhy': 'The rule is "prefer EMS (manual export) on days it exists, fill missing days from UME (auto sync)". The two sources differ in coverage and caliber (measured up to 20%+ on the same day), so the switch shows a step — that is the table change, not a real traffic jump. Gap days have no data at all and are not zero.',
-    'cnkpi.tip.sourceMixed': 'Source switch: {{days}}. EMS and UME measure the same KPI from different systems; a step at the switch is expected.',
-    'cnkpi.tip.sourceGap': 'Gap: {{from}} ~ {{to}} ({{n}} day(s) with no data from either source).',
+    // Per-source coverage (c1 VLR / c4 Voice, 2026-11-18): a short/missing source is
+    // "this run is incomplete", so it stays permanently visible.
+    'cnkpi.covTitle': '{{n}} chart(s) split by data source (EMS / UME)',
+    'cnkpi.bothOnly': 'Only show dates where both sources have data',
+    'cnkpi.covPart': '{{name}} {{days}} day(s) ({{from}} ~ {{to}})',
+    'cnkpi.covLine': 'Coverage: {{parts}}',
+    'cnkpi.covGap': 'Both sources missing for {{n}} day(s) ({{from}} ~ {{to}})',
+    'cnkpi.covWhy': 'EMS and UME are drawn as two lines: a point exists only on days that source has data, and the line breaks where data is missing (no substitution, no interpolation). Whichever line is shorter or broken is the source that lacks data; days missing from both are listed separately so they are not read as zero.',
+    'cnkpi.tip.coverage': 'Source coverage: {{parts}}',
+    'cnkpi.tip.gapDays': 'Missing from both: {{from}} ~ {{to}} ({{n}} day(s)).',
 
     // ===== Meta Benchmark Report (ORANGE vs MTN speed PK + FDD network KPIs) =====
     // Source: meta_data; semantics in backend/services/bm_meta_caliber.py
