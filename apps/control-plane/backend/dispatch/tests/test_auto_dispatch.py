@@ -368,3 +368,38 @@ def test_run_from_env_schedule_event(fake: FakeGitHub) -> None:
     result = run_from_env({"REPO": fake.repo, "EVENT": "schedule"}, client=fake)
     assert result["status"] == "dispatched"
     assert result["event"] == "schedule"
+
+
+# --------------------------------------------------------------------- Issue 事件触发（P1-3 即时分派）
+ISSUE_REF_PREFIX = "refs/heads/dispatch/issue-event/"
+
+
+def test_issue_event_dispatches_without_pr(fake: FakeGitHub) -> None:
+    """新 Issue 创建 / 依赖关闭时即时分派：来源记 issue-event，不等巡检。"""
+    fake.seed_ready_issue(7)
+    result = run_from_env({"REPO": fake.repo, "EVENT": "issues"}, client=fake)
+    assert result["status"] == "dispatched"
+    assert result["event"] == "issues"
+    assert result["issue"] == 7
+    assert len(fake.refs_with_prefix(ISSUE_REF_PREFIX)) == 1
+    assert len(fake.refs_with_prefix(CRON_REF_PREFIX)) == 0
+    comments = fake.comments_for(7)
+    assert len(comments) == 1
+    assert "TASK_ASSIGNED" in comments[0]
+
+
+def test_issue_event_without_ready_issue_only_logs(fake: FakeGitHub) -> None:
+    result = run_from_env({"REPO": fake.repo, "EVENT": "issues"}, client=fake)
+    assert result["status"] == "no-ready"
+    assert result["event"] == "issues"
+    assert fake.refs_with_prefix(ISSUE_REF_PREFIX) == []
+
+
+def test_issue_event_second_round_does_not_dispatch_again(fake: FakeGitHub) -> None:
+    fake.seed_ready_issue(7)
+    first = run_from_env({"REPO": fake.repo, "EVENT": "issues"}, client=fake)
+    assert first["status"] == "dispatched"
+    # 任务已被分派（24h 内）→ 第二轮不再就绪，也不会发第二条评论。
+    second = run_from_env({"REPO": fake.repo, "EVENT": "issues"}, client=fake)
+    assert second["status"] == "no-ready"
+    assert len(fake.markers(7, ASSIGNED)) == 1

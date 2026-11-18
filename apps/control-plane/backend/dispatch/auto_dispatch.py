@@ -5,6 +5,9 @@
 - 合入路径：只处理 merged == true 且 base 为 main 的 PR（workflow_dispatch 路径也再校验一次）；
 - 定时路径：每小时 :17 巡检一次，不看 PR，直接按 main HEAD 分派——兜住
   「任务早就绪、但没有新 PR 合入」的空窗（`event=schedule`）；
+- Issue 事件路径：新 Issue 创建（opened）或依赖 Issue 关闭（closed）时
+  即时分派，不等巡检（`event=issues`，来源 `issue-event`）；PR 事件由
+  job 层 `!github.event.issue.pull_request` 排除，不与 pull_request 重复。
 - 就绪 = `state:todo` + 无其他 state 标签 + 命中**注册表白名单**的 agent 标签
   （来源 `docs/workspace/agent-registry.md`，见 `builder_registry.py`）+
   `depends on #N` 依赖全关闭 + 无未过期的认领 / 分派记录；
@@ -54,6 +57,7 @@ from dispatch.comment_ledger import ensure_comment_once  # noqa: E402
 from dispatch.dispatch_registry import (  # noqa: E402
     SOURCE_AUTO_DISPATCH,
     SOURCE_CRON_SWEEP,
+    SOURCE_ISSUE_EVENT,
     DispatchRegistry,
 )
 from dispatch.github_client import GitHubAPIError, GitHubClient, client_from_env  # noqa: E402
@@ -446,23 +450,26 @@ def dispatch_scheduled(
     at: str | None = None,
     builders: tuple[str, ...] | None = None,
     reconcile_timeout: float = DEFAULT_RECONCILE_TIMEOUT,
+    source: str = SOURCE_CRON_SWEEP,
+    event_name: str = "schedule",
 ) -> dict[str, Any]:
-    """定时巡检路径（每小时 :17）：不看 PR，按 main HEAD 分派一个就绪任务。
+    """无特定 PR 的分派路径（定时巡检 / Issue 事件）：不看 PR，按 main HEAD 分派一个就绪任务。
 
     与合入路径共用就绪判定与 CAS 登记，区别只在“触发键”：来源记
-    `cron-sweep`、sha 取 main HEAD，ref 落到 `dispatch/cron-sweep/...`。
+    `cron-sweep`（定时）或 `issue-event`（新 Issue 创建 / 依赖关闭）、
+    sha 取 main HEAD，ref 落到 `dispatch/<来源>/...`。
     这样即使一整天没有 PR 合入，就绪任务也不会一直干等；同日重复运行命中
     已登记的 ref，只对账不再发第二条评论。
     """
     sha = client.get_branch_sha("main")
-    print(f"[dispatch] 定时巡检：main HEAD {sha[:12]}", flush=True)
+    print(f"[dispatch] {event_name}：main HEAD {sha[:12]}", flush=True)
     allowed = tuple(builders) if builders is not None else load_builders()
     print(f"[dispatch] 分派白名单：{', '.join(allowed)}", flush=True)
     ready = collect_ready(client, builders=allowed)
     if not ready:
         return {
             "status": "no-ready",
-            "event": "schedule",
+            "event": event_name,
             "merge_sha": sha,
             "reason": "没有可分派的就绪任务",
         }
@@ -472,10 +479,10 @@ def dispatch_scheduled(
     agent_name = agent.split(":", 1)[1]
     registry = DispatchRegistry(client, repo)
     registration = registry.register(
-        "issue", number, sha, SOURCE_CRON_SWEEP, anchor_sha=sha
+        "issue", number, sha, source, anchor_sha=sha
     )
     body = build_assignment_comment(
-        number, agent_name, 0, registration.dispatch_id, at=at, reason="schedule"
+        number, agent_name, 0, registration.dispatch_id, at=at, reason=event_name
     )
     outcome = ensure_dispatch_comment(
         client,
@@ -487,7 +494,7 @@ def dispatch_scheduled(
     ensure_todo_state(client, number)
     return {
         "status": "dispatched" if registration.created else "reconciled",
-        "event": "schedule",
+        "event": event_name,
         "merge_sha": sha,
         "issue": number,
         "agent": agent,
@@ -508,6 +515,14 @@ def run_from_env(env: dict[str, str], client: GitHubClient | None = None) -> dic
     client = client or client_from_env(env)
     if event == "schedule":
         return dispatch_scheduled(client, repo)
+    if event == "issues":
+        # 新 Issue 创建 / 依赖 Issue 关闭：即时分派，不等每小时巡检。
+        # 来源记 issue-event（与 cron-sweep 区分，幂等键独立）。
+        return dispatch_scheduled(
+            client, repo,
+            source=SOURCE_ISSUE_EVENT,
+            event_name="issues",
+        )
     return dispatch_next(client, repo, pr_number, merge_sha=merge_sha)
 
 

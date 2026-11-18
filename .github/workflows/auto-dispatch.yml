@@ -38,22 +38,28 @@
 #   - 分派评论的机器可读头 from 记为 github-actions（自动化执行者），
 #     与 pr-merged-writeback.yml 的口径一致。
 #
-# 触发（三条路，同一套逻辑、同一个逻辑来源）：
+# 触发（四条路，同一套逻辑、同一个逻辑来源）：
 #   - PR 关闭且 merged == true、base 为 main（手动在网页上合并时走这条）；
 #   - auto-merge 合并成功后显式 workflow_dispatch（填 PR 号）；
 #   - 每小时 :17 的 schedule 定时巡检（不看 PR，按 main HEAD 分派一个就绪
 #     任务）——兜住「任务早就绪、但一整天没有新 PR 合入」的空窗。
+#   - Issue 创建（opened）或关闭（closed，依赖解除）：即时分派，不等巡检。
+#     注意 PR 本身也是 Issue，job 层用 !github.event.issue.pull_request
+#     排除 PR 事件，避免与 pull_request[closed] 重复触发。
 #   第二条是必需的：auto-merge 用默认 GITHUB_TOKEN 合并，GitHub 不会为
 #   该 token 触发的事件再启动新工作流，pull_request closed 事件被抑制
 #   （2026-11-14 实测：PR #31 合入后本工作流 0 次运行）。workflow_dispatch
 #   与 schedule 都不受这条限制。前两条投递路径在模块里归一成同一个逻辑
-#   来源 `pr-merged`，定时路径记 `cron-sweep`，各自幂等。
+#   来源 `pr-merged`，定时路径记 `cron-sweep`，Issue 事件路径记
+#   `issue-event`，各自幂等。
 
 name: auto-dispatch
 
 on:
   pull_request:
     types: [closed]
+  issues:
+    types: [opened, closed]
   schedule:
     - cron: "17 * * * *"
   workflow_dispatch:
@@ -74,7 +80,7 @@ concurrency:
 
 jobs:
   dispatch-next:
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main')
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event_name == 'issues' && !github.event.issue.pull_request) || (github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
