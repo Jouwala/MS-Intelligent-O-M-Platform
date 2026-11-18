@@ -347,7 +347,9 @@ $NpmCmd      = Join-Path $NodeDir 'npm.cmd'
 $PsqlExe     = Join-Path $Root 'runtime\postgresql16\bin\psql.exe'
 $PgPort      = 55432
 $PgUser      = 'myapp'
-$ProdNginx   = 'D:\01_olbr_portal\nginx-1.28.0\nginx.exe'
+# 生产 nginx 的路径会随切换而变（2026-11-18 起是 D:\02_olbr_portal\nginx-1.28.0），
+# 所以不再写死路径：开跑前记录 80/443 的 pid->exe，收尾要求逐字一致。
+$ProdNginx   = ''
 $PyExe       = Join-Path $Root 'runtime\python312\python.exe'
 $AppDir      = Join-Path $Root 'apps\my_app'
 $AuthSrc     = 'D:\01_olbr_portal\Task\my_app\db\app.db'
@@ -872,7 +874,10 @@ $busy = @()
 foreach ($p in $TestPorts) { $pp = @(Get-ListenPid $p); if ($pp.Count -gt 0) { $busy += ("{0}->{1}" -f $p, ($pp -join ',')) } }
 if ($busy.Count -gt 0) { $refuse += ("02 端口已被占用（可能有别的冒烟在跑）: " + ($busy -join ' ')) }
 $prodPre = @(); foreach ($x in (Get-ListenPid 80)) { $prodPre += ("{0}->{1}" -f $x, (Get-ExePath $x)) }
+$prod443Pre = @(); foreach ($x in (Get-ListenPid 443)) { $prod443Pre += ("{0}->{1}" -f $x, (Get-ExePath $x)) }
+$script:ProdBefore = @($prodPre + $prod443Pre)
 Write-Host ("  启动前 80 归属: {0}" -f ($prodPre -join ', '))
+Write-Host ("  启动前 443 归属: {0}" -f ($prod443Pre -join ', '))
 if ($refuse.Count -gt 0) {
     foreach ($r in $refuse) { Add-R '预检' $false $r }
     Stop-Stage; Save-Result 'REFUSED'
@@ -1080,9 +1085,10 @@ for ($i = 0; $i -lt 15; $i++) {      # 端口释放最多等 15 秒
 }
 $postProd = @(); foreach ($x in (Get-ListenPid 80)) { $postProd += ("{0}->{1}" -f $x, (Get-ExePath $x)) }
 $post443 = @(); foreach ($x in (Get-ListenPid 443)) { $post443 += ("{0}->{1}" -f $x, (Get-ExePath $x)) }
+$prodAfter = @($postProd + $post443)
 $prodOk = ($postProd.Count -gt 0) -and ($post443.Count -gt 0) -and `
-    (@($postProd + $post443 | Where-Object { $_ -notlike "*->$ProdNginx" }).Count -eq 0)
-Add-R '80/443 仍由 D:\01_olbr_portal\nginx-1.28.0\nginx.exe 监听' $prodOk ("80: " + ($postProd -join ', ') + " ; 443: " + ($post443 -join ', '))
+    (($prodAfter -join '|') -eq ($script:ProdBefore -join '|'))
+Add-R '80/443 未被冒烟触碰（归属进程与开跑前逐字一致）' $prodOk ("before: " + ($script:ProdBefore -join ', ') + " ; after: " + ($prodAfter -join ', '))
 Add-R ('02 的 {0} 已释放' -f ($TestPorts -join '/')) $releaseOk ($rel -join ' ')
 foreach ($p4 in $ExtraPorts) {
     foreach ($x in (Get-ListenPid $p4)) { Add-Note ("端口 {0} 仍被 pid {1} ({2}) 监听：后端派生代理，stop_all 不托管，仅记录不杀" -f $p4, $x, (Get-ExePath $x)) }
