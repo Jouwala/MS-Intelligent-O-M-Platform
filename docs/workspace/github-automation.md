@@ -1,7 +1,7 @@
 # GitHub 自动化实现（TASK-07，2026-11-14）
 
 > 适用：多 Agent 协作的 GitHub 机械动作——建分支、开 PR、CI 跟踪、分支
-> 更新、合并回写、分支保护。**规范**看 `agent-protocol.md`（12 类消息、
+> 更新、合并回写、分支保护。**规范**看 `agent-protocol.md`（15 类消息、
 > 标签状态机）与 `dispatch-rules.md`（拆分与汇总），**本文只写实现映射**：
 > 哪个 workflow 在什么触发下做哪一步、安全阀在哪、出了问题去哪看。
 > 标签定义以 `.github/labels.yml` 为准，本文不自造标签。
@@ -16,7 +16,7 @@
 ## 一、全景：一个任务的自动化生命周期
 
 ```
-Issue 建好（模板 agent-task.md，带 agent:muse-2/3 + state:todo）
+Issue 建好（模板 agent-task.md，带 agent:muse-2/3/4/5 + state:todo）
 │ dispatch-check.yml：缺字段提醒、依赖未满足打 state:blocked
 ▼
 Worker 认领：发认领评论 + 打 state:claimed
@@ -63,7 +63,7 @@ Muse 1 按 dispatch-rules.md 第四节做最终汇总（人工/Agent 环节，�
 
 | workflow | 触发 | 动作 | 关键安全阀 |
 | --- | --- | --- | --- |
-| `issue-to-pr.yml` | Issue 打 `state:claimed` 标签；或手动 dispatch（填 Issue 号） | 解析分支名 → 建分支（脚手架提交）→ 开草稿 PR（描述自动生成、含 `Closes #N`）→ Issue 留评论 | 只处理 open 且带 `agent:muse-2/3` 的 Issue；分支名正则校验；全程幂等（完成标记 + 存在性检查） |
+| `issue-to-pr.yml` | Issue 打 `state:claimed` 标签；或手动 dispatch（填 Issue 号） | 解析分支名 → 建分支（脚手架提交）→ 开草稿 PR（描述自动生成、含 `Closes #N`）→ Issue 留评论 | 只处理 open 且带 `agent:muse-2/3/4/5` 的 Issue；分支名正则校验；全程幂等（完成标记 + 存在性检查） |
 | `auto-merge.yml` 的 `update-branches` 作业 | push 到 main；或手动 dispatch | 对落后的 `agent/*` 分支 PR 调 `PUT /pulls/{n}/update-branch` | 只动 `agent/*` 分支、非草稿、`mergeable_state == behind` 才更新；冲突只记录不处理（开发 Agent 自行 rebase） |
 | `ci-failure-notify.yml` | `quality` 工作流跑完且结论 failure / timed_out | 按 head SHA 定位 open PR，评论通知 builder（失败 job、运行链接、SHA），关联 Issue 同步一份 | 同一 run 只通知一次（`ci-failure-notice` 标记去重）；只通知不改代码/标签 |
 | `pr-merged-writeback.yml` | PR 关闭且 `merged == true`、base 为 main；或 auto-merge 合并成功后 `workflow_dispatch`（填 PR 号） | 解析关联 Issue → 打 `state:merged`、摘其余 `state:` 标签 → 发 PR_MERGED 评论 → 关闭 Issue | 解析不到关联 Issue 就跳过；已回写过的重复触发跳过；dispatch 路径从 API 取 PR 并校验已合入 main |
