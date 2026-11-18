@@ -119,3 +119,89 @@ def test_reviewer_name_variants_parse() -> None:
     for reviewer in ("muse-1", "muse-4", "lead-agent", "muse_2"):
         marker = _marker(reviewer=reviewer)
         assert parse_review_markers([marker])[0]["reviewer"] == reviewer
+
+
+# ------------------------------------------------------- 复审发现 1：verdict 边界
+def test_verdict_with_suffix_is_not_parsed_as_passed() -> None:
+    """`verdict=passedXYZ` / `passed.` / `passed-foo` 绝不能当成 passed 放行。
+
+    verdict 后只允许空白、`--`（标记结尾）或串尾。
+    """
+    base = f"<!-- review-result: pr-123 sha-{SHA_A} reviewer-muse-1 verdict="
+    for bad in ("passedXYZ -->", "passed. -->", "passed-foo -->",
+                "passedx -->", "changes-requestedx -->"):
+        assert parse_review_markers([base + bad]) == []
+        passed, _ = review_gate_passes([base + bad], 123, SHA_A)
+        assert passed is False
+    # 合法收尾仍能解析：带空格的标记结尾、无空格的标记结尾
+    for good in ("passed -->", "passed-->", "blocked -->"):
+        assert len(parse_review_markers([base + good])) == 1
+
+
+def test_format_marker_rejects_bad_pr_number() -> None:
+    with pytest.raises(ValueError):
+        format_review_marker(0, SHA_A, "muse-1", "passed")
+    with pytest.raises(ValueError):
+        format_review_marker(-3, SHA_A, "muse-1", "passed")
+
+
+# ------------------------------------------- 复审发现 3/4：标记位置与同一评论多条
+def test_marker_mid_body_is_accepted() -> None:
+    """标记不必在首行（与 smoke-result 的“取最后一条”口径一致）。"""
+    body = "先说两句人话。\n\n" + _marker() + "\n\n结论如上。"
+    assert len(parse_review_markers([body])) == 1
+
+
+def test_last_marker_in_same_comment_wins() -> None:
+    """同一评论先贴 passed、后贴 blocked：blocked 说了算（安全方向）。"""
+    body = (
+        _marker(sha=SHA_A, verdict="passed")
+        + "\n\n改判：\n\n"
+        + _marker(sha=SHA_A, verdict="blocked")
+    )
+    markers = parse_review_markers([body])
+    assert len(markers) == 1
+    assert markers[0]["verdict"] == "blocked"
+    passed, _ = review_gate_passes([body], 123, SHA_A)
+    assert passed is False
+
+
+# ------------------------------------------------------- 复审发现 6：分页拉取
+def test_fetch_comment_bodies_paginates(monkeypatch) -> None:
+    """两页评论（第 1 页满 100 条）都要拉到，顺序即时间顺序。"""
+    import io
+    import json as _json
+    import urllib.request as _request
+
+    from dispatch import review_gate
+
+    page1 = [{"body": f"第 1 页第 {i} 条"} for i in range(100)]
+    page2 = [{"body": "第 2 页唯一一条"}]
+
+    class _FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def read(self):
+            return _json.dumps(self._payload).encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    seen_urls: list[str] = []
+
+    def _fake_urlopen(request, timeout=30):
+        seen_urls.append(request.full_url)
+        if "page=1" in request.full_url:
+            return _FakeResponse(page1)
+        return _FakeResponse(page2)
+
+    monkeypatch.setattr(_request, "urlopen", _fake_urlopen)
+    bodies = review_gate.fetch_comment_bodies("Jouwala/repo", 123, "tok")
+    assert len(bodies) == 101
+    assert bodies[0] == "第 1 页第 0 条"
+    assert bodies[-1] == "第 2 页唯一一条"
+    assert any("page=2" in url for url in seen_urls)
