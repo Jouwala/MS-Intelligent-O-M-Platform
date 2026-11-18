@@ -390,6 +390,11 @@ else
   [ "$_dd_norm" = "$_expect_dir" ] || die "便携 PG data_directory 不符（实际 '$_data_dir'，期望 '$_expect_dir'）：可能连到别的实例，拒绝写入"
   _db_exists=$("$PSQL" -w -h 127.0.0.1 -p "$PG_PORT" -U "$PG_USER" -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='$PG_DB'" 2>/dev/null) || _db_exists=""
   if [ -z "$_db_exists" ]; then "$PG_BIN/createdb" -h 127.0.0.1 -p "$PG_PORT" -U "$PG_USER" "$PG_DB" 2>&1 | sed 's/^/  /'; fi
+  # P1-1：首次启动建 schema。alembic 迁移不带 schema 前缀，依赖 search_path 首位为 app；
+  # 空库默认 search_path 只有 public，表会落错位置。两条语句均幂等，每次启动都跑，
+  # 兼修复此前已建好的库（已有表不搬家，见 docs/workspace/zip-p1-1-clean-pg-record.md）。
+  if ! _schema_out=$("$PSQL" -w -h 127.0.0.1 -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" -tAc 'CREATE SCHEMA IF NOT EXISTS app' 2>&1); then die "创建 app schema 失败：$_schema_out"; fi
+  if ! _search_out=$("$PSQL" -w -h 127.0.0.1 -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" -tAc "ALTER DATABASE $PG_DB SET search_path TO app, public" 2>&1); then die "设置数据库 search_path 失败：$_search_out"; fi
   ok "便携 PG 就绪 127.0.0.1:$PG_PORT / $PG_DB"
   step '若数据库为空，请另行灌入快照（bundle_data.ps1 仅 Windows，Linux 侧待补）'
 fi
