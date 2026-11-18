@@ -310,10 +310,22 @@ function Save-State {
     ($State | ConvertTo-Json -Depth 5) | Out-File -LiteralPath $StateFile -Encoding UTF8
 }
 
+function Normalize-GitHubList {
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value) { return @() }
+    if ($Value -is [System.Management.Automation.PSCustomObject]) {
+        if ($Value.PSObject.Properties.Name -contains 'number') { return @($Value) }
+    }
+    if ($Value -is [System.Array]) { return [object[]]$Value }
+    $asList = @($Value)
+    if ($asList.Count -eq 1 -and $asList[0] -is [System.Array]) { return [object[]]$asList[0] }
+    return $asList
+}
+
 function Test-QualityGreen {
     param([string]$Sha)
     $runs = Invoke-GitHubApi "/repos/$Repo/actions/workflows/quality.yml/runs?head_sha=$Sha&per_page=5"
-    foreach ($run in $runs.workflow_runs) {
+    foreach ($run in (Normalize-GitHubList $runs.workflow_runs)) {
         if ($run.status -eq 'completed' -and $run.conclusion -eq 'success') { return $true }
     }
     return $false
@@ -474,10 +486,10 @@ function Invoke-OneCycle {
     }
 
     if ($OnlyPr -gt 0) {
-        $prs = @(Invoke-GitHubApi "/repos/$Repo/pulls/$OnlyPr")
+        $prs = Normalize-GitHubList (Invoke-GitHubApi "/repos/$Repo/pulls/$OnlyPr")
         Write-WatchLog "只处理 PR #$OnlyPr（-OnlyPr，忽略本机已冒烟记录）"
     } else {
-        $prs = @(Invoke-GitHubApi "/repos/$Repo/pulls?state=open&per_page=100")
+        $prs = Normalize-GitHubList (Invoke-GitHubApi "/repos/$Repo/pulls?state=open&per_page=100")
     }
 
     foreach ($pr in $prs) {

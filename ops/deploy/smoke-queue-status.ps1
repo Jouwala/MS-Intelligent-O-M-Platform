@@ -49,10 +49,24 @@ function Invoke-GitHubApi {
     return Invoke-RestMethod -Uri "https://api.github.com$Path" -Headers $headers -TimeoutSec 60
 }
 
+# GitHub REST + Invoke-RestMethod 在 1 条与多条之间形态不一；PSCustomObject 还实现
+# IEnumerable，不能裸 foreach。watcher 与队列脚本共用同一套规则（2026-11-18 #157）。
+function Normalize-GitHubList {
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value) { return @() }
+    if ($Value -is [System.Management.Automation.PSCustomObject]) {
+        if ($Value.PSObject.Properties.Name -contains 'number') { return @($Value) }
+    }
+    if ($Value -is [System.Array]) { return [object[]]$Value }
+    $asList = @($Value)
+    if ($asList.Count -eq 1 -and $asList[0] -is [System.Array]) { return [object[]]$asList[0] }
+    return $asList
+}
+
 function Test-QualityGreen {
     param([string]$Sha)
     $runs = Invoke-GitHubApi "/repos/$Repo/actions/workflows/quality.yml/runs?head_sha=$Sha&per_page=5"
-    foreach ($run in $runs.workflow_runs) {
+    foreach ($run in (Normalize-GitHubList $runs.workflow_runs)) {
         if ($run.status -eq 'completed' -and $run.conclusion -eq 'success') { return $true }
     }
     return $false
@@ -74,12 +88,17 @@ function Get-State {
 }
 
 function Get-WatcherAlive {
-    if (-not (Test-Path -LiteralPath $PidFile)) { return $null }
-    $old = 0
-    try { $old = [int]((Get-Content -LiteralPath $PidFile -Raw).Trim()) } catch { return $null }
-    if ($old -le 0) { return $null }
-    $p = Get-CimInstance Win32_Process -Filter "ProcessId=$old" -ErrorAction SilentlyContinue
-    if ($p -and ("$($p.CommandLine)" -match 'smoke-watcher\.ps1')) { return $old }
+    if (Test-Path -LiteralPath $PidFile) {
+        $old = 0
+        try { $old = [int]((Get-Content -LiteralPath $PidFile -Raw).Trim()) } catch { $old = 0 }
+        if ($old -gt 0) {
+            $p = Get-CimInstance Win32_Process -Filter "ProcessId=$old" -ErrorAction SilentlyContinue
+            if ($p -and ("$($p.CommandLine)" -match 'smoke-watcher\.ps1')) { return $old }
+        }
+    }
+    $w = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -match 'smoke-watcher\.ps1' })
+    if ($w.Count -gt 0) { return $w[0].ProcessId }
     return $null
 }
 
@@ -101,8 +120,7 @@ if (Test-Path -LiteralPath $LogFile) {
     $lastLog = (Get-Content -LiteralPath $LogFile -Tail 1 -ErrorAction SilentlyContinue) -join ''
 }
 
-# 仅 1 条 open PR 时 REST 反序列化成单个对象；不强制 @() 时 foreach 会枚举属性而非 PR。
-$prs = @(Invoke-GitHubApi "/repos/$Repo/pulls?state=open&per_page=100")
+$prs = Normalize-GitHubList (Invoke-GitHubApi "/repos/$Repo/pulls?state=open&per_page=100")
 $rows = New-Object System.Collections.ArrayList
 
 foreach ($pr in $prs) {
