@@ -22,7 +22,7 @@
 ├── current -> versions/vX.Y.Z/
 ├── runtime/              # NOC_RUNTIME_DIR：python312、node、postgresql16、nginx-1.28.0
 ├── config/               # NOC_CONFIG_DIR：.env、nginx.conf、certs/
-├── data/                 # NOC_DATA_DIR：pgdata、portal-auth-data、bot-data、portal-default.json
+├── data/                 # NOC_DATA_DIR：pgdata、portal-auth-data、bot-data、portal-default.json、app.db（P1-7）
 ├── logs/                 # NOC_LOGS_DIR：pid 文件、进程 .out/.err、nginx/、nginx-temp/
 └── backups/
 ```
@@ -31,7 +31,7 @@
 |---|---|---|
 | `NOC_HOME` | —（未设即便携模式） | 部署根 |
 | `NOC_CONFIG_DIR` | `<NOC_HOME>\config` | `.env`、展开后的 `nginx.conf`、证书 |
-| `NOC_DATA_DIR` | `<NOC_HOME>\data` | PG 数据、门户鉴权库、bot 数据 |
+| `NOC_DATA_DIR` | `<NOC_HOME>\data` | PG 数据、门户鉴权库、bot 数据、sqlite 库 |
 | `NOC_LOGS_DIR` | `<NOC_HOME>\logs` | pid 文件与全部进程/nginx 日志 |
 | `NOC_RUNTIME_DIR` | `<NOC_HOME>\runtime` | 解释器与 PG/nginx 发行包 |
 | `NOC_ENV_FILE` | `<NOC_CONFIG_DIR>\.env` | 配置文件路径 |
@@ -44,7 +44,7 @@ nginx 安装目录解析：外部模式优先 `<NOC_RUNTIME_DIR>\nginx-1.28.0`�
 
 ## 3. 外部模式下派生变量的指向
 
-`start_all.ps1` 只设代码**已支持环境变量覆盖**的项（不改业务代码）：
+`start_all.ps1` 在外部模式下派生以下变量（P1-6 建制 + P1-7 新增的业务代码覆盖口）：
 
 | 变量 | 外部模式指向 | 代码读取点 |
 |---|---|---|
@@ -56,10 +56,13 @@ nginx 安装目录解析：外部模式优先 `<NOC_RUNTIME_DIR>\nginx-1.28.0`�
 | `INDEX_PATH` / `LOOKUPS_PATH` | `data/bot-data/*.json` | bot `src/config.js:286-289` |
 | `AUTH_DIR` / `NOTIFY_AUTH_DIR` | `data/bot-data/auth*` | bot `src/config.js:291` / `src/notify.js:78` |
 | `QA_LOG_PATH` | `data/bot-data/qa.sqlite` | bot `src/config.js:297` |
-| `MYAPP_LOG_DIR` | `logs/` | `auth_health_check.py:42` |
+| `MYAPP_LOG_DIR` | `logs/` | `auth_health_check.py:42`；`portal_qa_ctl.py` / `realtime_proxy_ctl.py` / `backend_watchdog.py`（P1-7 覆盖口） |
+| `MY_APP_DB_PATH`（P1-7） | `data/app.db` | `backend/database.py`（uploads/attachments/instance.lock 随之派生） |
+| `MW_LINKS_PUBLIC_DIR`（P1-7） | `off`（不写 public 副本） | `services/mw_ume/mw_links_store.py` |
+| `BOT_LOG_DIR`（P1-7） | `logs/bot` | bot `src/config.js` |
 
 故意不设：`KNOWLEDGE_DIR`（知识库是随包只读内容，仍在版本目录内）；
-`FE_DIST_OUT`（构建产物目录，见 §5 的 P1-7 项）。
+`FE_DIST_OUT`（构建产物目录；geojson 刷新仍写它，见 §5 注）。
 
 外部模式下的行为差异（除路径外）：
 
@@ -99,21 +102,26 @@ find <版本目录> -newer /tmp/p16-mark -print
 干跑可先看目录规划：`start_all.ps1 -DryRun` 会打印两种模式的完整路径表，
 不启动任何进程（外部模式下断言同样生效）。
 
-## 5. 仍需 P1-7（改业务代码，另走确认）的写路径
+## 5. P1-7 已实施的业务代码路径覆盖（Muse 1 已批）
 
-以下写路径没有环境变量覆盖口，启动脚本改不动，列入 P1-7 提案等 Muse 1 确认
-后再改代码；P1-6 交付时它们仍是已知缺口：
+以下写路径在 P1-6 交付时没有环境变量覆盖口，列入 P1-7 提案；Muse 1 于
+2026-11-18 10:55Z 批准后实施。全部默认不变（未设置时与旧行为一致）：
 
-| 写路径 | 证据 | P1-7 方向 |
+| 写路径 | 证据 | P1-7 实施 |
 |---|---|---|
-| `db/app.db`（固定相对路径） | `backend/database.py:31` `DB_PATH` | 加 `MY_APP_DB_PATH` 环境变量覆盖（默认不变） |
+| `db/app.db`（固定相对路径） | `backend/database.py` `DB_PATH` | `MY_APP_DB_PATH` 环境变量覆盖（默认不变） |
 | `db/uploads/`、`db/attachments/`、`instance.lock` | `routers/upload.py:19`、`routers/mw_links.py:26`、`routers/feedback.py:62`、`main.py:556`（均由 `DB_PATH` 派生） | 随 `DB_PATH` 覆盖自动外移 |
-| `import_topology.py` 自算 `DB_PATH` | `backend/import_topology.py:10`（不 import `database.py`） | 复用同一覆盖口 |
-| 前端产物 `geojson` 双写 | `services/mw_ume/mw_links_store.py:376-382`（写 `frontend/public/` 与 `FE_DIST_OUT`） | 写目标改由环境变量定 |
-| bot 运行日志 `data/logs` | bot `src/config.js:292` `logDirAbs`（写死相对路径） | 加 `BOT_LOG_DIR` 覆盖 |
-| 问答/代理服务日志 | `portal_qa_ctl.py:38,157`、`realtime_proxy_ctl.py:295-298`（`_ROOT` 派生） | 日志根改由环境变量定 |
-| 后端 `.env` 搜索路径 | `database.py:13-19`（只读 `backend/.env` 与父级 `.env`） | 可选：`MY_APP_ENV_FILE` 覆盖 |
-| 看门狗日志 `PROJECT_ROOT/log` | `backend_watchdog.py:44`（看门狗链专用，副本不跑） | 随看门狗链改造一并处理 |
+| `import_topology.py` 自算 `DB_PATH` | `backend/import_topology.py`（现复用 `database.py` 的 `DB_PATH`） | 复用同一覆盖口（含 `MY_APP_DB_PATH`） |
+| 前端产物 `geojson` 双写 | `services/mw_ume/mw_links_store.py`（写 `frontend/public/` 与 `FE_DIST_OUT`） | `MW_LINKS_PUBLIC_DIR` 覆盖首选落盘目录，`off` 则不写 public 副本 |
+| bot 运行日志 `data/logs` | bot `src/config.js` `logDirAbs`（原写死相对路径） | `BOT_LOG_DIR` 覆盖 |
+| 问答/代理服务日志 | `portal_qa_ctl.py`、`realtime_proxy_ctl.py`（`_ROOT` 派生） | `MYAPP_LOG_DIR` 覆盖日志根 |
+| 后端 `.env` 搜索路径 | `database.py`（只读 `backend/.env` 与父级 `.env`） | `MY_APP_ENV_FILE` 优先（独立拉起时用；start_all 模式不需要） |
+| 看门狗日志 `PROJECT_ROOT/log` | `backend_watchdog.py`（看门狗链专用，副本不跑） | `MYAPP_LOG_DIR` 覆盖 |
+
+注：`FE_DIST_OUT` 在外部模式下仍指向版本目录内的预构建 `_fe_dist`（vite
+preview 就从那里提供服务），geojson 刷新是目前唯一已知的运行时写版本目录
+行为，仅限一个可再生的静态文件；将 `_fe_dist` 整体外移需首次启动复制
+（体积大），留待后续事项。
 
 不在 P1-7 内：`battery_dashboard.py:39` 的 `d:\01_RPA\...` 硬编码路径是历史遗留，
 `env_template.txt` 已有警告，另立事项处理。
