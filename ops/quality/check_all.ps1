@@ -24,12 +24,12 @@
 #   - 手动跳过：-SkipSteps 指定步骤号，必须同时给 -SkipReason，否则拒绝执行。
 # 跳过的步骤汇总在脚本末尾的 SKIP 清单里。任何一步失败（非跳过）都立即非零退出。
 # 本脚本不访问 UME、eFlow、生产库、邮箱、WhatsApp、内网地址；不跑全量 pytest。
-$ErrorActionPreference = 'Stop'
-
 param(
     [int[]]$SkipSteps = @(),
     [string]$SkipReason = ''
 )
+
+$ErrorActionPreference = 'Stop'
 
 $Root = (Get-Location).Path
 $Skipped = @()
