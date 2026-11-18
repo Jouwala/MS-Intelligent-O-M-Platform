@@ -71,11 +71,13 @@ class FakeGitHub(GitHubClient):
         self.lock = threading.RLock()
         self.issues: dict[int, dict[str, Any]] = {}
         self.comments: dict[int, list[dict[str, Any]]] = {}
+        self.events: dict[int, list[dict[str, Any]]] = {}
         self.pulls: dict[int, dict[str, Any]] = {}
         self.refs: dict[str, str] = {"refs/heads/main": main_sha}
         self.known_shas: set[str] = {main_sha, MERGE_SHA, HEAD_SHA}
         self.failures: list[_Failure] = []
         self._next_id = 5000
+        self._next_issue = 1000
 
     # ------------------------------------------------------------------ 造数据
     def seed_issue(
@@ -166,6 +168,13 @@ class FakeGitHub(GitHubClient):
         for body in bodies:
             self.seed_comment(number, body)
 
+    def seed_events(self, number: int, events: list[dict[str, Any]]) -> None:
+        """造 Issue 时间线事件（如 labeled state:blocked 的打标记录）。"""
+        with self.lock:
+            if number not in self.issues:
+                self.seed_issue(number)
+            self.events.setdefault(number, []).extend(events)
+
     # ------------------------------------------------------------------ 故障注入
     def inject(
         self,
@@ -250,6 +259,12 @@ class FakeGitHub(GitHubClient):
             match = re.fullmatch(r"issues/(\d+)/comments", rest)
             if match:
                 return self._comments(method, int(match.group(1)), query, payload)
+            match = re.fullmatch(r"issues/comments/(\d+)", rest)
+            if match:
+                return self._comment_update(method, int(match.group(1)), payload)
+            match = re.fullmatch(r"issues/(\d+)/events", rest)
+            if match:
+                return self._events(method, int(match.group(1)), query)
             match = re.fullmatch(r"issues/(\d+)/labels", rest)
             if match:
                 return self._labels(method, int(match.group(1)), query, payload)
@@ -262,7 +277,7 @@ class FakeGitHub(GitHubClient):
             if match:
                 return self._issue_get(method, int(match.group(1)))
             if rest == "issues":
-                return self._issues_list(method, query)
+                return self._issues_list(method, query, payload)
             match = re.fullmatch(r"pulls/(\d+)", rest)
             if match:
                 return self._pull_get(method, int(match.group(1)))
@@ -329,7 +344,22 @@ class FakeGitHub(GitHubClient):
             return 404, {}, {"message": "Not Found"}
         return 200, {}, self._issue_view(number)
 
-    def _issues_list(self, method: str, query: dict[str, str]) -> tuple[int, dict[str, str], Any]:
+    def _issues_list(
+        self, method: str, query: dict[str, str], payload: Any
+    ) -> tuple[int, dict[str, str], Any]:
+        if method == "POST":
+            if not isinstance(payload, dict) or not payload.get("title"):
+                return 422, {}, {"message": "title 必填"}
+            self._next_issue += 1
+            number = self._next_issue
+            self.issues[number] = {
+                "state": "open",
+                "body": payload.get("body") or "",
+                "labels": [],
+                "title": payload["title"],
+            }
+            self.comments.setdefault(number, [])
+            return 201, {}, self._issue_view(number)
         if method != "GET":
             return 405, {}, {"message": "method not allowed"}
         state = query.get("state", "open")
@@ -368,6 +398,36 @@ class FakeGitHub(GitHubClient):
             self.comments.setdefault(number, []).append(comment)
             return 201, {}, comment
         return 405, {}, {"message": "method not allowed"}
+
+    def _comment_update(
+        self, method: str, comment_id: int, payload: Any
+    ) -> tuple[int, dict[str, str], Any]:
+        """PATCH /issues/comments/{id}：就地改评论正文（告警去重用）。"""
+        if method != "PATCH":
+            return 405, {}, {"message": "method not allowed"}
+        body = payload.get("body") if isinstance(payload, dict) else None
+        if not isinstance(body, str):
+            return 422, {}, {"message": "body 必填"}
+        for number, comments in self.comments.items():
+            for comment in comments:
+                if comment["id"] == comment_id:
+                    comment["body"] = body
+                    return 200, {}, dict(comment)
+        return 404, {}, {"message": "Not Found"}
+
+    def _events(
+        self, method: str, number: int, query: dict[str, str]
+    ) -> tuple[int, dict[str, str], Any]:
+        """GET /issues/{n}/events：Issue 时间线（labeled 等）。"""
+        if method != "GET":
+            return 405, {}, {"message": "method not allowed"}
+        if number not in self.issues:
+            return 404, {}, {"message": "Not Found"}
+        return self._page(
+            f"/repos/{self.repo}/issues/{number}/events",
+            query,
+            self.events.get(number, []),
+        )
 
     def _labels(
         self, method: str, number: int, query: dict[str, str], payload: Any

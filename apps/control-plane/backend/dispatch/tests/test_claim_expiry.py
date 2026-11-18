@@ -158,6 +158,80 @@ def test_cli_claim_expiry_flag(monkeypatch) -> None:
     assert any("巡检 1 个 Issue，过期 1 个" in line for line in logs)
 
 
+def test_cli_claim_expiry_posts_no_progress_alert(monkeypatch) -> None:
+    """--claim-expiry 过期的任务同时往 Muse 1 收件箱发 no-progress 告警（#143）。"""
+    from dispatch.alert_inbox import INBOX_TITLE, find_inbox
+
+    fake = FakeGitHub()
+    _seed_claimed(fake)
+    monkeypatch.setattr(
+        lease_reaper, "reap", lambda *args, **kwargs: {"dry_run": False}
+    )
+    logs: list[str] = []
+    code = lease_reaper.main(
+        ["--claim-expiry"],
+        env={"REPO": "acme/demo", "GH_TOKEN": "t"},
+        ref_store=object(),
+        github_client=fake,
+        log=logs.append,
+    )
+    assert code == 0
+    inbox = find_inbox(fake, "acme/demo")
+    assert inbox is not None
+    assert fake.issues[inbox]["title"] == INBOX_TITLE
+    bodies = fake.comments_for(inbox)
+    assert len(bodies) == 1
+    assert "muse1-alert: no-progress:issue-7" in bodies[0]
+    assert "2026-11-16T07:00:00Z" in bodies[0]
+
+
+def test_cli_dry_run_does_not_post_alert(monkeypatch) -> None:
+    from dispatch.alert_inbox import find_inbox
+
+    fake = FakeGitHub()
+    _seed_claimed(fake)
+    monkeypatch.setattr(
+        lease_reaper, "reap", lambda *args, **kwargs: {"dry_run": True}
+    )
+    code = lease_reaper.main(
+        ["--claim-expiry", "--dry-run"],
+        env={"REPO": "acme/demo", "GH_TOKEN": "t"},
+        ref_store=object(),
+        github_client=fake,
+        log=lambda *_: None,
+    )
+    assert code == 0
+    assert find_inbox(fake, "acme/demo") is None
+
+
+def test_cli_alert_blocked_flag_escalates(monkeypatch) -> None:
+    """--alert-blocked：P0 阻塞任务立即升级到收件箱（#143）。"""
+    from dispatch.alert_inbox import find_inbox
+
+    fake = FakeGitHub()
+    fake.seed_issue(
+        8,
+        labels=("state:blocked", "agent:muse-2"),
+        body="## 任务说明\n\n## 优先级\n\nP0\n",
+    )
+    monkeypatch.setattr(
+        lease_reaper, "reap", lambda *args, **kwargs: {"dry_run": False}
+    )
+    code = lease_reaper.main(
+        ["--alert-blocked"],
+        env={"REPO": "acme/demo", "GH_TOKEN": "t"},
+        ref_store=object(),
+        github_client=fake,
+        log=lambda *_: None,
+    )
+    assert code == 0
+    inbox = find_inbox(fake, "acme/demo")
+    assert inbox is not None
+    bodies = fake.comments_for(inbox)
+    assert len(bodies) == 1
+    assert "muse1-alert: blocked-escalation:issue-8" in bodies[0]
+
+
 def test_cli_rejects_non_positive_claim_ttl(monkeypatch) -> None:
     monkeypatch.setattr(lease_reaper, "reap", lambda *args, **kwargs: {})
     code = lease_reaper.main(

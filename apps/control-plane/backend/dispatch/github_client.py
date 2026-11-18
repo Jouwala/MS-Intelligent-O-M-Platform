@@ -304,6 +304,32 @@ class GitHubClient:
             idempotent=False,
         )
 
+    def update_issue_comment(self, comment_id: int, body: str) -> dict[str, Any]:
+        """就地更新一条评论（PATCH）。告警收件箱的去重就靠它：同类告警只改
+        最新一条同 marker 评论的正文，不再追加新评论刷屏。"""
+        return self._request(
+            "PATCH",
+            f"/repos/{self.repo}/issues/comments/{comment_id}",
+            {"body": body},
+            idempotent=True,
+        )
+
+    def create_issue(self, title: str, body: str) -> dict[str, Any]:
+        """新建 Issue（告警收件箱首次使用时建固定收件箱）。"""
+        return self._request(
+            "POST",
+            f"/repos/{self.repo}/issues",
+            {"title": title, "body": body},
+            idempotent=False,
+        )
+
+    def list_issue_events(self, number: int) -> list[dict[str, Any]]:
+        """Issue 时间线事件（labeled/unlabeled 等），全量分页。
+
+        阻塞升级用它取 `state:blocked` 标签的打上时间（blocked-since），
+        不靠评论时间推断。"""
+        return self.paginate(f"/repos/{self.repo}/issues/{number}/events")
+
     def list_open_issues(self, labels: str | None = None) -> list[dict[str, Any]]:
         params: dict[str, Any] = {"state": "open"}
         if labels:

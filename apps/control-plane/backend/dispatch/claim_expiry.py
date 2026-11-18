@@ -145,7 +145,8 @@ def expire_stale_claims(
 ) -> dict[str, Any]:
     """扫描 `state:claimed` Issue，把超时未动的收敛回 `state:todo`。
 
-    返回 `{"checked": N, "expired": [编号...], "dry_run": bool}`；
+    返回 `{"checked": N, "expired": [编号...], "expired_claims":
+    [{"number": N, "claimed_at": "ISO"}, ...], "dry_run": bool}`；
     单个 Issue 失败先记录，全部处理完后统一抛 `RuntimeError`（显式失败）。
     """
     current = now or datetime.now(timezone.utc)
@@ -155,6 +156,7 @@ def expire_stale_claims(
         if "pull_request" not in issue
     ]
     expired: list[int] = []
+    expired_claims: list[dict[str, Any]] = []
     errors: list[str] = []
     open_pr_issues: set[int] | None = None
 
@@ -195,6 +197,12 @@ def expire_stale_claims(
                 client.remove_issue_label(number, STATE_CLAIMED)
                 client.add_issue_labels(number, [STATE_TODO])
             expired.append(number)
+            expired_claims.append(
+                {
+                    "number": number,
+                    "claimed_at": claimed_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                }
+            )
             log(
                 f"[claim-expiry] #{number} 认领于 {claimed_at:%Y-%m-%dT%H:%M:%SZ} "
                 f"已超过 {int(claim_ttl.total_seconds() // 3600)}h 无进展："
@@ -210,4 +218,9 @@ def expire_stale_claims(
             f"[claim-expiry] {len(errors)} 个 Issue 处理失败（本轮显式失败）："
             + "；".join(errors)
         )
-    return {"checked": len(issues), "expired": expired, "dry_run": dry_run}
+    return {
+        "checked": len(issues),
+        "expired": expired,
+        "expired_claims": expired_claims,
+        "dry_run": dry_run,
+    }

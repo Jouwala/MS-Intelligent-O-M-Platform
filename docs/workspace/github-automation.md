@@ -65,14 +65,14 @@ Muse 1 按 dispatch-rules.md 第四节做最终汇总（人工/Agent 环节，�
 | --- | --- | --- | --- |
 | `issue-to-pr.yml` | Issue 打 `state:claimed` 标签；或手动 dispatch（填 Issue 号） | 解析分支名 → 建分支（脚手架提交）→ 开草稿 PR（描述自动生成、含 `Closes #N`）→ Issue 留评论 | 只处理 open 且带 `agent:muse-2/3` 的 Issue；分支名正则校验；全程幂等（完成标记 + 存在性检查） |
 | `auto-merge.yml` 的 `update-branches` 作业 | push 到 main；或手动 dispatch | 对落后的 `agent/*` 分支 PR 调 `PUT /pulls/{n}/update-branch` | 只动 `agent/*` 分支、非草稿、`mergeable_state == behind` 才更新；冲突只记录不处理（开发 Agent 自行 rebase） |
-| `ci-failure-notify.yml` | `quality` 工作流跑完且结论 failure / timed_out | 按 head SHA 定位 open PR，评论通知 builder（失败 job、运行链接、SHA），关联 Issue 同步一份 | 同一 run 只通知一次（`ci-failure-notice` 标记去重）；只通知不改代码/标签 |
+| `ci-failure-notify.yml`（2026-11-18 加收件箱同步，#143） | `quality` 工作流跑完且结论 failure / timed_out | 按 head SHA 定位 open PR，评论通知 builder（失败 job、运行链接、SHA），关联 Issue 同步一份；再调 `alert_inbox.py ci-failure` 同步一份到 Muse 1 告警收件箱 | 同一 run 只通知一次（`ci-failure-notice` 标记去重）；收件箱按 PR 聚合（`muse1-alert: ci-failure:pr-<N>` 就地更新）；只通知不改代码/标签 |
 | `pr-merged-writeback.yml` | PR 关闭且 `merged == true`、base 为 main；或 auto-merge 合并成功后 `workflow_dispatch`（填 PR 号） | 解析关联 Issue → 打 `state:merged`、摘其余 `state:` 标签 → 发 PR_MERGED 评论 → 关闭 Issue | 解析不到关联 Issue 就跳过；已回写过的重复触发跳过；dispatch 路径从 API 取 PR 并校验已合入 main |
 | `auto-merge.yml` 的 `auto-merge` 作业 | 合并成功后（本作业内） | 向 `auto-dispatch.yml` 与 `pr-merged-writeback.yml` 各 POST 一次 `workflow dispatch`（`ref: main`，`inputs: pr_number`） | dispatch 失败只记日志，不让合并作业变红（合并已发生）；下游工作流自身幂等，重复触发不重复评论/分派 |
 | `agent-orchestrator.yml`（2026-11-14 扩展；TASK-01 改实现，现 Actions 层面 disabled） | 仅手动 dispatch（自动触发路径已从 `on:` 摘除；工作流 `disabled_manually`） | **已停用，待删除**：Grok 已于 2026-11-14 退役（PR #46），此路径不再使用。原动作（历史）：调 `qa_dispatch.py` 按 head SHA 定位 open PR → `POST /git/refs` 登记 qa-trigger ref → POST webhook 请 Grok 冒烟。其文件头注释已写明「重新启用前先确认 Grok 是否真的回来；不回来就删掉本文件」——删除动作不在 TASK-06-C 范围，待 Muse 1 与用户决定。现行冒烟链路见下一行 smoke-watcher | 已停用，不再执行；原安全阀口径（只认 success、ref CAS 去重等）仅作历史记录 |
 | `smoke-watcher`（D:\02 本机脚本，**非 Actions 工作流**） | 轮询检出 `quality` 已绿的 open PR head | 在 D:\02 本机跑 `ops\smoke\smoke.ps1`（§8.1–8.4）→ 在 PR 贴回结果评论（首行 `smoke-result` 标记绑定 head SHA）→ 通过才打 `smoke-passed`；同时回写关联 Issue 的 QA 三类消息与 qa 状态标签（开始 QA_STARTED + `state:qa-ready`、通过 QA_PASSED + `state:qa-passed`、失败 QA_FAILED + `state:qa-failed`，TASK-06-A #48），绑定旧 head 的 `smoke-passed` 先摘除再重跑 | 只对 quality 结论 success 的 head 执行；D:\02 被占用、MSNOC1 掉线等中断的结果作废重跑，不记通过也不记失败（协议第四节）；QA 回写带 (PR, SHA) 去重标记，逐环映射见 `qa-fix-loop.md` |
 | `auto-fix.yml`（TASK-06-B #49） | Issue 被打 `state:qa-failed`（`issues: labeled`）；或人工 `workflow_dispatch` 重放 | 复核双信号（标签 + 最新 QA_FAILED 评论）后自动建修复 Issue（模板八节、回派原开发 Agent、失败项转验收项），在原 Issue 发 FIX_REQUESTED；轮次按根任务计数（修复 Issue 正文的 `auto-fix:` 标记），第 4 次失败只打 `needs-replan` + 说明评论 | 只建 Issue、发评论、打 `needs-replan`，不改代码、不合并、不关原 Issue；同一根任务 + 同一失败 HEAD 只建一个修复 Issue；取不到原开发 Agent 就不派任何人、注明请 Muse 1 指派；逐环映射见 `qa-fix-loop.md` |
 | `auto-dispatch.yml`（2026-11-14 新增；TASK-01 改实现；2026-11-16 加定时兜底） | PR 关闭且 `merged == true`、base 为 main；或 auto-merge 合并成功后 `workflow_dispatch`（填 PR 号）；或每小时 :17 的 `schedule` 定时巡检（不看 PR，按 main HEAD 分派） | 调 `auto_dispatch.py`：校验 PR（定时路径跳过）→ 触发级对账（已登记则只补状态）→ 全量分页找就绪任务（`state:todo` + 注册表白名单内的 agent 标签 + 依赖全关 + 无未过期的认领/分派评论）→ `POST /git/refs` 做 CAS 登记（合入路径 `dispatch/pr-merged/`、定时路径 `dispatch/cron-sweep/`）→ 发带 `dispatch_id` 的 TASK_ASSIGNED 评论 → 幂等补 `state:todo` / 摘 `state:blocked` | 优先派给本次合并空闲的 builder；依赖未满足的绝不分派；auto-fix 修复任务对原 Issue 的自依赖自动忽略（否则死锁）；已认领 / 24 小时内已分派的任务不动；无就绪任务只记日志；每次只派一个任务；并发 / 重复投递只登记一次（第七节） |
-| `lease-reaper.yml`（2026-11-14 新增；2026-11-16 加认领超时） | 每 5 分钟定时 + 手动 dispatch | 调 `lease_reaper.py`：回收过期 lease ref、清理孤儿 scope ref；`--claim-expiry` 再扫 `state:claimed`，认领后 4 小时无进展的发 `CLAIM_EXPIRED` 评论并把标签收敛回 `state:todo`（日志末尾 `[claim-expiry] 巡检 N 个 Issue`） | 只删过期 ref、只改状态标签，不合并 / 不关 Issue；HWM 永不删；幂等；失败显式（脚本非零 → workflow 变红 + 告警 Issue） |
+| `lease-reaper.yml`（2026-11-14 新增；2026-11-16 加认领超时；2026-11-18 加收件箱，#143） | 每 5 分钟定时 + 手动 dispatch | 调 `lease_reaper.py`：回收过期 lease ref、清理孤儿 scope ref；`--claim-expiry` 再扫 `state:claimed`，认领后 4 小时无进展的发 `CLAIM_EXPIRED` 评论并把标签收敛回 `state:todo`（日志末尾 `[claim-expiry] 巡检 N 个 Issue`），同时往收件箱发 `no-progress` 告警；`--alert-blocked` 再扫 `state:blocked`，按优先级/时长升级到收件箱 | 只删过期 ref、只改状态标签，不合并 / 不关 Issue；HWM 永不删；幂等；失败显式（脚本非零 → workflow 变红 + failure() 步调 `alert_inbox.py reaper-failure` 路由到收件箱，只留最新一次） |
 | `dispatch-check.yml`（2026-11-14 修 404；TASK-01 改实现） | Issue 新建 / 编辑 / 关闭 / 标签变化；每小时定时巡检 | 调 `dispatch_check.py`：全量分页读评论 / Issue 列表 / 依赖方搜索结果 → 缺字段提醒、依赖阻塞打 `state:blocked`、依赖解除幂等摘标签；**只检查不分派** | 只做提醒与标签，不合并、不关闭 Issue；评论 marker 分页扫描 + 超时对账（重复执行不产生第二条评论）；标签操作幂等（加标签去重、摘不存在的标签当成功）；查询 / 分页失败显式报错让运行变红 |
 | `refs-census.yml`（2026-11-15 新增，#76） | 每周一 03:17 UTC 定时 + 手动 dispatch | 调 `refs_census.py`：分页全量统计各调度 ref 家族数量（HWM 再按 issue 统计代次）→ 写 Step Summary → 任一阈值突破则退出码 2 让运行变红告警 | **只读**（`contents: read`），不删任何 ref；清理走 lease-reaper（自动）与第十一节人工策略；阈值是预警线非硬配额，可经仓库变量调整 |
 
@@ -86,6 +86,30 @@ Muse 1 按 dispatch-rules.md 第四节做最终汇总（人工/Agent 环节，�
 auto-dispatch / dispatch-check）的内嵌 Python 已抽成
 `apps/control-plane/backend/dispatch/` 下的可测模块，workflow 只保留触发、
 权限与传参；具体映射、并发幂等与 CI 作业见第六、七、八节。
+
+### 告警收件箱（2026-11-18，#143）
+
+四类告警统一路由给 Muse 1 的固定收件箱 Issue（标题 `[告警收件箱] Muse 1`，
+首次使用时由 `alert_inbox.py` 自动创建）。实现：`apps/control-plane/backend/dispatch/alert_inbox.py`
+（标准库 only）+ `github_client.py` 新增的 `create_issue` / `update_issue_comment` /
+`list_issue_events`。
+
+| 类别 | 触发点 | key（去重粒度） | 升级规则 |
+| --- | --- | --- | --- |
+| `ci-failure` | `ci-failure-notify.yml`（quality 失败时） | `pr-<N>` | 每次失败更新同一条评论（附最新运行） |
+| `reaper-failure` | `lease-reaper.yml` 的 `failure()` 步 | `latest` | 每次失败更新同一条评论，只留最新一次 |
+| `no-progress` | `lease_reaper.py --claim-expiry` 过期时 | `issue-<N>` | 认领后 4 小时无进展被过期时发 |
+| `blocked-escalation` | `lease_reaper.py --alert-blocked` 每轮扫描 | `issue-<N>` | 高优先级（P0/P1）立即；普通（P2/未注明）满 30 分钟 |
+
+口径：同一（类别，key）只留一条评论，就地 PATCH 更新；正文完全相同时直接
+跳过，不产生无意义的 PATCH。正文只含任务/PR 编号、原因、事件时间、已采取的
+自动动作、下一步建议，不含敏感值。只通知，不改代码、不改标签、不重跑。
+`no-progress` 与阻塞升级的告警发送失败只记日志、不让 Reaper 整轮变红
+（认领过期的 CLAIM_EXPIRED 评论与标签收敛已经完成，信息仍在任务 Issue 上；
+阻塞扫描下一轮会重新推导）。
+
+已知遗留：`lease-reaper.yml` 的无负责人任务告警（ownerless-alert）仍走单独的
+同名告警 Issue，未并入收件箱——后续可顺手迁移，不在本 Issue 范围内。
 
 ## 三、几个容易误解的口径
 
