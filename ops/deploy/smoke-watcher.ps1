@@ -386,7 +386,7 @@ function Send-IssueComment {
 function Get-SmokeResultBoundSha {
     # 读 PR 评论里最后一条 result=passed 的 smoke-result 标记，返回其绑定的 SHA；没有返回 ''。
     param([int]$PrNumber)
-    $comments = Invoke-GitHubApi "/repos/$Repo/issues/$PrNumber/comments?per_page=100"
+    $comments = Normalize-GitHubList (Invoke-GitHubApi "/repos/$Repo/issues/$PrNumber/comments?per_page=100")
     $bound = ''
     foreach ($c in $comments) {
         if ($c.body -and $c.body -match 'smoke-result:\s*pr-\d+\s+sha-([0-9a-f]{40})\s+result=passed') {

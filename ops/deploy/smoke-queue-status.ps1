@@ -63,6 +63,18 @@ function Normalize-GitHubList {
     return $asList
 }
 
+function Get-SmokeBoundPassedSha {
+    param([int]$PrNumber)
+    $comments = Normalize-GitHubList (Invoke-GitHubApi "/repos/$Repo/issues/$PrNumber/comments?per_page=100")
+    $bound = ''
+    foreach ($c in $comments) {
+        if ($c.body -and $c.body -match 'smoke-result:\s*pr-\d+\s+sha-([0-9a-f]{40})\s+result=passed') {
+            $bound = $Matches[1]
+        }
+    }
+    return $bound
+}
+
 function Test-QualityGreen {
     param([string]$Sha)
     $runs = Invoke-GitHubApi "/repos/$Repo/actions/workflows/quality.yml/runs?head_sha=$Sha&per_page=5"
@@ -136,9 +148,36 @@ foreach ($pr in $prs) {
     if ($labels -contains 'do-not-merge') {
         $status = 'blocked'
         $reason = 'do-not-merge'
-    } elseif ($labels -contains 'smoke-passed' -or $state.smoked["$n"] -eq $sha) {
+    } elseif ($state.smoked["$n"] -eq $sha) {
         $status = 'done'
-        $reason = 'smoke-passed'
+        $reason = '本机 state 已记录本 head 冒烟'
+    } elseif ($labels -contains 'smoke-passed') {
+        $bound = ''
+        try { $bound = Get-SmokeBoundPassedSha -PrNumber $n } catch { }
+        if ($bound -eq $sha) {
+            $status = 'done'
+            $reason = 'smoke-passed + 评论标记绑定本 head'
+        } else {
+            $shortBound = if ($bound.Length -ge 7) { $bound.Substring(0, 7) } else { $bound }
+            $suffix = "标签过期（绑定=$shortBound），待 watcher 摘除并重跑"
+            if ($dirty) {
+                $status = 'blocked'
+                $reason = $suffix + '（当前工作树脏）'
+            } else {
+                try {
+                    if (Test-QualityGreen $sha) {
+                        $status = 'ready'
+                        $reason = $suffix
+                    } else {
+                        $status = 'wait-ci'
+                        $reason = "$suffix；quality 未绿"
+                    }
+                } catch {
+                    $status = 'unknown'
+                    $reason = $_.Exception.Message
+                }
+            }
+        }
     } elseif ($state.failed["$n"] -eq $sha) {
         $status = 'failed-local'
         $reason = '本机 state 已记失败，需新 head 或清 state'

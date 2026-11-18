@@ -1014,8 +1014,14 @@ try {
         }
         Add-R '(1) /api/health 返回 db_mode=pg' ($dbMode -eq 'pg') ("db_mode='$dbMode' body=$(Short $health)")
 
-        $wo = Get-Body 'http://127.0.0.1:7039/api/wo-dashboard/overview'
-        $woOk = ($wo.Length -gt 20) -and ($wo -notmatch '^\s*\{\s*\}\s*$') -and ($wo -notmatch '^\s*\[\s*\]\s*$')
+        # 与 /api/health 同理：后端偶发比 start_all 晚就绪（2026-11-18 #157 实测 wo 首秒 len=0）
+        $wo = ''; $woOk = $false
+        for ($i = 0; $i -lt 15; $i++) {
+            $wo = Get-Body 'http://127.0.0.1:7039/api/wo-dashboard/overview'
+            $woOk = ($wo.Length -gt 20) -and ($wo -notmatch '^\s*\{\s*\}\s*$') -and ($wo -notmatch '^\s*\[\s*\]\s*$')
+            if ($woOk) { break }
+            Start-Sleep -Seconds 1
+        }
         Add-R '(2) /api/wo-dashboard/overview 返回非空业务数据' $woOk ("len=$($wo.Length) body=$(Short $wo 200)")
 
         $c = Get-Status 'http://127.0.0.1:9277/uniplam/'
