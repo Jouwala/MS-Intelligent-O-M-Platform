@@ -399,6 +399,22 @@ else
   step '若数据库为空，请另行灌入快照（bundle_data.ps1 仅 Windows，Linux 侧待补）'
 fi
 
+# ------------------------------------------- 数据库迁移（alembic upgrade head，D1）
+# 绿包首次启动时库是空的：此前没有任何脚本跑 alembic，后端起来后表不存在。
+# upgrade head 幂等（已是最新时为空操作），每次启动都跑；失败直接退出，
+# 不让后端带着未迁移的库启动。MY_APP_DB_MODE/DATABASE_URL 已由 set_cfg 导出进
+# 进程环境，alembic env.py 直接读它们，与后端同一套连接串。
+step '--- 数据库迁移（alembic upgrade head） ---'
+if [ "$DRY_RUN" = "1" ]; then
+  step '<干跑> 跳过 alembic upgrade head'
+else
+  if ! (cd "$MYAPP_DIR" && "$PY_EXE" -m alembic upgrade head >"$TMP_DIR/portable-alembic.out" 2>"$TMP_DIR/portable-alembic.err"); then
+    die "alembic upgrade head 失败（见 $TMP_DIR/portable-alembic.err）：$(tail -n 10 "$TMP_DIR/portable-alembic.err" 2>/dev/null | tr '\n' ' ')"
+  fi
+  sed 's/^/  /' "$TMP_DIR/portable-alembic.out"
+  ok 'alembic upgrade head 完成'
+fi
+
 # ------------------------------------------------- 2/6 nginx 配置（含 -t 校验）
 step '--- 2/6 nginx 配置展开 ---'
 START_NGINX=$(cfg_get 'START_NGINX' '1')
