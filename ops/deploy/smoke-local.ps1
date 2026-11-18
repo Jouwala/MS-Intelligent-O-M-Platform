@@ -52,6 +52,7 @@ $LockPath = Join-Path $TmpDir 'smoke.lock'
 $SmokePs1 = Join-Path $Root 'ops\smoke\smoke.ps1'
 $Results = @{}
 $Notes = @()
+$FailItems = @()  # Convert-SmokeResultToReport 填：结果表 FAIL 行 + 缺失的预期检查行（Issue #150）
 $script:LockOwned = $false
 $script:LockStream = $null
 $script:ExitCode = 1
@@ -235,12 +236,32 @@ function Get-MdCell {
     return $null
 }
 
+function Get-MdFailRows {
+    param([string]$Text)
+    # 结果表里所有 FAIL 行（检查名 + 详情），供 PR 评论的「失败项」一节用。
+    # #145 的教训：评论只写各节「通过/失败」，失败项本身没列出来，查不到原因。
+    $out = @()
+    foreach ($ln in ($Text -split "`r?`n")) {
+        if ($ln -match '^\|.*\|.*\|') {
+            $cols = @($ln.Split('|') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+            if ($cols.Count -ge 3 -and $cols[0] -eq 'FAIL') {
+                $out += @{ Check = $cols[1]; Detail = $cols[2] }
+            }
+        }
+    }
+    return $out
+}
+
 function Convert-SmokeResultToReport {
     param([string]$ResultMdPath, [string]$VerdictHint)
     $txt = ''
     if (Test-Path -LiteralPath $ResultMdPath) {
         try { $txt = [IO.File]::ReadAllText($ResultMdPath) } catch { $txt = '' }
     }
+    # 失败项清单：结果表里所有 FAIL 行 + 下面各节补记的缺失行。
+    # 总结论（`$passLine）仍以结果表的 RESULT 为准，不在这里改写——
+    # 清单只解决「评论里查不到失败原因」（Issue #150）。
+    $script:FailItems = @(Get-MdFailRows $txt)
     $row81 = Get-MdCell $txt '§8.1'
     $row81b = Get-MdCell $txt '前端无需重建'
     $row81c = Get-MdCell $txt 'npm run build (apps\my_app\frontend'
@@ -248,7 +269,7 @@ function Convert-SmokeResultToReport {
     $row82auth = Get-MdCell $txt 'local_authority_tools'
     $rowH = Get-MdCell $txt '/api/health'
     $rowWo = Get-MdCell $txt 'wo-dashboard/overview'
-    $rowPortal = Get-MdCell $txt '9277'
+    $rowPortal = Get-MdCell $txt '(3) 门户'
     $row8080 = Get-MdCell $txt '8080/myapp'
     $row8443 = Get-MdCell $txt '8443/myapp'
     $rowHash = Get-MdCell $txt 'sha256'
@@ -271,21 +292,52 @@ function Convert-SmokeResultToReport {
     if ($row82dir) { $d2 += $row82dir.Detail }
     if ($row82auth) { $d2 += $row82auth.Detail }
     $ok82 = $true
-    if ($row82dir -and $row82dir.Result -ne 'PASS') { $ok82 = $false }
-    if ($row82auth -and $row82auth.Result -ne 'PASS') { $ok82 = $false }
+    foreach ($e in @(
+        @{ Row = $row82dir; Label = '§8.2 SHOW data_directory' },
+        @{ Row = $row82auth; Label = '§8.2 local_authority_tools check' }
+    )) {
+        if (-not $e.Row) {
+            $ok82 = $false
+            $script:FailItems += @{ Check = "未找到检查行：$($e.Label)"; Detail = '结果表里没有这一行，冒烟未执行该检查（见 D:\02 的完整报告）' }
+        } elseif ($e.Row.Result -ne 'PASS') {
+            $ok82 = $false
+        }
+    }
     $Results['8.2'] = ($(if ($ok82) { '通过。' } else { '失败。' }) + ($d2 -join '；'))
 
     $hashLine = ''
     if ($rowHash -and $rowHash.Detail -match '([0-9A-Fa-f]{16,})') { $hashLine = "；index.html sha256 ``$($Matches[1])``" }
+    # §8.3 的 7 项检查都必须在结果表里出现：缺失的行说明该检查根本没跑，
+    # 以往按「通过」算（$ok83 只看找到的行），#145 的评论因此写着「全部通过」
+    # 却判失败、且查不到原因（Issue #150）。缺失即失败，并记进失败项清单。
     $ok83 = $true
-    foreach ($r in @($rowH, $rowWo, $rowPortal, $row8080, $row8443, $rowHash, $rowNt)) {
-        if ($r -and $r.Result -ne 'PASS') { $ok83 = $false }
+    $expected83 = @(
+        @{ Row = $rowH;      Label = '(1) /api/health' },
+        @{ Row = $rowWo;     Label = '(2) 只读业务接口' },
+        @{ Row = $rowPortal; Label = '(3) 门户 9277' },
+        @{ Row = $row8080;   Label = '(4a) nginx 8080' },
+        @{ Row = $row8443;   Label = '(4b) nginx 8443' },
+        @{ Row = $rowHash;   Label = '(5) index.html sha256' },
+        @{ Row = $rowNt;     Label = '(6) nginx -t' }
+    )
+    foreach ($e in $expected83) {
+        if (-not $e.Row) {
+            $ok83 = $false
+            $script:FailItems += @{ Check = "未找到检查行：$($e.Label)"; Detail = '结果表里没有这一行，冒烟未执行该检查（见 D:\02 的完整报告）' }
+        } elseif ($e.Row.Result -ne 'PASS') {
+            $ok83 = $false
+        }
     }
     $healthBit = '1. /api/health：见报告'
     if ($rowH) { $healthBit = '1. /api/health：' + $rowH.Detail }
     $woBit = '2. 只读业务接口：见报告'
     if ($rowWo) { $woBit = '2. 只读业务接口返回非空：' + $rowWo.Detail }
-    $Results['8.3'] = "$(if ($ok83) { '全部通过。' } else { '失败。' })$healthBit；$woBit；3. 门户 9277：$(if ($rowPortal) { $rowPortal.Detail } else { '?' })；4. nginx 8080/8443：$(if ($row8080) { $row8080.Detail } else { '?' }) / $(if ($row8443) { $row8443.Detail } else { '?' })；5. index.html sha256 一致$hashLine；6. nginx -t：$(if ($rowNt) { $rowNt.Detail } else { '?' })"
+    $hashBit = '5. index.html sha256 未找到检查行'
+    if ($rowHash) {
+        if ($rowHash.Result -eq 'PASS') { $hashBit = "5. index.html sha256 一致$hashLine" }
+        else { $hashBit = "5. index.html sha256 失败：$($rowHash.Detail)" }
+    }
+    $Results['8.3'] = "$(if ($ok83) { '全部通过。' } else { '失败。' })$healthBit；$woBit；3. 门户 9277：$(if ($rowPortal) { $rowPortal.Detail } else { '未找到检查行' })；4. nginx 8080/8443：$(if ($row8080) { $row8080.Detail } else { '未找到检查行' }) / $(if ($row8443) { $row8443.Detail } else { '未找到检查行' })；$hashBit；6. nginx -t：$(if ($rowNt) { $rowNt.Detail } else { '未找到检查行' })"
 
     $s4 = @()
     if ($rowStop) { $s4 += $rowStop.Check + '：' + $rowStop.Detail }
@@ -309,6 +361,7 @@ function Convert-SmokeResultToReport {
         # 这里统一改成「未执行」，并带上预检给出的拒绝原因，供报告与 watcher 判读。
         $pre = Get-MdCell $txt '预检'
         $why = $(if ($pre) { "$($pre.Detail)" } else { '见 ops\smoke\smoke.ps1 报告' })
+        $script:FailItems = @()
         $Results['结论'] = '未执行：预检拒绝'
         foreach ($k in @('8.1', '8.2', '8.3', '8.4', 'pytest')) {
             $Results[$k] = "未执行：预检拒绝，冒烟脚本没有启动或停止任何进程。原因 $why"
@@ -357,6 +410,11 @@ function Write-SmokeReport {
     $report += ''
     $report += '### pytest'
     $report += $Results['pytest']
+    if ($script:FailItems.Count -gt 0) {
+        $report += ''
+        $report += '### 失败项'
+        foreach ($f in $script:FailItems) { $report += "- $($f.Check)：$($f.Detail)" }
+    }
     if ($Notes.Count -gt 0) {
         $report += ''
         $report += '### 备注'

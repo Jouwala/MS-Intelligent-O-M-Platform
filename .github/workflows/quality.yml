@@ -152,3 +152,27 @@ jobs:
         # 信号语义（os.killpg、SIGKILL 行为与 Windows 完全不同）；
         # 同时跑 agent-worker-linux 包测试（Linux 是它的第一运行目标）。
         run: python -m pytest apps/agent-worker/tests apps/agent-worker-linux/tests -q -p no:cacheprovider
+
+  # Issue #150 新增作业（2026-11-18），不改既有作业。
+  # 目的：.ps1 文件之前没有任何语法检查进 CI——smoke-local.ps1 这类
+  # 冒烟脚本坏掉要到 D:\02 真跑才发现。本作业只做静态解析，不执行。
+  ps-syntax:
+    name: PowerShell 语法检查（ops/*.ps1）
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: .
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - name: 解析全部 .ps1（语法错误即失败）
+        run: |
+          $files = Get-ChildItem -Recurse -Filter *.ps1 -Path ops | Where-Object { $_.FullName -notmatch 'node_modules' }
+          $failed = 0
+          foreach ($f in $files) {
+            $tokens = $null; $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$tokens, [ref]$errors)
+            foreach ($e in $errors) { Write-Host "::error file=$($f.FullName),line=$($e.Extent.StartLineNumber)::PS 语法错误：$($e.Message)"; $failed++ }
+          }
+          if ($failed -gt 0) { throw "$failed 个 PowerShell 语法错误" }
+          Write-Host "已解析 $($files.Count) 个 .ps1 文件，0 错误"
