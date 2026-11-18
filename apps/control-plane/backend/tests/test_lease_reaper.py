@@ -204,6 +204,37 @@ def test_cli_is_idempotent():
     assert store.leases() == []
 
 
+def test_cli_writes_reaped_count_to_github_output(tmp_path):
+    """P1-4：本轮释放的任务数写进 $GITHUB_OUTPUT，供 workflow 判断是否触发分派。"""
+    import os
+
+    out_file = tmp_path / "github_output.txt"
+    env = dict(_env())
+    env["GITHUB_OUTPUT"] = str(out_file)
+    store, clock = FakeRefStore(), FakeClock()
+    expired = seed_expired_lease(store, 7, 1, clock())
+    seed_orphan_scope(store, 7, 1)
+    fake = FakeReapModule([expired])
+    code = lease_reaper.main([], env=env, ref_store=store, ref_reap=fake, log=lambda *_a: None)
+    assert code == 0
+    content = out_file.read_text(encoding="utf-8")
+    # 1 条过期租约 + 1 条孤儿 scope = 2
+    assert "reaped=2" in content
+
+
+def test_cli_writes_zero_when_nothing_reaped(tmp_path):
+    """无释放时 reaped=0，workflow 不触发分派（不空跑）。"""
+    out_file = tmp_path / "github_output.txt"
+    env = dict(_env())
+    env["GITHUB_OUTPUT"] = str(out_file)
+    store, clock = FakeRefStore(), FakeClock()
+    fake = FakeReapModule([])
+    code = lease_reaper.main([], env=env, ref_store=store, ref_reap=fake, log=lambda *_a: None)
+    assert code == 0
+    content = out_file.read_text(encoding="utf-8")
+    assert "reaped=0" in content
+
+
 def test_cli_failure_returns_nonzero_and_prints_reason(capsys):
     fake = FakeReapModule([], error=RuntimeError("模拟 refs API 500"))
     code = lease_reaper.main([], env=_env(), ref_store=FakeRefStore(), ref_reap=fake)

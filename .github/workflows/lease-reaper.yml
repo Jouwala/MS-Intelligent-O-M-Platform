@@ -2,7 +2,7 @@
 #
 # GitHub refs 是权威层，不需要中央服务：定时 workflow 调
 # apps/control-plane/backend/dispatch/lease_reaper.py 删除过期 lease ref
-# 与孤儿 scope ref，并（可选）收敛残留的 state 标签。
+# 与孤儿 scope ref，并收敛残留的 state 标签。
 #
 # 设计要点：
 # - 每 5 分钟（cron 最小粒度）+ 可手动 workflow_dispatch；
@@ -16,6 +16,12 @@
 # - 每轮多一步「认领 / 分派超时过期」：认领后 4 小时无进展的 Issue 发
 #   CLAIM_EXPIRED 评论、标签收敛回 state:todo（日志末尾 [claim-expiry] 巡检 N 个 Issue）；
 #   分派后 24 小时无人认领由 auto-dispatch 在就绪判断里放行重派，不在这里改标签。
+# - --fix-labels 每轮都开：租约回收后残留的 state:claimed 标签即时收敛回
+#   state:todo，不再等 4 小时认领过期（P1-4）。
+# - Reaper→dispatch：本轮释放了任务（reaped > 0）时即时触发一次自动分派，
+#   不等每小时巡检（P1-4）；无释放时不空跑。
+# - 静默卡住检查：每轮查无负责人（无 agent 标签）的 state:todo 任务，
+#   有则开/更新同名告警 Issue（P1-4）。
 # - 幂等：没有可删项也正常退出 0。HWM ref 默认永不删除。
 
 name: lease-reaper
@@ -48,15 +54,68 @@ jobs:
           python-version: "3.12"
 
       - name: 执行 Reaper（refs 权威层）
+        id: reap
         env:
           REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # 日志/错误是中文：固定 UTF-8，避免 runner locale 差异导致输出乱码
           PYTHONIOENCODING: utf-8
         # 默认只删过期租约 + 孤儿 scope（HWM 永不删）；--claim-expiry 是每轮
-        # 必跑的「认领超时过期」一步；要顺手修正 state 标签可加 `--fix-labels`，
-        # 要先确认仓库标签口径。
-        run: python apps/control-plane/backend/dispatch/lease_reaper.py --claim-expiry
+        # 必跑的「认领超时过期」一步；--fix-labels 把回收后残留的 state:claimed
+        # 标签即时收敛回 state:todo（不再等 4 小时认领过期）。
+        # Reaper 本轮释放了任务时（reaped > 0），下一步即时触发一次自动分派，
+        # 不等每小时巡检（P1-4）。
+        run: python apps/control-plane/backend/dispatch/lease_reaper.py --claim-expiry --fix-labels
+
+      - name: 释放任务后即时分派（Reaper→dispatch）
+        if: steps.reap.outputs.reaped > 0
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: schedule
+          PYTHONIOENCODING: utf-8
+        run: python apps/control-plane/backend/dispatch/auto_dispatch.py
+
+      - name: 无负责人任务告警（静默卡住检查）
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PYTHONIOENCODING: utf-8
+        run: |
+          set -euo pipefail
+          API="https://api.github.com/repos/$REPO"
+          AUTH=(-H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json')
+          # 找 open 的 state:todo Issue 里没有 agent:* 标签的（对分派永久不可见）。
+          # 注意：Issue 列表分页只取前 100 条，仓库规模尚小，够用；超限需改分页。
+          OWNERLESS="$(curl -sS "${AUTH[@]}" "$API/issues?state=open&labels=state:todo&per_page=100" \
+            | jq -r '.[] | select(.labels | map(.name) | map(test("^agent:")) | any | not) | "#\(.number) \(.title)"')"
+          if [ -z "$OWNERLESS" ]; then
+            echo "无无负责人 state:todo 任务，无需告警。"
+            exit 0
+          fi
+          echo "发现无负责人 state:todo 任务："
+          echo "$OWNERLESS"
+          TITLE="[告警] 存在无负责人任务（分派不可见）"
+          # 去重：已有同名 open 告警 Issue 就追加评论，没有才新建；内容每次重写当前清单。
+          EXISTING="$(curl -sS "${AUTH[@]}" "$API/search/issues?q=repo:$REPO+state:open+in:title+%22%E5%AD%98%E5%9C%A8%E6%97%A0%E8%B4%9F%E8%B4%A3%E4%BA%BA%E4%BB%BB%E5%8A%A1%22" | jq -r '.items[0].number // empty')"
+          NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          {
+            echo "<!-- ownerless-alert: $(date -u +%Y%m%dT%H%M%SZ) -->"
+            echo "以下 state:todo 任务没有 agent 标签，auto-dispatch 永远不会分派它们（$NOW）。"
+            echo
+            echo "$OWNERLESS" | sed 's/^/- /'
+            echo
+            echo "请 Muse 1 确认负责人后补 agent 标签，或关闭不需要的任务。"
+          } > /tmp/ownerless.md
+          if [ -n "$EXISTING" ]; then
+            jq -n --rawfile body /tmp/ownerless.md '{body: $body}' \
+              | curl -sS -X POST "${AUTH[@]}" "$API/issues/$EXISTING/comments" --data-binary @- > /dev/null
+            echo "已在既有告警 Issue #$EXISTING 追加当前清单。"
+          else
+            jq -n --arg title "$TITLE" --rawfile body /tmp/ownerless.md '{title: $title, body: $body}' \
+              | curl -sS -X POST "${AUTH[@]}" "$API/issues" --data-binary @- > /dev/null
+            echo "已新建告警 Issue。"
+          fi
 
       - name: 失败告警（开/更新告警 Issue 通知 owner）
         if: failure()
