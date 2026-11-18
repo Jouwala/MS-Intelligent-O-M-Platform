@@ -207,7 +207,11 @@ if ($left.Count -gt 0) { Write-Bad '01 没停干净，已中止（先手动处�
 
 # ---------- 3. 停 01_RPA 门户 ----------
 Write-Step '3/9 停 01_RPA 门户（9267/9268/9269）'
-& cmd.exe /c (Join-Path $Portal01 'stop.bat') | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+# 不能调门户的 stop.bat：它最后一行是 `pause >nul`，在无人值守的管道里会永久挂起。
+# stop_services.ps1 是它的实质实现，支持 -Quiet 且不 pause。
+$stopSvc = Join-Path $Portal01 'stop_services.ps1'
+if (-not (Test-Path -LiteralPath $stopSvc)) { throw "找不到 $stopSvc（门户停机脚本）" }
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $stopSvc -Quiet | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
 $left = Wait-PortFree -Ports @(9267, 9268) -Seconds 60
 # 9269 由 my_app 的问答助手按需拉起，不在门户 stop 范围内
 Add-Result '停 01_RPA 门户' ($left.Count -eq 0) $(if ($left.Count -eq 0) { '9267/9268 已释放（9269 若在，属问答助手）' } else { '仍占用：' + ($left -join ',') })
