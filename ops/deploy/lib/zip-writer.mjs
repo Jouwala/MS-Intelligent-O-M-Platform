@@ -66,6 +66,10 @@ function checkPath(p) {
 export function writeZip(entries, outPath, { mtimeMs = 0 } = {}) {
   const sorted = [...entries].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
   const { dosTime, dosDate } = dosDateTime(mtimeMs)
+  // P2-2：写出前预估总大小（按未压缩计，只会高估），超限直接失败，不留不完整文件。
+  let estimate = 22
+  for (const e of sorted) estimate += 30 + Buffer.byteLength(e.path, 'utf8') + (e.dir ? 0 : e.data.length) + 46 + Buffer.byteLength(e.path, 'utf8')
+  if (estimate > 0xffffffff) throw new Error('预估 ZIP 大小超过 4 GiB（不支持 zip64），请拆包')
   const fd = openSync(outPath, 'w')
   let offset = 0
   const central = []

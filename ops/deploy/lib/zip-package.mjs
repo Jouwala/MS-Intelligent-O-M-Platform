@@ -1,9 +1,8 @@
 /**
- * ZIP 打包：清单、组装、断言、扫描、规范化（build-zip.mjs 的实现层）。
+ * ZIP 打包：组装、断言、扫描、规范化（build-zip.mjs 的实现层）。
  *
  * 设计依据：Phase 0 报告（docs/workspace/zip-delivery-phase0-review.md）§6.1–§6.6。
- * 白名单思想沿用 ops/deploy/sync-policy.mjs，但清单是独立的——打包 ≠ 同步，
- * 不得 git archive 全量（会带入 .agent-work/、TMP/、*.bak* 等无关内容）。
+ * 清单（白名单/拒绝规则/回归文件）在 zip-manifest.mjs；改动清单须经评审。
  *
  * 零第三方依赖（Node 内置模块 + git CLI），与 agent-checks.mjs 同一约束。
  * 所有失败都带可定位的文件路径与原因；凭据扫描只报“文件:行:规则”，绝不打印命中内容。
@@ -14,12 +13,13 @@ import { createHash } from 'node:crypto'
 import {
   copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync,
 } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import {
+  APP_NAME, BASENAME_DENIED_DIRS, FULL_REQUIRED, INCLUDE_DIRS, INCLUDE_FILES,
+  PATH_DENIED_DIRS, REQUIRED_STAGING_FILES, RUNTIME_VERSIONS,
+} from './zip-manifest.mjs'
 
-export const APP_NAME = 'noc-soc-intelligent-platform'
-
-// 运行时版本固定真相源：runtime/README.md 与 Phase 0 报告 §1.2。
-export const RUNTIME_VERSIONS = { python: '3.12.10', node: '24.16.0', postgresql: '16', nginx: '1.28.0' }
+export { APP_NAME, RUNTIME_VERSIONS }
 
 /** 门禁类失败（排除断言 / 凭据扫描 / full 模式缺件）：调用方以退出码 2 区分。 */
 export class GateError extends Error {
@@ -33,121 +33,26 @@ export class GateError extends Error {
 const posix = (p) => p.split('\\').join('/')
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 白名单（显式列出；改动这里 = 改动交付内容，须经评审）
+// 路径包含判定（P0-2：跨平台正确；旧 startsWith(`${base}/`) 在 Windows 上恒为假）
 // ─────────────────────────────────────────────────────────────────────────────
 
-// 目录：递归复制（受拒绝名录过滤）。requiredIn: full 仅在 full 模式要求存在。
-const INCLUDE_DIRS = [
-  { src: 'apps/my_app/backend', requiredIn: 'any' },
-  { src: 'apps/my_app/frontend', requiredIn: 'any' },
-  { src: 'apps/my_app/alembic', requiredIn: 'any' },
-  { src: 'apps/my_app/docs', requiredIn: 'any' },
-  { src: 'apps/my_app/tests', requiredIn: 'any' },
-  { src: 'apps/my_app/tools', requiredIn: 'any' },
-  { src: 'apps/my_app/email_reports', requiredIn: 'any' },
-  { src: 'apps/my_app/monitor_fixes', requiredIn: 'any' },
-  { src: 'apps/my_app/nginx', requiredIn: 'any' },
-  { src: 'apps/portal/src', requiredIn: 'any' },
-  { src: 'apps/portal/server', requiredIn: 'any' },
-  { src: 'apps/portal/assets', requiredIn: 'any' },
-  { src: 'apps/portal/scripts', requiredIn: 'any' },
-  { src: 'apps/portal/docs', requiredIn: 'any' },
-  { src: 'apps/portal/MsPortal', requiredIn: 'any' },
-  { src: 'apps/portal/OlrPortal', requiredIn: 'any' },
-  { src: 'apps/portal/olbrportal', requiredIn: 'any' },
-  { src: 'apps/portal/v1', requiredIn: 'any' },
-  { src: 'apps/portal/v2', requiredIn: 'any' },
-  { src: 'apps/portal/v3', requiredIn: 'any' },
-  { src: 'apps/whatsapp-kb-bot/src', requiredIn: 'any' },
-  { src: 'apps/whatsapp-kb-bot/scripts', requiredIn: 'any' },
-  { src: 'apps/whatsapp-kb-bot/docs', requiredIn: 'any' },
-  { src: 'apps/whatsapp-kb-bot/knowledge', requiredIn: 'any' },
-  { src: 'apps/whatsapp-kb-bot/evals', requiredIn: 'any' },
-  { src: 'apps/eflow_Q&A', requiredIn: 'any' },
-  { src: 'apps/agent-worker', requiredIn: 'any' },
-  { src: 'apps/agent-worker-linux', requiredIn: 'any' },
-  { src: 'apps/control-plane', requiredIn: 'any' },
-  { src: 'extensions/whatsapp_sender_extension', requiredIn: 'any' },
-  { src: 'extensions/portal_login_extension', requiredIn: 'any' },
-  { src: 'ops/smoke', requiredIn: 'any' }, // 冒烟引擎本体（smoke-local.ps1 只是薄壳），供目标机自检
-  // 构建产物：仅 full 模式（工作流先 npm ci / npm run build / pip download）。
-  // node_modules 只走显式条目（通用遍历里一律跳过，避免父目录是否入白名单造成的不一致）。
-  { src: 'apps/my_app/frontend/node_modules', requiredIn: 'full' },
-  { src: 'apps/portal/node_modules', requiredIn: 'full' },
-  { src: 'apps/whatsapp-kb-bot/node_modules', requiredIn: 'full' },
-  { src: 'apps/portal/scripts/whatsapp_analysis/node_modules', requiredIn: 'full' },
-  { src: 'apps/_fe_dist', requiredIn: 'full' },
-  { src: 'apps/portal/dist', requiredIn: 'full' },
-  { src: 'wheels', requiredIn: 'full' },
-]
+/**
+ * target 是否在 base 内（含相等）。pathMod 可注入 path.win32/path.posix 做跨平台模拟。
+ */
+export function isPathInside(base, target, pathMod = null) {
+  const resolveFn = pathMod?.resolve ?? resolve
+  const relativeFn = pathMod?.relative ?? relative
+  const isAbsoluteFn = pathMod?.isAbsolute ?? isAbsolute
+  const separator = pathMod?.sep ?? sep
+  const rel = relativeFn(resolveFn(base), resolveFn(target))
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${separator}`) && !isAbsoluteFn(rel))
+}
 
-// 单文件：dest 省略时与 src 相同。required=false 的缺失只警告（P1-4 交付物、部署文档子集）。
-const INCLUDE_FILES = [
-  { src: 'apps/my_app/requirements.txt', required: true },
-  { src: 'apps/my_app/requirements.lock.txt', required: true },
-  { src: 'apps/my_app/pyproject.toml', required: true },
-  { src: 'apps/my_app/alembic.ini', required: true },
-  { src: 'apps/my_app/frontend/package.json', required: true },
-  { src: 'apps/my_app/frontend/package-lock.json', required: true },
-  { src: 'apps/portal/package.json', required: true },
-  { src: 'apps/portal/package-lock.json', required: true },
-  { src: 'apps/portal/index.html', required: true },
-  { src: 'apps/portal/vite.config.ts', required: true },
-  { src: 'apps/portal/tsconfig.json', required: true },
-  { src: 'apps/portal/scripts/whatsapp_analysis/package.json', required: true },
-  { src: 'apps/portal/scripts/whatsapp_analysis/package-lock.json', required: true },
-  { src: 'apps/whatsapp-kb-bot/package.json', required: true },
-  { src: 'apps/whatsapp-kb-bot/package-lock.json', required: true },
-  // ops/deploy 只发 §6.3 清单 + 冒烟 + 构建脚本自身；生产控制（my_portal_ctl.ps1）
-  // 与已停用的同步脚本不进包。
-  { src: 'ops/deploy/start_all.ps1', required: true },
-  { src: 'ops/deploy/stop_all.ps1', required: true },
-  { src: 'ops/deploy/write_nginx_conf.ps1', required: true },
-  { src: 'ops/deploy/env_template.txt', required: true },
-  { src: 'ops/deploy/agent-done-check.mjs', required: true },
-  { src: 'ops/deploy/lib/agent-checks.mjs', required: true },
-  { src: 'ops/deploy/smoke-local.ps1', required: true },
-  { src: 'ops/deploy/smoke-watcher.ps1', required: true },
-  { src: 'ops/deploy/install-smoke-watcher.ps1', required: true },
-  { src: 'ops/deploy/bundle_data.ps1', required: true },
-  { src: 'ops/deploy/local_authority_tools.py', required: true },
-  { src: 'ops/deploy/build-zip.mjs', required: true },
-  { src: 'ops/deploy/lib/zip-package.mjs', required: true },
-  { src: 'ops/deploy/lib/zip-writer.mjs', required: true },
-  { src: 'ops/deploy/lib/zip-dir.mjs', required: true },
-  // 根入口与模板。
-  { src: 'nginx.conf.template', required: true },
-  { src: 'start.bat', required: true },
-  { src: 'stop.bat', required: true },
-  { src: 'start.sh', required: false, note: 'P1-4 交付，缺失只警告' },
-  { src: 'stop.sh', required: false, note: 'P1-4 交付，缺失只警告' },
-  // 部署文档子集（§6.3：不含全量历史文档）。
-  { src: 'docs/workspace/部署说明.md', required: false },
-  { src: 'docs/architecture/data-source-registry.md', required: false },
-]
-
-// full 模式下暂存区内必须存在的路径（工作流须先装好依赖、建好产物、下载好 wheels）。
-const FULL_REQUIRED = [
-  { rel: 'apps/my_app/frontend/node_modules', kind: 'dir' },
-  { rel: 'apps/portal/node_modules', kind: 'dir' },
-  { rel: 'apps/whatsapp-kb-bot/node_modules', kind: 'dir' },
-  { rel: 'apps/portal/scripts/whatsapp_analysis/node_modules', kind: 'dir' },
-  { rel: 'apps/_fe_dist/index.html', kind: 'file' },
-  { rel: 'apps/portal/dist/index.html', kind: 'file' },
-  { rel: 'wheels', kind: 'wheels' },
-]
-
-// 递归复制时跳过的目录名（source 模式另加 node_modules/dist，见 assemble）。
-const DENIED_DIR_NAMES = new Set([
-  '__pycache__', '.git', '.idea', '.vscode', '.venv', 'venv', 'coverage',
-  '.pytest_cache', '.ruff_cache', '.mypy_cache', 'auth-data', 'auth_cache',
-  'db', 'data', 'log', 'logs', 'tmp', 'temp', 'TMP', 'runtime', '.cache',
-  'backup', 'backups', 'outputs', 'output', 'sessions', 'whatsapp_session',
-  'credentials', 'playwright-report', 'test-results', '.agent-work', '.workbuddy-ai',
-])
-
+// ─────────────────────────────────────────────────────────────────────────────
 // 文件名级拒绝（组装时过滤 + 断言时复核，双保险）。返回命中原因或 null。
-function deniedFileReason(rel) {
+// ─────────────────────────────────────────────────────────────────────────────
+
+export function deniedFileReason(rel) {
   const base = rel.split('/').pop()
   if (base === 'PG_VERSION') return 'PG 数据目录标记'
   if (/^\.env(\..+)?$/.test(base) && base !== '.env.example') return '.env 文件'
@@ -165,18 +70,36 @@ function deniedFileReason(rel) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 组装
+// 遍历
 // ─────────────────────────────────────────────────────────────────────────────
 
-function walkFiles(dirAbs, relBase, deniedDirs, out) {
+function pathDenied(rel, list) {
+  return list.some((p) => rel === p || rel.startsWith(`${p}/`))
+}
+
+/**
+ * 递归列出 dirAbs 下的全部文件（相对路径，posix 分隔）。
+ * opts.pathDenied：完整相对路径拒绝表（只拦应用根级数据目录）；
+ * opts.symlinkSkip：true 时跳过符号链接并记入 opts.skipped（仅 node_modules 树内用，
+ * .bin 等可再生链接不进包），false 时遇符号链接即失败（防 ZIP 跨平台逃逸）。
+ */
+export function walkFiles(dirAbs, relBase, deniedDirs, out, opts = {}) {
+  const { pathDenied: pathList = [], symlinkSkip = false, skipped = null } = opts
   for (const ent of readdirSync(dirAbs, { withFileTypes: true })) {
     const rel = relBase ? `${relBase}/${ent.name}` : ent.name
     const abs = join(dirAbs, ent.name)
     const st = lstatSync(abs)
-    if (st.isSymbolicLink()) throw new Error(`拒绝符号链接（ZIP 跨平台不可靠）: ${rel}`)
+    if (st.isSymbolicLink()) {
+      if (symlinkSkip) {
+        skipped?.push(rel)
+        continue
+      }
+      throw new Error(`拒绝符号链接（ZIP 跨平台不可靠）: ${rel}`)
+    }
     if (st.isDirectory()) {
+      if (pathDenied(rel, pathList)) continue
       if (deniedDirs.has(ent.name) || ent.name.startsWith('.')) continue
-      walkFiles(abs, rel, deniedDirs, out)
+      walkFiles(abs, rel, deniedDirs, out, opts)
     } else if (st.isFile()) {
       out.push(rel)
     }
@@ -184,16 +107,24 @@ function walkFiles(dirAbs, relBase, deniedDirs, out) {
   return out
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 组装
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
  * 按白名单把文件复制到暂存区。返回 { copied: [{rel, bytes}], warnings: [string] }。
  * mode: full（含 node_modules/dist/wheels）或 source（仅源码，跳过构建产物）。
  */
 export function assemble({ root, staging, mode }) {
-  // node_modules / dist 只走显式白名单条目（full 模式），通用遍历一律跳过——
-  // 否则“父目录是否入白名单”会让同一产物时有时无（实测抓到过此缺口）。
-  const deniedDirs = new Set(DENIED_DIR_NAMES)
-  deniedDirs.add('node_modules')
-  deniedDirs.add('dist')
+  // 通用遍历拒绝集：node_modules/dist 只走显式条目（P1-1：显式 node_modules 树内
+  // 不应用这两条，否则嵌套 node_modules 与包内 dist/ 会被丢掉）。
+  const baseDenied = new Set(BASENAME_DENIED_DIRS)
+  baseDenied.add('node_modules')
+  baseDenied.add('dist')
+  const nodeModulesDenied = new Set(baseDenied)
+  nodeModulesDenied.delete('node_modules')
+  nodeModulesDenied.delete('dist')
+  const skippedSymlinks = []
   const copied = []
   const warnings = []
   const copyOne = (rel) => {
@@ -213,7 +144,13 @@ export function assemble({ root, staging, mode }) {
       if (d.requiredIn === 'full') throw new GateError(`full 模式缺构建产物目录: ${d.src}（工作流须先构建）`)
       throw new Error(`白名单目录不存在: ${d.src}`)
     }
-    for (const rel of walkFiles(abs, d.src, deniedDirs, [])) {
+    const isNodeModules = d.src.endsWith('/node_modules')
+    const files = walkFiles(abs, d.src, isNodeModules ? nodeModulesDenied : baseDenied, [], {
+      pathDenied: PATH_DENIED_DIRS,
+      symlinkSkip: isNodeModules,
+      skipped: skippedSymlinks,
+    })
+    for (const rel of files) {
       if (deniedFileReason(rel)) continue
       copyOne(rel)
     }
@@ -226,6 +163,15 @@ export function assemble({ root, staging, mode }) {
       continue
     }
     copyOne(f.src)
+  }
+  if (skippedSymlinks.length) {
+    warnings.push(`跳过 node_modules 内符号链接 ${skippedSymlinks.length} 个（.bin 等可再生链接，不进包）：${skippedSymlinks.slice(0, 5).join(', ')}${skippedSymlinks.length > 5 ? '…' : ''}`)
+  }
+
+  // 回归断言（P0-1）：8 个曾被静默丢掉的运行时文件必须在暂存区存在。
+  const missingRequired = REQUIRED_STAGING_FILES.filter((rel) => !existsSync(join(staging, rel)))
+  if (missingRequired.length) {
+    throw new GateError(`回归断言失败（白名单丢了运行时必需文件）:\n  - ${missingRequired.join('\n  - ')}`)
   }
 
   if (mode === 'full') {
@@ -478,5 +424,3 @@ export function collectEntries(staging) {
 export function sha256Hex(buf) {
   return createHash('sha256').update(buf).digest('hex')
 }
-
-export { resolve as resolvePath }
