@@ -113,10 +113,7 @@ def download_filtered(
     # 原子替换依赖 atomic_write（含 pandas，按需懒加载一次）。必须在下方 try 之前绑定
     # AtomicReplaceFallback，否则当 retrbinary 等更早抛错时，except 子句求值该名会触发
     # UnboundLocalError 遮蔽真实错误。
-    try:
-        from .atomic_write import atomic_replace_file, AtomicReplaceFallback
-    except ImportError:
-        from atomic_write import atomic_replace_file, AtomicReplaceFallback
+    from backend.services.atomic_write import atomic_replace_file, AtomicReplaceFallback
 
     with _connect(base) as ftp:
         try:

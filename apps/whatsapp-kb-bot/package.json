@@ -45,6 +45,7 @@
   },
   "dependencies": {
     "baileys": "6.7.24",
+    "pino": "^9.6",
     "qrcode-terminal": "^0.12.0"
   }
 }
