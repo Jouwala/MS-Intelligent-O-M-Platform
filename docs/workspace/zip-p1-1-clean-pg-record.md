@@ -83,12 +83,15 @@ exists, skipping` 提示），确认幂等。
 已有表不搬家：此前已在 `public` 建好表的库，加上这两条语句后，
 后续迁移落到 `app`，存量表仍留在 `public`；是否迁移存量表不在本项范围。
 
-## 6. 附带发现（未修，待定）
+## 6. 附带发现
 
 1. **没有任何脚本跑 alembic**：全仓库 grep 不到 `alembic upgrade` 的
    脚本调用，只有文档提及。绿包首次启动只建空库，不建表；操作员须
    手动跑 `alembic upgrade head`（或用 `bundle_data.ps1` 灌快照）。
    是否由首次启动包装器代跑，需 Muse 1 定。
+   【已关闭 2026-11-18】Muse 1 于 17:20Z 决定 D1：由启动包装器代跑；
+   本轮已在 `start_all.ps1` 与 `start.sh` 落地（PG 步骤后、nginx 配置
+   前，每次启动跑 `upgrade head`，幂等，失败即停）。
 2. **`MY_APP_DB_OVERRIDE` 不能单独用**：`env.py` 文档称它可「指向测试
    PG」，但 `backend/database.py:76` 在 import 时就建引擎，pg 模式下
    要求 `DATABASE_URL` 已设置；只设 override 会在 import 处抛
