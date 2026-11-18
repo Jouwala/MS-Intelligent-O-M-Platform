@@ -81,6 +81,7 @@ export const INCLUDE_FILES = [
   // 与已停用的同步脚本不进包。
   { src: 'ops/deploy/start_all.ps1', required: true },
   { src: 'ops/deploy/stop_all.ps1', required: true },
+  { src: 'ops/deploy/noc-paths.ps1', required: true },
   { src: 'ops/deploy/write_nginx_conf.ps1', required: true },
   { src: 'ops/deploy/env_template.txt', required: true },
   { src: 'ops/deploy/agent-done-check.mjs', required: true },
