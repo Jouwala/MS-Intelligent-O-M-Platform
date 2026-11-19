@@ -49,6 +49,24 @@ WARN: list[str] = []
 INFO: list[str] = []
 
 
+def _force_utf8_stdio() -> None:
+    """Windows 控制台默认码页（cp1252 / gbk）打中文会 UnicodeEncodeError。
+
+    2026-11-19 实测：直接在普通 PowerShell 窗口跑本脚本，第一行 `源：…` 就崩
+    （`'charmap' codec can't encode`）。post-cutover-check.ps1 先前靠临时设
+    `PYTHONIOENCODING=utf-8` 绕开，但那对**手工按文档直接运行**无效。这里在
+    入口统一把 stdout/stderr 切到 UTF-8（不可 reconfig 时忽略，不影响 Linux）。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+        except (AttributeError, ValueError):
+            pass
+
+
+_force_utf8_stdio()
+
+
 def fail(msg: str) -> None:
     FAIL.append(msg)
     print("FAIL  " + msg)
