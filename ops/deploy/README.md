@@ -17,6 +17,18 @@
   `start` 清掉 `stopped.flag` 后 `schtasks /run` 三个自愈任务（与 5 分钟周期同一路径），再等端口就绪；
   `stop` 走 my_app `stop.bat` + 门户 `stop_services.ps1` + 02 的 `nginx -s quit`；`status` 打端口归属/健康/任务状态。
   桌面入口见同目录 `olbr-start.bat` / `olbr-stop.bat` / `olbr-status.bat`（快捷方式已建）。
+- `post-cutover-check.ps1` + `olbr-check.bat`：**生产检查点（手动执行，刻意不挂定时）**。
+  把 2026-11-19 切换后那次人工复核的检查项固化成一条命令：端口与进程归属（80/443 必须归本树
+  nginx）、HTTP 探活（80/443、7038 health 的 `db_mode=pg`、7090、9267/9268）、openapi 特征路由
+  （证明跑的是本树代码）、近 N 小时任务失败率与 Top 失败任务、17 个原生看板（预热后逐页核对
+  failed / stale / 组件 error / 数据里最新日期）、关键看板数据新鲜度（CXO、CN KPI、OLIB、可用率、
+  MW、丢包、电池、SOC、MS SLA、eFlow）、WhatsApp bot 与 notify 心跳及 4 个计划任务指向、外部
+  EWS 可达性（只报告不判失败）。`-Render` 额外用 Playwright 渲染 10 个看板页抓 console error。
+  **只读为主**：唯一的写操作是触发原生看板预热（`-NoPrewarm` 可关）和在
+  `TMP\post-cutover-check\<时间戳>.json` 落一份报告（不入库）。有 FAIL 时 exit 1。
+  用法：双击 `olbr-check.bat`，或
+  `powershell -NoProfile -ExecutionPolicy Bypass -File ops\deploy\post-cutover-check.ps1 [-Render] [-NoPrewarm] [-SinceHours 12]`。
+  默认 ~20 秒；`-Render` 约 +60 秒。伴生渲染脚本：`post-cutover-render.py`（缺 playwright 自动 SKIP）。
 - `cutover/`：**生产切换（D:\01 → D:\02）专用**
   - `snapshot-prod-state.ps1`：切前只读快照（端口归属 / 守护任务状态 / 02 的 .env
     端口键 / 两侧 nginx.conf / 三表行数），落 `TMP\cutover\<时间戳>\`，不入库；

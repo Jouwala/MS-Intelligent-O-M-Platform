@@ -170,7 +170,16 @@ function Set-ParamDefault {
     return [regex]::Replace($Text, $pattern, $evaluator)
 }
 
-$httpPort = Read-EnvPort -Key 'NGINX_HTTP_PORT' -Default 8080
+# 生产树（根目录有 PRODUCTION.flag）的 nginx 跑在 80/443；根 .env 里仍是隔离副本时期的
+# 8080/8443。直接套用 .env 会把 nginx 看门狗改成探测 8080 —— 每 5 分钟误判一次「挂了」
+# 并重启 nginx。2026-11-19 实测：一次 git checkout 就把 NginxPort 从 80 改回 8080
+# （02 于 11-18 切成生产，但根 .env 的端口没跟着改）。隔离副本照旧读 .env。
+$productionFlag = Join-Path $CopyRoot 'PRODUCTION.flag'
+$httpPort = if (Test-Path -LiteralPath $productionFlag) {
+    80
+} else {
+    Read-EnvPort -Key 'NGINX_HTTP_PORT' -Default 8080
+}
 $nginxDir = Join-Path $CopyRoot 'nginx-1.28.0'
 $nginxExe = Join-Path $nginxDir 'nginx.exe'
 $logPath = Join-Path $CopyRoot 'apps\nginx_monitor.log'
