@@ -360,7 +360,18 @@ function Start-Detached {
 }
 
 # ------------------------------------------------------------- 0) 启动预检
-# 先验隔离标志与所有核心入口，避免起了一半才发现缺文件（部分启动会留下脏端口）。
+# 先验角色标记与所有核心入口，避免起了一半才发现缺文件（部分启动会留下脏端口）。
+# 2026-11-19 起两个标记互斥：PRODUCTION.flag = 这台机跑生产 80/443（本脚本的
+# 非 -Production 分支会改 backend\.env、起便携 PG 55432、往 8080/8443 起第二套，
+# 所以必须先拒绝）；ISOLATED_COPY.flag = 真正的便携副本。
+if (Test-Path -LiteralPath (Join-Path $Root 'PRODUCTION.flag')) {
+    throw @'
+这是生产树（根目录有 PRODUCTION.flag），拒绝用隔离启动器启动。
+生产启停走 ops\deploy\portal-ctl.ps1 -Action start|stop（桌面 olbr-*.bat 也是它），
+或本脚本加 -Production（等价于委托 portal-ctl）。
+继续走非 -Production 分支会改 backend\.env、起便携 PG 55432、往 8080/8443 起第二套。
+'@
+}
 if (-not (Test-Path -LiteralPath (Join-Path $Root 'ISOLATED_COPY.flag'))) {
     throw '缺 ISOLATED_COPY.flag：本脚本只能在便携副本里运行，拒绝在主仓库启动'
 }

@@ -1,10 +1,13 @@
-# ops/deploy — 02 副本的运维脚本目录
+# ops/deploy — 02 的运维脚本目录
 
-本目录是隔离副本（`D:\02_olbr_portal`）的运维脚本目录，由第一轮重构批 C
-从仓库根的 `scripts\` 搬入。入口：
+本目录是 `D:\02_olbr_portal` 的运维脚本目录，由第一轮重构批 C 从仓库根的
+`scripts\` 搬入。**2026-11-18/19 起 02 就是生产树**（80/443/7038/7090/9267/9268，
+PG 5432），所以本目录同时装着「生产启停」与「便携/冒烟副本的隔离启动」两套工具 ——
+它们靠根目录的**角色标记**区分，见下节。入口：
 
-- 根 `start.bat` / `stop.bat` → `start_all.ps1` / `stop_all.ps1`
-  （一键启动 / 停止本副本的四个子系统：my_app、portal、nginx、WhatsApp bot）
+- 根 `start.bat` / `stop.bat`：**按标记分流**（2026-11-19 改）
+  - 有 `PRODUCTION.flag` → `portal-ctl.ps1 -Action start|stop`（生产栈）
+  - 否则 → `start_all.ps1` / `stop_all.ps1`（隔离副本）
 - 根 `start.sh` / `stop.sh` → `start.sh` / `stop.sh`
   （Linux 一键启动 / 停止本副本，对标 Windows 版；要求 POSIX sh + GNU coreutils）
 - `ops/shortcuts/` 里的分步入口 bat（状态 / 启停 / nginx 只读检查 / 打开首页与日志 / 重建桌面快捷方式）：
@@ -32,8 +35,10 @@
   - `cutover-to-02.ps1`：**切**。默认干跑，`-Apply` 才动；停 01（自愈任务 / my_app / 01_RPA 门户 / nginx）→
     搬门户状态 → 用 01 的 `backend\.env` 生成 02 的（路径改写 + 调度器 0 + CA 证书）→ 生产端口 nginx →
     用 02 自带的 `apps\my_app\start_hidden.ps1`、`apps\portal\start_hidden.ps1` 起栈 → 探活 → 写 manifest。
-    **不要用 `start_all.ps1` 切生产**：它是隔离启动器（生产端口直接 throw、强制关调度器、DATABASE_URL 指 55432）；
-  - `rollback-to-01.ps1`：切换失败时把线上拉回 01（用 02 自己的 `stop.bat` 停栈 → 还原 `.env.bak_cutover_*` →
+    **不要用 `start_all.ps1` 切生产**：它是隔离启动器（强制关调度器、DATABASE_URL 指 55432、
+    起便携 PG 与 8080/8443）。2026-11-19 起它在生产树上会直接 throw（见「角色标记」一节）；
+  - `rollback-to-01.ps1`：切换失败时把线上拉回 01（用 02 的 `apps\my_app\stop.bat` +
+    `apps\portal\stop.bat` + `nginx -s quit` 停栈 → 还原 `.env.bak_cutover_*` →
     恢复并触发 01 的守护任务 → 探活），**不碰数据库**；先 `-DryRun` 再实跑；
   - 操作底稿见 `docs/workspace/cutover-2026-11-20.md`。
 - `sync-ui-config-from-01.ps1`：把生产（`D:\01_olbr_portal`）的三份「全局 UI 配置」
@@ -135,6 +140,27 @@ Agent 在对话里长轮询 CI（`gh pr checks` 循环等待）**极耗 token，
   检出后须 `chmod +x` 或用 `sh` 显式调用。见 `docs/workspace/zip-external-dirs.md` §6
 - `runtime-manifest.json`：运行时发行包清单（`runtime-build.yml` 驱动下载与
   SHA256 校验；`url`/`sha256` 为空的条目禁止构建，须从官方渠道核实后补齐）
+
+## 角色标记：PRODUCTION.flag / ISOLATED_COPY.flag（2026-11-19）
+
+同一套脚本要服务「这台机器是生产」和「这台机器是便携/冒烟副本」两种角色，角色
+**只由根目录的两个标记决定，且必须二选一**（两个都是本机运行态文件，不入库）：
+
+| 标记 | 谁写 | 含义 | 端口 |
+| --- | --- | --- | --- |
+| `PRODUCTION.flag` | 切生产时人工放（当前这棵树有） | 生产树，任务调度器在跑 | 80/443/7038/7090/9267/9268，PG 5432 |
+| `ISOLATED_COPY.flag` | `provision-smoke-runner.ps1` / 打包脚本 | 便携副本 / 冒烟副本 | 8080/8443/7039/7091/9277，便携 PG 55432 |
+
+守卫生效的地方（都是「角色不明就不跑」，不是静默降级）：
+
+- 根 `start.bat` / `stop.bat`：按标记分流到 `portal-ctl.ps1` 或 `start_all.ps1` / `stop_all.ps1`；
+- `start_all.ps1`：见到 `PRODUCTION.flag` 直接 throw（否则会改 `backend\.env`、起 55432 的第二套 PG）；
+- `stop_all.ps1`：见到 `PRODUCTION.flag` 直接 throw（它会 `nginx -s quit` 关掉线上入口，却停不到生产后端）；
+- `my_portal_ctl.ps1`：两种角色下都只允许 `0-status`（老控制器不再驱动启停）；
+- `ops/quality/check_all.ps1`：步骤 1 要求标记二选一，步骤 2（`.env` 端口断言）只在隔离副本上跑；
+- `post_sync_fix_paths.ps1`（git 钩子）：据 `PRODUCTION.flag` 决定 nginx 看门狗端口写 80 还是按 `.env`。
+
+背景与后果见 `docs/adr/0003-production-vs-isolated-markers.md`（ADR 0002 的隔离前提已被切生产取代）。
 
 ## 已停用：从 RPA（主仓库）来的同步
 

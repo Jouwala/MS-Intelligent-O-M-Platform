@@ -30,22 +30,24 @@
 | `apps\whatsapp-kb-bot\` | **WhatsApp 知识库问答 bot**（与 my_app 同级，叶子名不改） | Node | `apps\whatsapp-kb-bot\docs\` |
 | `apps\eflow_Q&A\` | **eFlow 知识库**（问答/排障文档，含 `tools\inspect_tt.py`） | Markdown + Python | `apps\eflow_Q&A\README.md` |
 | `LBR_Tools\`、`Unified_Tools\`、`openclaw_api_selector\`、`ticket_export_rpa\` | 工具与 RPA 脚本集 | Python / 混合 | 各自目录 |
-| `chrome-win\`、`whatsapp*\`、`scheduler_logs\`、`report\` | 运行时依赖与产出 | — | 一般不直接改。nginx 也在运行时依赖之列：本机 (.20) 生效目录是 `D:\01_RPA\nginx-1.28.0\`（2026-10-01 从 Y: 网络映射盘搬回本地，已加入 `.gitignore`）；`Y:\01_RPA\nginx-1.28.0\` 是 **.19 那台**在用的，不要动（见第四节第 6b 条） |
+| `chrome-win\`、`whatsapp*\`、`scheduler_logs\`、`report\` | 运行时依赖与产出 | — | 一般不直接改。nginx 也在运行时依赖之列：**本机 (.20) 生效目录自 2026-11-18/19 起是 `D:\02_olbr_portal\nginx-1.28.0\`**（切生产后由 02 托管 80/443，已加入 `.gitignore`）；`D:\01_RPA\nginx-1.28.0\` 与 `Y:\01_RPA\nginx-1.28.0\`（**.19 那台**在用）都不要动（见第四节第 6b 条） |
 
-### ⭐ 编辑区 ≠ 运行副本（2026-11-11 用户确认，全工作区最易踩的坑）
+### ⭐ 编辑区 ≠ 运行副本（2026-11-11 定；2026-11-18/19 切生产后改写）
 
 | | 路径 | 角色 |
 | --- | --- | --- |
-| **工作区 / 隔离副本** | `D:\02_olbr_portal` | **改代码的地方**。git 仓库、文档、手册、守卫脚本都在这里；也是隔离运行的副本（8080/8443/7039/7091/9277/55432）。 |
-| **生产** | `D:\01_olbr_portal` | **实际跑起来的地方**。2026-11-11 起接管 80/443/7038/7090/9267/5432。**本轮重构不动。** |
+| **生产（当前）** | `D:\02_olbr_portal` | 2026-11-18/19 起接管 80/443/7038/7090/9267/9268（PG 5432）。git 仓库、文档、守卫脚本与实际运行的东西**都在这里**；根目录有 `PRODUCTION.flag`。启停走 `ops\deploy\portal-ctl.ps1`（或桌面 `olbr_app` 的三个链接），不要再走 `start_all.ps1`。 |
+| **回退目标（已退役）** | `D:\01_olbr_portal` | 切生产前的旧线，只有 `ops\deploy\cutover\rollback-to-01.ps1` 会碰它。日常**不要再往这里改代码、起服务**。 |
 
-**工作流：在 `D:\02_olbr_portal` 改完 → 按 `ops\deploy\README.md` 隔离启动验证；生产（`D:\01_olbr_portal`）本轮不动。**
+**工作流：在 `D:\02_olbr_portal` 改完 → `node ops\deploy\agent-done-check.mjs` → 改动走 PR；生产启停用 `portal-ctl.ps1 -Action start|stop|status`。** 只同步源码、只重启一个进程都不算验证（见下）。
 
 > ⚠ 从主仓库（`D:\01_RPA`）来的同步已随第一轮重构批 C 停用：根 `sync-now.bat` 已删除，`ops\deploy\sync-engine.mjs` / `sync-policy.mjs` 只保留备查，`sync_from_main.ps1` 禁止对这个新目录跑。不要在这里恢复同步入口。详见 `ops\deploy\README.md`「已停用」一节。
 
-隔离启动只走 `ops\deploy\start_all.ps1`（方案第 8.3 节）；启动前确认调度器关闭、WhatsApp bot 关闭、`.env` 是 02 的隔离配置。
+**角色标记（2026-11-19，两个互斥）**：根目录的 `PRODUCTION.flag` = 这台机跑生产端口；`ISOLATED_COPY.flag` = 便携/冒烟副本（`provision-smoke-runner.ps1` 写在 runner 里）。生产树只应有前者。两个都在或都不在时，`start.bat` / `stop.bat` / `start_all.ps1` / `stop_all.ps1` / `check_all.ps1` 一律拒绝执行（角色不明宁可不跑）。细节见 `ops\deploy\README.md`「角色标记」与 `docs/adr/0003-production-vs-isolated-markers.md`。
 
-**为什么必须用这个脚本，不能只「同步源码」**（2026-11-11 实测事故）：
+隔离副本（打包机 / 冒烟 runner）的启停仍走 `ops\deploy\start_all.ps1` / `stop_all.ps1`；**生产树上禁止用它们** —— 它们会改 `apps\my_app\backend\.env`、起 55432 的第二套便携 PG、往 8080/8443 起第二套服务。
+
+**为什么不能只「同步源码」**（2026-11-11 实测事故）：
 
 - 同步只搬**源码**；前端是**构建产物**（`apps\_fe_dist`）、后端是**常驻进程**，两者都不吃源码变更。
 - 只同步不重建 → 副本前端仍是旧界面；只重建不重启 → 后端仍是旧接口。
@@ -127,32 +129,25 @@
    - 提交前用 `git status --porcelain` 复查有没有被忽略规则漏掉的运行时文件混进来。
 5. **不要新增第二个真相源。** 现状文档以各子系统的 `docs/manual/` 与 `README.md` 为准；`docs\archive\PROJECT_DOCS.md`（151KB）是**历史档案**（迁移计划、架构评估、i18n 审计、失败复盘），其自身 README 已声明「现状以 `docs/manual/` 为准」。**不要**把现状写回 `PROJECT_DOCS.md`。
 6. **破坏性操作先确认。** 删除目录、批量移动、改数据库、动 nginx 配置、重启生产服务（7038/7090/9267）前，先说明影响面并取得确认。工作区里有多个 `start.bat` / `stop.bat` / `*_ensure.bat`，误跑会打断在看板上看数据的人。
-6b. **本机（MSNOC1 / .20）nginx 的生效目录是 `D:\01_RPA\nginx-1.28.0\`（本地盘）。2026-10-01 起如此。** 这条经历过两次事故，务必按现状操作：
-   - **生效位置**：`D:\01_RPA\nginx-1.28.0\`，nginx 进程的 `ExecutablePath` 就来自这里。**改本机配置只改 `D:\01_RPA\nginx-1.28.0\conf\nginx.conf`。**
-   - **为什么搬离 Y 盘（2026-10-01）**：此前本机 nginx 跑在 `Y:\01_RPA\nginx-1.28.0\`（网络映射 `\\192.168.100.19\e`，即 .19 的 E 盘），nginx.exe、conf、logs、temp **全在网络盘上**。2026-09-30 21:56~22:15 nginx 猝死，`error.log` **无 crash 痕迹**（仅 warning 级 buffered-to-temp），系统日志也无崩溃/关机事件，判定为 **SMB 网络盘 I/O 阻塞**。遂复制一份到本地 D 盘运行。
-   - **`.19` 仍使用 Y: 上那份**：搬移方式是**复制而非移动**，`Y:\01_RPA\nginx-1.28.0\` **保持原样、不要删也不要改**（那是 .19 的线上目录）。所以现在有**两份配置**，改配置前先想清楚改的是哪台机器的：
-     - 本机 .20 生效：`D:\01_RPA\nginx-1.28.0\conf\nginx.conf` ← **改这个**
-     - .19 生效：`\\192.168.100.19\e\01_RPA\nginx-1.28.0\conf\nginx.conf`
+6b. **本机（MSNOC1 / .20）nginx 的生效目录是 `D:\02_olbr_portal\nginx-1.28.0\`（2026-11-18/19 切生产后）。** 这条经历过两次事故，务必按现状操作：
+   - **生效位置**：`D:\02_olbr_portal\nginx-1.28.0\`，80/443 的 nginx 进程 `ExecutablePath` 来自这里。**改本机配置只改 `D:\02_olbr_portal\nginx-1.28.0\conf\nginx.conf`。**
+   - **历史（2026-10-01 ~ 2026-11-18）**：那时 80/443 由 `D:\01_RPA\nginx-1.28.0\` 持有；`D:\01_RPA\nginx-1.28.0\` 现在**已不持有 80/443**，不要再改它。`D:\01_olbr_portal\nginx-1.28.0\` 更只是切换前的旧线，只作为回退目标存在。
+   - **为什么当年搬离 Y 盘（2026-10-01）**：此前 nginx 跑在 `Y:\01_RPA\nginx-1.28.0\`（网络映射 `\\192.168.100.19\e`，即 .19 的 E 盘），nginx.exe、conf、logs、temp **全在网络盘上**。2026-09-30 21:56~22:15 nginx 猝死，`error.log` **无 crash 痕迹**（仅 warning 级 buffered-to-temp），系统日志也无崩溃/关机事件，判定为 **SMB 网络盘 I/O 阻塞**。教训仍然有效：**nginx 的目录永远放本地盘**。
+   - **`.19` 仍使用 Y: 上那份**：搬移方式是**复制而非移动**，`Y:\01_RPA\nginx-1.28.0\` **保持原样、不要删也不要改**（那是 .19 的线上目录，配置是 `\\192.168.100.19\e\01_RPA\nginx-1.28.0\conf\nginx.conf`）。
    - **执行 `-s reload` / `-s quit` 必须先进到该 nginx 自己的目录**。nginx 从**自己所在目录**的 `logs\nginx.pid` 读 master pid；在错误目录执行会读到已死 pid，信号发给不存在的进程——**命令不报错到操作者眼前，只在日志里留一行 `OpenEvent(...) failed`**。2026-09-28 实测：reload 打到 `91864`，真正的 master 完全未收到信号，nginx 随后停止服务直至人工重启。
-   - **正确写法**（先验证语法再重载）：
+   - **正确写法**（先验证语法再重载；注意运行中的 nginx 会占着 `logs\access.log`，此时 `-t` 会报 access denied，见 `ops/shortcuts/5-nginx-check.bat` 的注释）：
      ```
-     cd D:\01_RPA\nginx-1.28.0
+     cd D:\02_olbr_portal\nginx-1.28.0
      .\nginx.exe -t              # 改配置后先验证
      .\nginx.exe -s reload       # 平滑重载
      ```
-     ⚠ 桌面 `olbr_app\nginx-Stop.lnk` 的 `WorkingDirectory` **仍指向 Y 盘**（2026-10-01 未同步更新），它现在停的是 .19 那台，**对本机无效**。停本机请用上面 `cd D:` 的写法。
-   - **存活监控**：计划任务 `Nginx_EnsureRunning`（每 5 分钟）调 `Task\my_app\monitor_fixes\nginx_monitor.ps1` 巡检本机 80 端口，挂了自动拉起；日志在 `Task\nginx_monitor.log`。脚本的 `NginxExe`/`NginxDir` 已同步改为 `D:\01_RPA\nginx-1.28.0`（Version 4）。**日志轮转 `门户\rotate_nginx_logs.ps1` 的 `-Prefix` 默认值必须与之一致**，否则会去轮转 Y: 上的旧目录。
-   - **已隔离的历史副本**：早期 `D:\01_RPA\nginx-1.28.0\` 曾是另一份**配置分叉**的发行包（缺 `/v2/olbrportal/`），已于 2026-09-29 移入 `_quarantine_20260929_nginx_dup\`。**注意：它与现在这份新的 D 盘目录同名但无关** —— 那份是历史遗留，这份是 2026-10-01 从 Y: 复制来的现役副本。
-   - **`D:\01_RPA\nginx-1.28.0\` 已加入根 `.gitignore`**（第三方发行包，非源码）。**忽略跟踪 ≠ 可以删除**：它是本机线上服务目录，`nginx.exe` 与 `conf\` 必须留在磁盘上。
-   - **⚠️ 2026-11-11 起本机有两套 nginx 进程并存**，这是「编辑区 ≠ 运行副本」带来的副作用：
-     - `D:\01_RPA\nginx-1.28.0\nginx.exe` —— **持有 80/443 的那一份**（本节上文说的生效目录，配置仍改这里）；
-     - `D:\01_olbr_portal\nginx-1.28.0\nginx.exe` —— 运行副本自带的副本（副本的 `start_all.ps1` 会拉起它）。
-     - **两份配置会互相覆盖对方的 `conf\nginx.conf`**（副本 `write_nginx_conf.ps1` 按 `.env` 重新生成），且 `logs\nginx.pid` 各读各的。**改配置前先确认 80/443 的归属**：
-       ```powershell
-       netstat -ano | Select-String ':80 .*LISTENING'   # 拿到 pid
-       Get-CimInstance Win32_Process -Filter "ProcessId=<pid>" | Select ExecutablePath
-       ```
-     - 2026-11-11 实测：80/443 的归属在排查期间**来回变过两次**（`D:\01_olbr_portal` → `D:\01_RPA`），排查期间看到「nginx 突然 502 / 后端连不上」时，**先查归属再查后端**。
+     桌面 `olbr_app\nginx-Stop.lnk` 已于 2026-11-18 重建，`WorkingDirectory` 指向 `D:\02_olbr_portal\nginx-1.28.0`，可以用；但手工操作仍以上面的 `cd` 写法为准。
+   - **存活监控**：计划任务 `Nginx_EnsureRunning`（每 5 分钟）跑 `D:\02_olbr_portal\apps\my_app\monitor_fixes\nginx_monitor_hidden.vbs` → `nginx_monitor.ps1`，巡检本机 80 端口，挂了自动拉起；日志在 `apps\nginx_monitor.log`（状态在 `apps\nginx_monitor.state`）。脚本的 `NginxExe`/`NginxDir`/`LogPath`/`StatePath` **按自身位置向上推仓库根**（2026-11-18 `ac820f7` 去掉写死盘符），当前推出来就是 `D:\02_olbr_portal\...`。**日志轮转 `apps\portal\rotate_nginx_logs.ps1` 的 `-Prefix` 默认值同样按仓库根推导**，改一处必须改另一处，否则会去轮转旧目录。
+   - **改配置前先确认 80/443 的归属**（历史上归属来回变过两次，排查「nginx 突然 502 / 后端连不上」时先查归属再查后端）：
+     ```powershell
+     netstat -ano | Select-String ':80 .*LISTENING'   # 拿到 pid
+     Get-CimInstance Win32_Process -Filter "ProcessId=<pid>" | Select ExecutablePath
+     ```
 
 
 7. **一次性探针与转储只能落 `TMP\`，并且任务结束前自清。** 这条约定已经失效过三次，每次都有记录：`7b1d33b`（根目录 98 个探针脚本随提交入库）、`_myapp_trash_20260918\`、以及 2026-09-24 的审计（门户 506 个被跟踪文件里 347 个是探针/转储/手工快照/日志，`apps\_fe_dist` 有 5240 个构建产物入库）。所以拆成可执行的四条：
