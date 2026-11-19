@@ -15,7 +15,11 @@
 #
 # Linux 运行时布局（与 runtime-build.yml 的解压布局一致）：
 #   <RuntimeDir>/node/bin/node、python312/bin/python3、
-#   postgresql16/bin/{initdb,pg_ctl,psql,createdb}、nginx-1.28.0/{sbin/,}nginx
+#   postgresql16/lib/postgresql/16/bin/{initdb,pg_ctl,psql,createdb}、
+#   nginx-1.28.0/{sbin/,}nginx
+# PG 用 PGDG .deb 解包：二进制按 Debian 前缀结构排布
+# （lib/postgresql/16/bin + share/postgresql/16），否则 postgres 重定位失败、
+# initdb 找不到 timezonesets（2026-11-19 实测；平铺布局不可用）。
 # Python 解释器名按 python3 → python3.12 → python 依次探测（Linux 侧 Python
 # 来源待定，见 Phase 0 附录 B；探测不到时预检报错，不静默回退系统解释器）。
 # =============================================================================
@@ -114,7 +118,10 @@ noc_paths() {
   fi
   NP_NODE_EXE="$NP_RUNTIME_DIR/node/bin/node"
   NP_PY_EXE=$(_np_resolve_py_exe "$NP_RUNTIME_DIR")
-  NP_PG_BIN="$NP_RUNTIME_DIR/postgresql16/bin"
+  NP_PG_BIN="$NP_RUNTIME_DIR/postgresql16/lib/postgresql/16/bin"
+  NP_PG_LIB="$NP_RUNTIME_DIR/postgresql16/lib/postgresql/16/lib"
+  # libpq.so.5 只在运行时 lib/ 里：psql/createdb 等客户端须经此路径解析。
+  export LD_LIBRARY_PATH="$NP_PG_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
   NP_NGINX_EXE=$(_np_resolve_nginx_exe "$NP_NGINX_DIR")
 }
 
