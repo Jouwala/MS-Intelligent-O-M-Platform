@@ -37,7 +37,7 @@ $Root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
 $Watcher = Join-Path $Root 'ops\deploy\smoke-watcher.ps1'
 $PsExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 
-if ($Root -notlike '*02_olbr_portal') { throw "当前目录不是 02（$Root），拒绝执行。" }
+if ($Root -notlike '*02_olbr_portal*') { throw "当前目录不是隔离副本（$Root），拒绝执行。" }
 if (-not (Test-Path -LiteralPath $Watcher)) { throw "找不到 watcher：$Watcher" }
 
 function Stop-RunningWatchers {
