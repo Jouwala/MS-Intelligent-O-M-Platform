@@ -1,0 +1,242 @@
+# 运行时 ZIP 构建（Phase 1 P1-5）
+#
+# 触发：仅手动 dispatch。运行时发行包变化慢，与应用分开发布（Phase 0 报告 §6.1）。
+# 产物：noc-soc-runtime-<运行时版本>-<平台>.zip + .sha256。
+#
+# 安全门：下载的每个发行包都必须用 ops/deploy/runtime-manifest.json 里的官方
+# SHA256 校验；清单里 url/sha256 为空的条目会直接失败——禁止无哈希构建。
+# 清单未补齐前本工作流跑不通，这是故意的：哈希须从官方渠道核实后人工补齐。
+# 2026-11-19：linux-x64 清单已补齐（node/python 通用循环；nginx 源码编译；
+# postgresql 从 PGDG .deb 组装），见 runtime-manifest.json。
+#
+# 布局：ZIP 根部为 python312/、node/、postgresql16/、nginx-1.28.0/ + runtime-info.json，
+# 解压到 <NOC_HOME>/runtime/。注意：现行 start_all.ps1 期望 nginx 在版本根目录的
+# nginx-1.28.0/，P1-6 改造启动脚本时收口这一差异（见 zip-build-release.md）。
+# 地图瓦片 liberia.pmtiles 不在 v1 内（来源未核实，Phase 0 附录 B）。
+#
+# 2026-11-19 #173：Windows 版 jq 输出 CRLF（行尾 \r\n）。bash 的 $(...)
+# 只去掉 \n，\r 会残留在变量里（NAME="nginx\r" 导致清单查 URL 得 null，
+# curl 解析主机 "null" 失败，exit 6）。本工作流所有用 jq 的 run 块都在
+# 开头定义 jq() 包装（command jq "$@" | tr -d '\r'），统一去掉 \r；
+# Linux 下 jq 输出本就是 LF，此处理无操作。新增 jq 调用须走此包装。
+
+name: runtime-build
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release 标签（留空则只上传 artifact，不发布）'
+        type: string
+        default: ''
+      dry_run:
+        description: '只构建不发布（预演）'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write # 创建 Release + 上传产物（仅此工作流）
+  actions: read
+
+concurrency:
+  group: runtime-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: 构建运行时 ${{ matrix.platform }}
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            platform: win-x64
+          - os: ubuntu-latest
+            platform: linux-x64
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: 工具预检（tar/jq/sha256sum/curl/tr）
+        run: command -v tar jq sha256sum curl tr || { echo "错误：缺构建工具（GitHub 托管 runner 应预装 tar/jq/sha256sum/curl/tr；自托管 runner 须补齐，见 zip-build-release.md）"; exit 1; }
+
+      - name: 解析清单版本
+        id: manifest
+        run: |
+          # 去 CRLF（Windows jq 输出 \r\n；见文件头 #173）
+          jq() { command jq "$@" | tr -d '\r'; }
+          echo "version=$(jq -r .version ops/deploy/runtime-manifest.json)" >> "${GITHUB_OUTPUT}"
+
+      - name: 清单完整性门禁（缺 url/sha256 即失败）
+        run: |
+          # 去 CRLF（Windows jq 输出 \r\n；见文件头 #173）
+          jq() { command jq "$@" | tr -d '\r'; }
+          PLATFORM="${{ matrix.platform }}"
+          MISSING=$(jq -r --arg p "${PLATFORM}" '.platforms[$p] | to_entries[] | select(.value.url == null or .value.sha256 == null) | .key' ops/deploy/runtime-manifest.json)
+          if [ -n "${MISSING}" ]; then
+            echo "错误：运行时清单缺 url/sha256：${MISSING}"
+            echo "请从官方渠道核实后补齐 ops/deploy/runtime-manifest.json，本工作流拒绝无哈希构建。"
+            exit 1
+          fi
+          echo "清单完整，继续构建。"
+
+      - name: 安装 Linux 构建依赖（仅 linux-x64）
+        if: matrix.platform == 'linux-x64'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq build-essential libpcre2-dev libssl-dev zlib1g-dev
+
+      - name: 下载 + 验哈希 + 组装
+        run: |
+          set -euo pipefail
+          # 去 CRLF（Windows jq 输出 \r\n；见文件头 #173）
+          jq() { command jq "$@" | tr -d '\r'; }
+          PLATFORM="${{ matrix.platform }}"
+          mkdir -p downloads runtime-staging
+          for NAME in $(jq -r --arg p "${PLATFORM}" '.platforms[$p] | keys[]' ops/deploy/runtime-manifest.json); do
+            # Linux 专用条目由后续专用步骤处理，通用循环跳过：
+            # nginx（build=source，从源码编译）、postgresql（debs，
+            # 从 PGDG .deb 组装）。win-x64 全部走通用循环。
+            if [ "$(jq -r --arg p "${PLATFORM}" --arg n "${NAME}" '.platforms[$p][$n] | has("build") or has("debs")' ops/deploy/runtime-manifest.json)" = "true" ]; then
+              echo "跳过 ${NAME}（由专用步骤处理）"
+              continue
+            fi
+            URL=$(jq -r --arg p "${PLATFORM}" --arg n "${NAME}" '.platforms[$p][$n].url' ops/deploy/runtime-manifest.json)
+            SHA=$(jq -r --arg p "${PLATFORM}" --arg n "${NAME}" '.platforms[$p][$n].sha256' ops/deploy/runtime-manifest.json)
+            DIR=$(jq -r --arg p "${PLATFORM}" --arg n "${NAME}" '.platforms[$p][$n].dir' ops/deploy/runtime-manifest.json)
+            STRIP=$(jq -r --arg p "${PLATFORM}" --arg n "${NAME}" '.platforms[$p][$n].strip' ops/deploy/runtime-manifest.json)
+            FILE="downloads/${NAME}-$(basename "${URL}")"
+            echo "下载 ${NAME}：${URL}"
+            curl -L --fail --retry 2 -o "${FILE}" "${URL}"
+            echo "${SHA}  ${FILE}" | sha256sum -c -
+            mkdir -p "runtime-staging/${DIR}"
+            # --no-same-owner：以 root 解包时 tar 默认 --same-owner，
+            # 归属 uid 在沙箱/容器里不存在即 exit 2（2026-11-19 本地实测）；
+            # 非 root 时本就是默认行为，加此旗标两边都稳。
+            tar -xf "${FILE}" --no-same-owner -C "runtime-staging/${DIR}" --strip-components="${STRIP}"
+            echo "${NAME} 已组装到 runtime-staging/${DIR}"
+          done
+          node -e "
+            const fs = require('fs');
+            const m = JSON.parse(fs.readFileSync('ops/deploy/runtime-manifest.json', 'utf8'));
+            const info = { name: 'noc-soc-runtime', version: m.version, platform: '${PLATFORM}', components: {} };
+            for (const [k, v] of Object.entries(m.platforms['${PLATFORM}'])) info.components[k] = v.version;
+            fs.writeFileSync('runtime-staging/runtime-info.json', JSON.stringify(info, null, 2) + '\n');
+          "
+          echo "组装完成。"
+
+      # Linux nginx：官方无二进制包，从源码编译（D3 决定：官方源码 +
+      # --prefix + -p/-c 重定位）。--prefix 会 baked 进二进制：部署时
+      # 启动脚本须用 -p/-c 把 nginx 重定位到 <NOC_HOME>/runtime/nginx-1.28.0。
+      - name: 编译 nginx 源码（仅 linux-x64）
+        if: matrix.platform == 'linux-x64'
+        run: |
+          set -euo pipefail
+          # 去 CRLF（Windows jq 输出 \r\n；见文件头 #173）
+          jq() { command jq "$@" | tr -d '\r'; }
+          PLATFORM="${{ matrix.platform }}"
+          URL=$(jq -r --arg p "${PLATFORM}" '.platforms[$p].nginx.url' ops/deploy/runtime-manifest.json)
+          SHA=$(jq -r --arg p "${PLATFORM}" '.platforms[$p].nginx.sha256' ops/deploy/runtime-manifest.json)
+          DIR=$(jq -r --arg p "${PLATFORM}" '.platforms[$p].nginx.dir' ops/deploy/runtime-manifest.json)
+          FILE="downloads/nginx-$(basename "${URL}")"
+          mkdir -p downloads nginx-build
+          echo "下载 nginx 源码：${URL}"
+          curl -L --fail --retry 2 -o "${FILE}" "${URL}"
+          echo "${SHA}  ${FILE}" | sha256sum -c -
+          tar -xf "${FILE}" --no-same-owner -C nginx-build --strip-components=1
+          PREFIX="${PWD}/runtime-staging/${DIR}"
+          cd nginx-build
+          ./configure --prefix="${PREFIX}" --with-http_ssl_module
+          make -j2
+          make install
+          [ -x "${PREFIX}/sbin/nginx" ] || { echo "错误：nginx 编译后缺 sbin/nginx"; exit 1; }
+          "${PREFIX}/sbin/nginx" -v
+          echo "nginx 编译完成：$(du -sh "${PREFIX}" | cut -f1)"
+
+      # Linux PostgreSQL：EDB 不提供 Linux 二进制包，用 PGDG 官方 APT 仓库
+      # 的 .deb 解包组装（用户 2026-11-18 定）。清单 postgresql.debs 列出
+      # 全部 .deb（url+sha256 逐项来自签名索引，见 runtime-manifest.json）。
+      # 注意：libpq5 在 PGDG 是单一包，当前 18.7（Source: postgresql-18），
+      # 满足 postgresql-16 对 libpq5 (>= 16~~) 的依赖；libpq.so.5 只在
+      # staged lib/ 里，psql 等客户端运行时须设 LD_LIBRARY_PATH
+      # （start.sh 经 noc-paths.sh 导出）。
+      # 布局：PGDG 二进制按编译前缀 /usr/lib/postgresql/16 +
+      # /usr/share/postgresql/16 重定位，须按同一结构排布
+      # （lib/postgresql/16/bin + share/postgresql/16）；平铺到
+      # postgresql16/{bin,lib,share} 会导致 initdb 找不到 timezonesets
+      # （2026-11-19 本地实测）。
+      - name: 组装 PostgreSQL .deb（仅 linux-x64）
+        if: matrix.platform == 'linux-x64'
+        run: |
+          set -euo pipefail
+          # 去 CRLF（Windows jq 输出 \r\n；见文件头 #173）
+          jq() { command jq "$@" | tr -d '\r'; }
+          PLATFORM="${{ matrix.platform }}"
+          DIR=$(jq -r --arg p "${PLATFORM}" '.platforms[$p].postgresql.dir' ops/deploy/runtime-manifest.json)
+          mkdir -p downloads pg-unpack
+          for i in $(jq -r --arg p "${PLATFORM}" '.platforms[$p].postgresql.debs | keys[]' ops/deploy/runtime-manifest.json); do
+            URL=$(jq -r --arg p "${PLATFORM}" --argjson i "${i}" '.platforms[$p].postgresql.debs[$i].url' ops/deploy/runtime-manifest.json)
+            SHA=$(jq -r --arg p "${PLATFORM}" --argjson i "${i}" '.platforms[$p].postgresql.debs[$i].sha256' ops/deploy/runtime-manifest.json)
+            PKG=$(jq -r --arg p "${PLATFORM}" --argjson i "${i}" '.platforms[$p].postgresql.debs[$i].package' ops/deploy/runtime-manifest.json)
+            FILE="downloads/$(basename "${URL}")"
+            echo "下载 ${PKG}：${URL}"
+            curl -L --fail --retry 2 -o "${FILE}" "${URL}"
+            echo "${SHA}  ${FILE}" | sha256sum -c -
+            dpkg-deb -x "${FILE}" "pg-unpack/${PKG}"
+          done
+          PG="runtime-staging/${DIR}"
+          mkdir -p "${PG}/lib/postgresql/16/bin" "${PG}/lib/postgresql/16/lib" "${PG}/share/postgresql/16"
+          cp -a pg-unpack/postgresql-16/usr/lib/postgresql/16/bin/. "${PG}/lib/postgresql/16/bin/"
+          cp -a pg-unpack/postgresql-client-16/usr/lib/postgresql/16/bin/. "${PG}/lib/postgresql/16/bin/"
+          cp -a pg-unpack/postgresql-16/usr/lib/postgresql/16/lib/. "${PG}/lib/postgresql/16/lib/"
+          cp -a pg-unpack/libpq5/usr/lib/x86_64-linux-gnu/libpq.so.5* "${PG}/lib/postgresql/16/lib/"
+          cp -a pg-unpack/postgresql-16/usr/share/postgresql/16/. "${PG}/share/postgresql/16/"
+          for EXE in initdb pg_ctl psql createdb; do
+            [ -x "${PG}/lib/postgresql/16/bin/${EXE}" ] || { echo "错误：组装后缺 ${EXE}"; exit 1; }
+          done
+          echo "PG 组装完成：$(du -sh "${PG}" | cut -f1)"
+
+      # EDB 的 Windows 二进制 zip 捆绑 pgAdmin 4（约 779M）与 StackBuilder、
+      # doc/，运行时不需要。裁剪后 PG 约 137M（bin/lib/share/include 保留；
+      # include/ 保留是为将来可能在运行时上编扩展留余地）。裁剪后断言
+      # 四个关键可执行文件仍在，防止上游布局变化导致静默缺件。
+      - name: 裁剪 PostgreSQL 附带组件（仅 win-x64）
+        if: matrix.platform == 'win-x64'
+        run: |
+          PG="runtime-staging/postgresql16"
+          rm -rf "${PG}/pgAdmin 4" "${PG}/StackBuilder" "${PG}/doc"
+          for EXE in initdb pg_ctl psql createdb; do
+            [ -f "${PG}/bin/${EXE}.exe" ] || { echo "错误：裁剪后缺 ${EXE}.exe"; exit 1; }
+          done
+          echo "裁剪完成，PG 剩余：$(du -sh "${PG}" | cut -f1)"
+
+      - name: 打包 + 生成 SHA256
+        run: |
+          VERSION="${{ steps.manifest.outputs.version }}"
+          PLATFORM="${{ matrix.platform }}"
+          ZIP="runtime-dist/noc-soc-runtime-${VERSION}-${PLATFORM}.zip"
+          node ops/deploy/lib/zip-dir.mjs runtime-staging "${ZIP}" --mtime "$(git log -1 --format=%cI)"
+          (cd runtime-dist && sha256sum "$(basename "${ZIP}")" > "$(basename "${ZIP}").sha256")
+          ls -la runtime-dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: noc-soc-runtime-${{ matrix.platform }}-${{ steps.manifest.outputs.version }}
+          path: runtime-dist/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 发布到 Release（给了标签且非干跑）
+        if: inputs.tag != '' && inputs.dry_run == false
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ inputs.tag }}"
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" runtime-dist/* --clobber
+          else
+            gh release create "${TAG}" --title "${TAG}" --notes "运行时 ZIP（见 ops/deploy/runtime-manifest.json）。应用 ZIP 另行发布。" runtime-dist/*
+          fi
