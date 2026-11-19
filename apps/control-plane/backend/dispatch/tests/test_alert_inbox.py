@@ -1,4 +1,4 @@
-"""告警收件箱（#143）：四类告警统一路由给 Muse 1，同类去重就地更新。"""
+"""告警收件箱（#143）：五类告警统一路由给 Muse 1，同类去重就地更新。"""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from dispatch.alert_inbox import (
     parse_priority,
     post_alert,
     reaper_failure_alert,
+    scan_ownerless_tasks,
     should_escalate_blocked,
 )
 from dispatch.tests.fake_github import FakeGitHub
@@ -278,3 +279,88 @@ def test_cli_missing_env_returns_2(fake: FakeGitHub) -> None:
         client=fake,
     )
     assert code == 2
+
+
+def _ownerless_issue(
+    fake: FakeGitHub,
+    number: int,
+    *,
+    agent: str | None = None,
+    created_at: str = "2026-11-18T00:00:00Z",
+    is_pr: bool = False,
+) -> None:
+    labels = ["state:todo"] + ([agent] if agent else [])
+    fake.seed_issue(
+        number,
+        labels=tuple(labels),
+        title=f"任务 {number}",
+        pull_request=is_pr,
+        created_at=created_at,
+    )
+
+
+def test_ownerless_scan_posts_single_rolling_alert(fake: FakeGitHub) -> None:
+    _ownerless_issue(fake, 20, created_at="2026-11-18T01:00:00Z")
+    _ownerless_issue(fake, 21, created_at="2026-11-18T02:00:00Z")
+    _ownerless_issue(fake, 22, agent="agent:muse-2")  # 有负责人，排除
+    _ownerless_issue(fake, 23, is_pr=True)  # PR 条目，排除
+    assert scan_ownerless_tasks(fake, REPO, now=NOW) == [20, 21]
+    inbox = find_inbox(fake, REPO)
+    assert inbox is not None
+    bodies = fake.comments_for(inbox)
+    assert len(bodies) == 1
+    assert "muse1-alert: ownerless-task:current" in bodies[0]
+    assert "#20" in bodies[0] and "#21" in bodies[0]
+    assert "#22" not in bodies[0] and "#23" not in bodies[0]
+    # 发生时间取清单里最新任务的创建时间（事件时间），不是扫描时间。
+    assert "发生时间：2026-11-18T02:00:00Z" in bodies[0]
+
+
+def test_ownerless_scan_repeat_does_not_duplicate(fake: FakeGitHub) -> None:
+    """#176 回归：旧 bash 实现每轮用时间戳 marker + Search 标题查找，
+    间歇落空就新建 Issue（#154/#164/#165/#167 四个重复）。收件箱路由下
+    清单不变时重复扫描必须零写操作：不新建 Issue、不重写评论。"""
+    _ownerless_issue(fake, 20)
+    first = scan_ownerless_tasks(fake, REPO, now=NOW)
+    second = scan_ownerless_tasks(fake, REPO, now=NOW + timedelta(minutes=5))
+    assert first == [20]
+    assert second == []  # 正文相同，post_alert 直接跳过
+    inbox = find_inbox(fake, REPO)
+    assert inbox is not None
+    assert len(fake.comments_for(inbox)) == 1
+    assert len(fake.issues) == 2  # 任务 Issue + 收件箱，没有多建
+
+
+def test_ownerless_scan_updates_in_place_when_set_changes(
+    fake: FakeGitHub,
+) -> None:
+    _ownerless_issue(fake, 20, created_at="2026-11-18T01:00:00Z")
+    scan_ownerless_tasks(fake, REPO, now=NOW)
+    inbox = find_inbox(fake, REPO)
+    assert inbox is not None
+    comment_id = fake.comments[inbox][0]["id"]
+    _ownerless_issue(fake, 24, created_at="2026-11-18T03:00:00Z")
+    assert scan_ownerless_tasks(fake, REPO, now=NOW) == [20, 24]
+    bodies = fake.comments_for(inbox)
+    assert len(bodies) == 1  # 仍是同一条评论，就地 PATCH
+    assert fake.comments[inbox][0]["id"] == comment_id
+    assert "#24" in bodies[0]
+
+
+def test_ownerless_scan_empty_is_quiet(fake: FakeGitHub) -> None:
+    _ownerless_issue(fake, 25, agent="agent:muse-3")
+    assert scan_ownerless_tasks(fake, REPO, now=NOW) == []
+    assert find_inbox(fake, REPO) is None  # 无需告警时不建收件箱
+
+
+def test_cli_ownerless_scan_uses_injected_client(fake: FakeGitHub) -> None:
+    _ownerless_issue(fake, 26)
+    code = alert_inbox.main(
+        ["ownerless-scan"],
+        env={"REPO": REPO, "GH_TOKEN": "fake-token"},
+        client=fake,
+    )
+    assert code == 0
+    inbox = find_inbox(fake, REPO)
+    assert inbox is not None
+    assert "muse1-alert: ownerless-task:current" in fake.comments_for(inbox)[0]
