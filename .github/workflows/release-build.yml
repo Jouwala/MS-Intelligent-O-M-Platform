@@ -105,7 +105,7 @@ jobs:
 
       # 构建脚本回归测试（P2-1）：先跑测试，失败则不构建。
       - name: 构建脚本回归测试
-        run: node --test ops/deploy/lib/zip-package.test.mjs
+        run: node --test ops/deploy/lib/zip-package.test.mjs ops/deploy/lib/zip-dir.test.mjs
 
       # 4 个项目各自 npm ci（lockfileVersion 3，可复现；不得跨平台复用 node_modules）。
       - name: npm ci（my_app 前端）

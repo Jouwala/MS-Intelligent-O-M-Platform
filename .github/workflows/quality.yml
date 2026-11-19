@@ -197,6 +197,6 @@ jobs:
         run: |
           for f in ops/deploy/*.mjs ops/deploy/lib/*.mjs; do node --check "$f" || exit 1; done
       - name: 回归测试（加载 zip-package）
-        run: node --test ops/deploy/lib/zip-package.test.mjs
+        run: node --test ops/deploy/lib/zip-package.test.mjs ops/deploy/lib/zip-dir.test.mjs
       - name: build-zip 干跑（加载 build-zip + 全模块）
         run: node ops/deploy/build-zip.mjs --mode source --platform linux-x64 --dry-run
