@@ -10,6 +10,9 @@
  *   - critical 告警用**右下角小红点**而不是节点填色：80% 的网元都有 critical，
  *     填色等于全红（实测依据见后端 ipran_topo_service.py）
  *   - ×N 表示这对机框折叠了几条物理链路；「展开平行链路」时按扇面错开画
+ *   - **流量负载（traffic）是唯一让颜色离开故障态的模式**：用户主动切到这一档时，
+ *     链路按 Weathermap 色阶上色（见 trafficScale.ts），节点颜色保持不变，
+ *     断链/告警仍靠虚线与红点表达。不切这一档时行为与之前逐像素一致。
  * ========================================================================== */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useI18n } from '../../i18n'
@@ -18,6 +21,9 @@ import type { ColorMode, LayoutResult, Pt, Sev, TopoEdge, TopoIndex, TopoNode } 
 import { radiusOf, widthOf } from './layouts'
 import { layoutLabels } from './labels'
 import { linkStateOf, parallelBreakdown, type LinkState } from './graphAlgorithms'
+import {
+  quadraticAt, splitQuadraticAtMid, trafficLabel, weathermapColor,
+} from './trafficScale'
 
 interface Props {
   nodes: TopoNode[]
@@ -41,6 +47,8 @@ interface Props {
   markGeo?: boolean
   /** 门户 maponly：画布撑满父级，而不是按 760×540 的比例留高 */
   fill?: boolean
+  /** 流量负载模式的采样时刻（悬停气泡里标出来，避免把旧数当实时看） */
+  trafficAt?: string | null
 }
 
 const W = 760
@@ -67,7 +75,7 @@ const HOME_VB: ViewBox = { x: 0, y: 0, w: W, h: H }
 export default function TopoCanvas({
   nodes, edges, idx, layout, colorMode, focus, showAllLabels, foldParallel, onToggleFocus,
   dimmed, impacted, selectedEdge = -1, onSelectEdge, onBackgroundClick, viewCmd, resetKey, markGeo,
-  fill,
+  fill, trafficAt,
 }: Props) {
   const { t } = useI18n()
   const { colors } = useTheme()
@@ -78,6 +86,18 @@ export default function TopoCanvas({
   const dragRef = useRef<{ sx: number; sy: number; vb: ViewBox; moved: boolean } | null>(null)
   const skipClick = useRef(false)
   const { pos, bands } = layout
+  /* 流量模式的百分比标签防叠：与已放下的标签太近就不画。
+     密集簇里几十个 0.0% 叠在一起反而看不出数，宁可少写几个（悬停仍能逐条看）。
+     每帧重建，比节点标签的贪心排版轻（只是矩形相交判定）。 */
+  const placedLabels: Pt[] = []
+  const labelFits = (p: Pt) => {
+    // 9.5px 字号下 "00.0%" 约 30px 宽、10px 高，留一点余量
+    for (const q of placedLabels) {
+      if (Math.abs(p.x - q.x) < 34 && Math.abs(p.y - q.y) < 11) return false
+    }
+    placedLabels.push(p)
+    return true
+  }
 
   useEffect(() => { setVb(HOME_VB) }, [resetKey])
 
@@ -236,6 +256,14 @@ export default function TopoCanvas({
             const stroke = linkState === 'failed' ? WH.danger
               : linkState === 'partial' ? WH.warn
                 : e.crit ? WH.sev.Major : WH.textDim
+            /**
+             * 流量模式：链路按**中分两段**上色（Weathermap 的双向箭头语义）。
+             * 前半段 = 源→宿（txUtil），后半段 = 宿→源（rxUtil）；缺数据画中性虚线
+             * 且不写字，绝不用 0% 冒充。平行链路在这里**不展开**：折叠边的
+             * rx/tx 已经是组内最严重那条的值，画一排同色线只会增加读图成本，
+             * 每条物理链路的数在悬停/详情里逐条列出。
+             */
+            const trafficMode = colorMode === 'traffic'
             const mx = (a.x + b.x) / 2
             const my = (a.y + b.y) / 2
             const dx = b.x - a.x
@@ -246,18 +274,64 @@ export default function TopoCanvas({
             const bend = Math.min(len * 0.045, 9) * (i % 2 ? 1 : -1)
             const bx = (-dy / len) * bend
             const by = (dx / len) * bend
+            const ctrl: Pt = { x: mx + bx, y: my + by }
             const list = []
-            for (let m = 0; m < copies; m++) {
-              const off = copies > 1 ? (m - (copies - 1) / 2) * 5 : 0
-              const nx = (-dy / len) * off
-              const ny = (dx / len) * off
-              const d = `M${a.x},${a.y} Q${mx + bx + nx},${my + by + ny} ${b.x},${b.y}`
+            if (trafficMode) {
+              const { first, second } = splitQuadraticAtMid(a, ctrl, b)
+              const seg = (pts: readonly Pt[]) =>
+                `M${pts[0].x},${pts[0].y} Q${pts[1].x},${pts[1].y} ${pts[2].x},${pts[2].y}`
+              const strokeW = picked ? widthOf(e.gb) + 1.2 : widthOf(e.gb)
+              const op = active ? 0.95 : 0.1
+              const txNa = e.txUtil == null
+              const rxNa = e.rxUtil == null
               list.push(
-                <path key={`e${i}-${m}`} d={d} fill="none" stroke={stroke}
-                  strokeWidth={picked ? widthOf(e.gb) + 1.2 : widthOf(e.gb)}
-                  strokeOpacity={active ? (linkState !== 'normal' || e.crit || picked ? 0.95 : 0.3) : 0.07}
-                  strokeDasharray={linkState === 'failed' ? '4 3' : linkState === 'partial' ? '9 3' : undefined} />,
+                <path key={`t${i}`} d={seg(first)} fill="none"
+                  stroke={weathermapColor(e.txUtil)} strokeWidth={strokeW} strokeOpacity={op}
+                  strokeDasharray={txNa ? '3 3' : undefined} />,
+                <path key={`r${i}`} d={seg(second)} fill="none"
+                  stroke={weathermapColor(e.rxUtil)} strokeWidth={strokeW} strokeOpacity={op}
+                  strokeDasharray={rxNa ? '3 3' : undefined} />,
               )
+              const txTxt = trafficLabel(e.txUtil)
+              const rxTxt = trafficLabel(e.rxUtil)
+              if (active && txTxt) {
+                const p = quadraticAt(a, ctrl, b, 0.25)
+                if (labelFits(p)) {
+                  list.push(
+                    <text key={`tl${i}`} x={p.x} y={p.y - 3} fontSize={9.5} textAnchor="middle"
+                      fill={WH.text} pointerEvents="none"
+                      stroke={WH.cardBg} strokeWidth={2.6} strokeLinejoin="round" paintOrder="stroke">
+                      {txTxt}
+                    </text>,
+                  )
+                }
+              }
+              if (active && rxTxt) {
+                const p = quadraticAt(a, ctrl, b, 0.75)
+                if (labelFits(p)) {
+                  list.push(
+                    <text key={`rl${i}`} x={p.x} y={p.y - 3} fontSize={9.5} textAnchor="middle"
+                      fill={WH.text} pointerEvents="none"
+                      stroke={WH.cardBg} strokeWidth={2.6} strokeLinejoin="round" paintOrder="stroke">
+                      {rxTxt}
+                    </text>,
+                  )
+                }
+              }
+            } else {
+              const copies = !foldParallel && e.n > 1 ? Math.min(e.n, 6) : 1
+              for (let m = 0; m < copies; m++) {
+                const off = copies > 1 ? (m - (copies - 1) / 2) * 5 : 0
+                const nx = (-dy / len) * off
+                const ny = (dx / len) * off
+                const d = `M${a.x},${a.y} Q${mx + bx + nx},${my + by + ny} ${b.x},${b.y}`
+                list.push(
+                  <path key={`e${i}-${m}`} d={d} fill="none" stroke={stroke}
+                    strokeWidth={picked ? widthOf(e.gb) + 1.2 : widthOf(e.gb)}
+                    strokeOpacity={active ? (linkState !== 'normal' || e.crit || picked ? 0.95 : 0.3) : 0.07}
+                    strokeDasharray={linkState === 'failed' ? '4 3' : linkState === 'partial' ? '9 3' : undefined} />,
+                )
+              }
             }
             list.push(
               <path key={`hit${i}`} d={`M${a.x},${a.y} Q${mx + bx},${my + by} ${b.x},${b.y}`} fill="none"
@@ -434,6 +508,29 @@ export default function TopoCanvas({
                   tx: typeof tipEdge.txUtil === 'number' ? `${tipEdge.txUtil}%` : t('ipranTopo.detail.na'),
                 })}
               </div>
+              {colorMode === 'traffic' && trafficAt && (
+                <div style={{ color: WH.textDim, fontSize: 11 }}>
+                  {t('ipranTopo.traffic.sampledAt', { at: trafficAt })}
+                </div>
+              )}
+              {colorMode === 'traffic' && !!tipEdge.utilPorts?.length && (
+                <div style={{ color: WH.textMuted, fontSize: 11, lineHeight: 1.55 }}>
+                  {tipEdge.utilPorts.slice(0, 4).map((u) => (
+                    <div key={`${u.me}-${u.port}`} title={u.port} style={{
+                      whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                    }}>
+                      {t('ipranTopo.tip.portUtil', {
+                        port: u.port,
+                        rx: u.rx == null ? t('ipranTopo.detail.na') : `${u.rx}%`,
+                        tx: u.tx == null ? t('ipranTopo.detail.na') : `${u.tx}%`,
+                      })}
+                    </div>
+                  ))}
+                  {tipEdge.utilPorts.length > 4 && (
+                    <div>{t('ipranTopo.tip.more', { n: tipEdge.utilPorts.length - 4 })}</div>
+                  )}
+                </div>
+              )}
               {(tipEdge.crit > 0 || tipEdge.major > 0) && (
                 <div style={{ color: WH.sev.Major }}>
                   {t('ipranTopo.tip.edgeAlarms', { crit: tipEdge.crit, major: tipEdge.major })}

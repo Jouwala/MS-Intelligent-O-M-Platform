@@ -83,7 +83,12 @@
     "gb": 100,            // 组内最小端口速率（GB）；解析不出为 null
     "down": 0,            // 组内 down 的链路条数
     "crit": 0, "major": 0,// 组内链路告警合计
-    "ports": ["…"]        // 最多 12 条链路名，供悬停明细
+    "ports": ["…"],       // 最多 12 条链路名，供悬停明细
+    // 以下三项只有 ?traffic=1 的响应才有（见第 5b 节）
+    "rxUtil": 12.38,      // 宿→源方向利用率（%）；无数据为 null
+    "txUtil": 2.71,       // 源→宿方向利用率（%）
+    "utilPorts": [{ "port": "…-10GE:2", "me": "9000-8EA_SPE02", "side": "src",
+                    "gb": 10, "rx": 12.38, "tx": 2.71 }]   // 命中的物理链路明细，最多 12 条
   }],
   "meta": {
     "layer": "ipran", "layerName": "IP RAN 光纤",
@@ -93,7 +98,11 @@
     "geo": {"exact": 74, "fuzzy": 3, "miss": 16, "ext": 7},
     "geoMissSites": ["…"], "geoFuzzyPairs": [{"site": "Goodride", "matched": "Goodridge"}],
     "critNe": 75,
-    "warnings": ["alarm_saturated: …", "geo_miss: …", "geo_fuzzy: …"]
+    "warnings": ["alarm_saturated: …", "geo_miss: …", "geo_fuzzy: …"],
+    // 只有 ?traffic=1 时有
+    "traffic": {"sampledAt": "2026-11-19T10:30:00+00:00", "tables": ["…"], "rows": 1290,
+                 "totalEdges": 141, "matchedEdges": 50, "totalPorts": 167,
+                 "matchedPorts": 70, "noBandwidthPorts": 0}
   }
 }
 ```
@@ -101,6 +110,10 @@
 `warnings` 的三种前缀：`alarm_saturated`（告警饱和，颜色失去区分度）、
 `geo_miss`（站点无坐标）、`geo_fuzzy`（近似匹配需人工确认）、
 `upstream_unreachable`（回退到上次成功数据）。
+带 `?traffic=1` 时还会追加四种 `traffic_*` 前缀：`traffic_no_data`（KPI 库读不到 / 为空）、
+`traffic_unmatched`（本层一条都没匹配上）、`traffic_partial`（只覆盖一部分链路）、
+`traffic_no_bandwidth`（采到了流量但端口速率解析不出）；前端的处理是把它们换成
+中英双语常驻提示（口径类说明走收起的说明条，这几条属于「这次算不全」所以常驻）。
 
 ## 5. 口径要点（都有实测依据，勿凭直觉改）
 
@@ -114,6 +127,36 @@
 - **告警不做节点填色**：80% 的网元带 critical 告警，填色等于全红。
 - **层外设备必须保留**：89MW02 的度达 10，丢了对端会让核心节点看起来孤立。
 - **层外设备名从 UME 取**，不从链路名切分（设备名含下划线、板卡名也用 `-`，切分必错）。
+
+## 5b. 流量负载（`?traffic=1`，2026-11-19 新增）
+
+给拓扑边补上「这条链路现在跑多少」的利用率，供前端 Weathermap 模式上色。
+仅当请求带 `traffic=1` 时计算：额外读 6 张 15 分钟表，实测 +0.1~0.5s；
+**单独占一个缓存槽**（`<layer>|traffic`），不带这个参数的响应与改动前逐字段一致。
+口径真相源是 `topo_traffic.py` 模块 docstring，这里只列结论与排障。
+
+- **数据源**：`ipran_kpi_sync` 写的 6 张 15 分钟表（表名取
+  `ipran_ume_kpi_service.IPRAN_KPI_QUERY_CONFIGS[*].table_name`，不另抄一份）。
+  每张表只取**最新一个 `Begin Time`**（`MAX("Begin Time")` 走采集侧唯一索引，
+  实测 6 张合计 ~0.1~0.5s，不扫历史）。库里实测有两种结构，两种都认：
+  宽表（`Receive/Send Traffic Rate(Mbps)` 两列）与 EAV（`Counter` + `Counter Value`）。
+- **匹配**：`(网元名, 端口名)` 大小写不敏感精确匹配。链路名
+  `A设备-端口_B设备-端口` 的设备名自带下划线、板卡名自带减号，**不能按分隔符切**，
+  而是用这条边两端已知的网元名卡首尾取出端口（`topo_traffic.parse_link_ports`）。
+  不做近似匹配。`-SubPort:N` 行一律跳过（与端口行重复）。
+- **方向**：`txUtil` = 源设备该端口的 `Send`（源→宿），`rxUtil` = 同一端口的 `Receive`
+  （宿→源）。源侧没采到时退到宿侧并把两个方向**对调**，`utilPorts[].side` 标明用的是
+  哪一端（`src`/`dst`）。
+- **换算**：`Mbps ÷ (端口速率 × 1000) × 100`，保留两位小数；端口速率从链路名解析，
+  解析不出（`ETH:` 之类）就**不给数字**（计入 `noBandwidthPorts`）—— 界面显示 N/A，不是 0。
+- **折叠边**：组内取**最大**利用率（与带宽取最小同一取向：让最先拥塞的那条浮现）。
+- **实测覆盖（2026-11-19 生产 PG + 生产 UME 拓扑）**：ipran 层 50/141 条边、
+  70/167 个端口有流量；metro 40/51；ipcore 6/109（该层设备大多不在 KPI 采集配置里）。
+  采样时刻 `2026-11-19T10:30:00+00:00`。KPI 采集配置里只有 13 个网元，
+  **其余端口天然没有数据**，这是覆盖范围问题，不是 bug。
+- **排障**：切到「按流量负载」后整张图都是灰虚线 → 看页面底部常驻的 `traffic_*` 提示，
+  区分「KPI 库读不到」「采集没跑」「命名对不上」；`meta.traffic.sampledAt` 是数据时间，
+  与 `meta.fetchedAt` 不是一回事（前者 15 分钟粒度，后者是本次取拓扑的时间）。
 
 ## 6. 排障
 

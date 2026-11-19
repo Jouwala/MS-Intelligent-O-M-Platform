@@ -77,6 +77,7 @@ export default function TopologyControls(p: Props) {
               { label: t('ipranTopo.color.tier'), value: 'tier' },
               { label: t('ipranTopo.color.up'), value: 'up' },
               { label: t('ipranTopo.color.sev'), value: 'sev' },
+              { label: t('ipranTopo.color.traffic'), value: 'traffic' },
             ]} />
           <Switch size="small" checked={p.showAllLabels} onChange={p.onAllLabels}
             checkedChildren={t('ipranTopo.opt.allLabels')} unCheckedChildren={t('ipranTopo.opt.allLabels')} />

@@ -48,11 +48,26 @@ export interface TopoEdge {
   /** 最多 12 条链路名，供悬停明细 */
   ports: string[]
   /**
-   * 接收/发送利用率（%）。当前 graph 接口不返回这两项，缺省即界面显示 N/A。
-   * 禁止用端口速率 gb 去填。
+   * 接收/发送利用率（%）。只有 `?traffic=1` 的响应才有这两项；缺省即界面显示 N/A。
+   * 禁止用端口速率 gb 去填。方向口径见 types 顶部与后端 topo_traffic.py：
+   * tx = 源设备该端口的发送（源→宿），rx = 同一端口的接收（宿→源）。
    */
   rxUtil?: number | null
   txUtil?: number | null
+  /** 命中的物理链路明细（折叠边里每条各自的方向利用率），最多 12 条 */
+  utilPorts?: UtilPort[]
+}
+
+/** 一条物理链路的流量利用率明细（由后端匹配，前端不重算） */
+export interface UtilPort {
+  /** 参与测量的端口名（`side` 说明取的是链路哪一端） */
+  port: string
+  me: string
+  /** src = 本条边的源设备端口；dst = 源侧没采到，退到宿侧 */
+  side: 'src' | 'dst'
+  gb: number | null
+  rx: number | null
+  tx: number | null
 }
 
 export interface TopoMeta {
@@ -74,6 +89,24 @@ export interface TopoMeta {
   geoFuzzyPairs: { site: string; matched: string }[]
   critNe: number
   warnings: string[]
+  /** 流量负载模式的取数情况（仅 `?traffic=1`）；无此字段表示本次响应没带流量数据 */
+  traffic?: TrafficMeta
+}
+
+/** 端口流量贴图结果（后端 topo_traffic.annotate_edges 的 meta.traffic） */
+export interface TrafficMeta {
+  /** KPI 采样时刻（各表最新一个 Begin Time） */
+  sampledAt?: string | null
+  /** 参与匹配的 15 分钟表 */
+  tables: string[]
+  /** 本次读到的原始行数（含 Repeat 的两个方向与 SubPort） */
+  rows: number
+  totalEdges: number
+  matchedEdges: number
+  totalPorts: number
+  matchedPorts: number
+  /** 采到了流量但端口速率解析不出（如 ETH 口）的数量 */
+  noBandwidthPorts: number
 }
 
 export interface TopoResp {
@@ -101,7 +134,8 @@ export interface LayoutResult {
 }
 
 export type LayoutKey = 'force' | 'geo' | 'tier'
-export type ColorMode = 'tier' | 'up' | 'sev'
+/** 着色：层级 / 在线状态 / 告警级 / 流量负载（Weathermap，2026-11-19 新增） */
+export type ColorMode = 'tier' | 'up' | 'sev' | 'traffic'
 
 /** 邻接索引：adj[i] = [{ n: 邻居下标, e: 边下标 }] */
 export interface TopoIndex {

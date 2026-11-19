@@ -1133,8 +1133,9 @@ export function iptPowerWatch() {
 // 数据链路：UME（ZTE NetNumen）四张逻辑拓扑层，8 次上游调用在服务层聚合成一次
 // 响应并**按层**缓存 120s（层清单与口径见 services/ipran_topo/layers.py）。
 // layer 走后端白名单；refresh=1 只绕过当前层缓存（页面「重新取数」按钮用）。
-export function getIpranTopoGraph(layer: string, refresh = 0) {
-  return api.get('/ipran-topo/graph', { params: { layer, refresh } })
+// traffic=1 额外带端口流量利用率（多读 6 张 15 分钟表，见 services/ipran_topo/topo_traffic.py）。
+export function getIpranTopoGraph(layer: string, refresh = 0, traffic = 0) {
+  return api.get('/ipran-topo/graph', { params: { layer, refresh, traffic } })
 }
 
 /** 页签清单（key / 中英名 / 是否有 UME 人工布局）。页面用静态层定义，此接口供门户与调试。 */

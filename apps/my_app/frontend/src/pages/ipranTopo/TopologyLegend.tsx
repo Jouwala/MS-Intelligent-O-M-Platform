@@ -4,6 +4,7 @@ import { useMemo } from 'react'
 import { WH, useTheme } from '../../theme'
 import { useI18n } from '../../i18n'
 import type { ColorMode, Tier } from './types'
+import { TRAFFIC_BINS, TRAFFIC_NA_COLOR } from './trafficScale'
 
 interface Props {
   colorMode: ColorMode
@@ -46,14 +47,33 @@ export default function TopologyLegend({ colorMode, tierCounts }: Props) {
   return (
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'center',
       marginTop: 'var(--wh-space-sm)', fontSize: 12, color: WH.textMuted }}>
-      {items.map((it, i) => (
+      {colorMode === 'traffic' ? (
+        <>
+          <span style={{ color: WH.text, fontWeight: 600 }}>{t('ipranTopo.legend.traffic')}</span>
+          {TRAFFIC_BINS.map((b) => (
+            <span key={b.label} style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+              <span style={{ width: 14, height: 9, background: b.color,
+                border: `1px solid ${WH.cardBorder}`, display: 'inline-block' }} />
+              {b.label}
+            </span>
+          ))}
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+            <span style={{ width: 14, height: 0, borderTop: `2px dashed ${TRAFFIC_NA_COLOR}`,
+              display: 'inline-block' }} />
+            {t('ipranTopo.legend.trafficNa')}
+          </span>
+          <span style={{ color: WH.textDim }}>{t('ipranTopo.legend.trafficDir')}</span>
+        </>
+      ) : items.map((it, i) => (
         <span key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
           <span style={{ width: 10, height: 10, borderRadius: 5, background: it.c,
             border: `1px solid ${WH.cardBorder}`, display: 'inline-block' }} />
           {it.label}
         </span>
       ))}
-      <span style={{ color: WH.textDim }}>{t('ipranTopo.legend.line')}</span>
+      {colorMode !== 'traffic' && (
+        <span style={{ color: WH.textDim }}>{t('ipranTopo.legend.line')}</span>
+      )}
     </div>
   )
 }
