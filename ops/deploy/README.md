@@ -148,8 +148,14 @@ Agent 在对话里长轮询 CI（`gh pr checks` 循环等待）**极耗 token，
 
 | 标记 | 谁写 | 含义 | 端口 |
 | --- | --- | --- | --- |
-| `PRODUCTION.flag` | 切生产时人工放（当前这棵树有） | 生产树，任务调度器在跑 | 80/443/7038/7090/9267/9268，PG 5432 |
+| `PRODUCTION.flag` | 切生产时人工放一个**空文件**（2026-11-19 已在 `D:\02_olbr_portal` 建好，**勿删**） | 生产树，任务调度器在跑 | 80/443/7038/7090/9267/9268，PG 5432 |
 | `ISOLATED_COPY.flag` | `provision-smoke-runner.ps1` / 打包脚本 | 便携副本 / 冒烟副本 | 8080/8443/7039/7091/9277，便携 PG 55432 |
+
+> ⚠️ `PRODUCTION.flag` 不只是「打个标签」：`post_sync_fix_paths.ps1`（git post-checkout
+> 钩子）靠它决定 nginx 看门狗写 80 还是按 `.env` 写 8080。**删掉它，下一次 `git checkout`
+> 就会把生产看门狗的 `NginxPort` 改成 8080，5 分钟周期里连探两轮失败就去重启 nginx**
+> （2026-11-19 15:36 实测正在发生）。切生产后 `PRODUCTION.flag` 与「`ISOLATED_COPY.flag`
+> 已删」两件事必须同时成立。
 
 守卫生效的地方（都是「角色不明就不跑」，不是静默降级）：
 

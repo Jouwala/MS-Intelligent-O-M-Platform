@@ -43,6 +43,16 @@
 # Pass -Force to override (needed right after `git clone`, where the flag is not
 # tracked by git and therefore missing).
 #
+# Two role flags, not one:
+#   * ISOLATED_COPY.flag decides WHETHER to rewrite at all (above).
+#   * PRODUCTION.flag decides the nginx watchdog PORT: when the copy root has
+#     PRODUCTION.flag the nginx instance listens on 80, so the port is pinned to
+#     80 instead of NGINX_HTTP_PORT from .env (the root .env still carries the
+#     isolated 8080). Deleting PRODUCTION.flag makes the next checkout rewrite
+#     NginxPort back to 8080 and the 5-minute watchdog then "detects" a dead
+#     nginx and restarts it -- 2026-11-19 measured exactly this on D:\02.
+#     See docs/adr/0003-production-vs-isolated-markers.md.
+#
 # Idempotent: safe to run any number of times.
 #
 # Usage:
