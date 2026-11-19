@@ -37,7 +37,6 @@ PG 5432），所以本目录同时装着「生产启停」与「便携/冒烟副
   `-NoPrewarm` 跳过预热、`-SinceHours N` 改失败率窗口、`-Render` 追加 Playwright 渲染探针
   （10 个看板页，缺依赖自动 SKIP）。**有 FAIL 时 exit 1**，报告落 `TMP\post-cutover-check\*.json`。
   手动双击 `olbr-check.bat`；计划任务入口 `olbr-check-task.bat`（不 pause，输出重定向到 TMP）。
-- `check_runtime_parity.py`：上面 8b 用的**只读**比对器（见下方条目）。
 - `cutover/`：**生产切换（D:\01 → D:\02）专用**
   - `snapshot-prod-state.ps1`：切前只读快照（端口归属 / 守护任务状态 / 02 的 .env
     端口键 / 两侧 nginx.conf / 三表行数），落 `TMP\cutover\<时间戳>\`，不入库；
@@ -162,7 +161,7 @@ Agent 在对话里长轮询 CI（`gh pr checks` 循环等待）**极耗 token，
 
 > ⚠️ `PRODUCTION.flag` 不只是「打个标签」：`post_sync_fix_paths.ps1`（git post-checkout
 > 钩子）靠它决定 nginx 看门狗写 80 还是按 `.env` 写 8080。**删掉它，下一次 `git checkout`
-> 就会把生产看门狗的 `NginxPort` 改成 8080，5 分钟周期里连探两轮失败就去重启 nginx**
+> 就会把生产看门狗的 `NginxPort` 改成 8080（脚本现在会先打 WARN，但仍会写），5 分钟周期里连探两轮失败就去重启 nginx**
 > （2026-11-19 15:36 实测正在发生）。切生产后 `PRODUCTION.flag` 与「`ISOLATED_COPY.flag`
 > 已删」两件事必须同时成立。
 
@@ -170,10 +169,10 @@ Agent 在对话里长轮询 CI（`gh pr checks` 循环等待）**极耗 token，
 
 - 根 `start.bat` / `stop.bat`：按标记分流到 `portal-ctl.ps1` 或 `start_all.ps1` / `stop_all.ps1`；
 - `start_all.ps1`：见到 `PRODUCTION.flag` 直接 throw（否则会改 `backend\.env`、起 55432 的第二套 PG）；
-- `stop_all.ps1`：见到 `PRODUCTION.flag` 直接 throw（它会 `nginx -s quit` 关掉线上入口，却停不到生产后端）；
+- `stop_all.ps1`：见到 `PRODUCTION.flag` 直接 throw，并要求 `ISOLATED_COPY.flag` 存在（两个都没有同样拒绝）——它会 `nginx -s quit` 关掉线上入口，却停不到生产后端；
 - `my_portal_ctl.ps1`：两种角色下都只允许 `0-status`（老控制器不再驱动启停）；
 - `ops/quality/check_all.ps1`：步骤 1 要求标记二选一，步骤 2（`.env` 端口断言）只在隔离副本上跑；
-- `post_sync_fix_paths.ps1`（git 钩子）：据 `PRODUCTION.flag` 决定 nginx 看门狗端口写 80 还是按 `.env`。
+- `post_sync_fix_paths.ps1`（git 钩子）：据 `PRODUCTION.flag` 决定 nginx 看门狗端口写 80 还是按 `.env`；两个标记同时存在时拒绝执行，两个都没有时打 WARN（`-Force` 是显式豁免）。
 
 背景与后果见 `docs/adr/0003-production-vs-isolated-markers.md`（ADR 0002 的隔离前提已被切生产取代）。
 

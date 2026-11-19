@@ -52,6 +52,8 @@
 #     NginxPort back to 8080 and the 5-minute watchdog then "detects" a dead
 #     nginx and restarts it -- 2026-11-19 measured exactly this on D:\02.
 #     See docs/adr/0003-production-vs-isolated-markers.md.
+#   * Both flags present = ambiguous role: exit 2 even with -Force. Never guess
+#     the port (ADR 0003: 两个都有 = 拒绝执行).
 #
 # Idempotent: safe to run any number of times.
 #
@@ -185,16 +187,23 @@ function Set-ParamDefault {
 # 并重启 nginx。2026-11-19 实测：一次 git checkout 就把 NginxPort 从 80 改回 8080
 # （02 于 11-18 切成生产，但根 .env 的端口没跟着改）。隔离副本照旧读 .env。
 $productionFlag = Join-Path $CopyRoot 'PRODUCTION.flag'
-$httpPort = if (Test-Path -LiteralPath $productionFlag) {
+$isolatedFlag = Join-Path $CopyRoot 'ISOLATED_COPY.flag'
+$hasProduction = Test-Path -LiteralPath $productionFlag
+$hasIsolated = Test-Path -LiteralPath $isolatedFlag
+if ($hasProduction -and $hasIsolated) {
+    Write-Host '[ERROR] both PRODUCTION.flag and ISOLATED_COPY.flag exist: role is ambiguous; refusing to rewrite paths. Remove the wrong one and rerun.' -ForegroundColor Red
+    exit 2
+}
+$httpPort = if ($hasProduction) {
     80
+} elseif ($hasIsolated) {
+    Read-EnvPort -Key 'NGINX_HTTP_PORT' -Default 8080
 } else {
     # Neither marker = role unknown. The hook always calls with -Force, so a
     # production tree that lost PRODUCTION.flag would otherwise be rewritten to
     # 8080 with no warning at all. Say it loudly; the isolated copy (which has
     # ISOLATED_COPY.flag) stays quiet.
-    if (-not (Test-Path -LiteralPath (Join-Path $CopyRoot 'ISOLATED_COPY.flag'))) {
-        Write-Msg '[WARN] neither PRODUCTION.flag nor ISOLATED_COPY.flag: role unknown; nginx watchdog port falls back to .env (8080). If this is the production tree, recreate the empty PRODUCTION.flag now.' 'Yellow'
-    }
+    Write-Msg '[WARN] neither PRODUCTION.flag nor ISOLATED_COPY.flag: role unknown; nginx watchdog port falls back to .env (8080). If this is the production tree, recreate the empty PRODUCTION.flag now.' 'Yellow'
     Read-EnvPort -Key 'NGINX_HTTP_PORT' -Default 8080
 }
 $nginxDir = Join-Path $CopyRoot 'nginx-1.28.0'

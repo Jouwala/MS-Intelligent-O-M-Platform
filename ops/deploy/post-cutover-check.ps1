@@ -61,66 +61,10 @@ function Write-Section([string]$Title) {
     Write-Host ('── ' + $Title + ' ' + ('─' * [Math]::Max(0, 62 - $Title.Length))) -ForegroundColor Cyan
 }
 
-function Get-Text([string]$Url) {
-    $r = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 60
-    return [Text.Encoding]::UTF8.GetString($r.RawContentStream.ToArray())
-}
-
-function Get-Json([string]$Url) { return (Get-Text $Url) | ConvertFrom-Json }
-
-function Get-Code([string]$Url) {
-    try {
-        $r = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 20 -MaximumRedirection 5
-        return [int]$r.StatusCode
-    } catch {
-        if ($_.Exception.Response) { return [int]$_.Exception.Response.StatusCode }
-        return 0
-    }
-}
-
-# 服务正在重启时第一次探测必然失败（2026-11-19 实测：7090 在 11:21:03 才起来，
-# 检查在 11:20:56 探到「未监听 / 502」）。给一次 6 秒后的重试，避免把重启误报成故障。
-function Get-CodeRetry([string]$Url) {
-    $code = Get-Code $Url
-    if ($code -eq 200) { return $code }
-    Start-Sleep -Seconds 6
-    return (Get-Code $Url)
-}
-
-# 本机自签证书：PS 5.1 没有 -SkipCertificateCheck，统一用 curl 探 HTTPS
-function Get-CodeHttps([string]$Url) {
-    if (-not (Get-Command curl.exe -ErrorAction SilentlyContinue)) { return -1 }
-    $code = & curl.exe -k -s -o NUL -w '%{http_code}' --max-time 20 $Url 2>$null
-    return [int]$code
-}
-
-function Test-Tcp([string]$HostName, [int]$Port, [int]$TimeoutMs = 5000) {
-    $c = New-Object Net.Sockets.TcpClient
-    try { return $c.ConnectAsync($HostName, $Port).Wait($TimeoutMs) } catch { return $false } finally { $c.Close() }
-}
-
-function Get-Listeners([int[]]$Ports) {
-    $map = @{}
-    try {
-        Get-NetTCPConnection -State Listen -ErrorAction Stop |
-            Where-Object { $Ports -contains $_.LocalPort } |
-            ForEach-Object { if (-not $map.ContainsKey([int]$_.LocalPort)) { $map[[int]$_.LocalPort] = [int]$_.OwningProcess } }
-    } catch {
-        netstat -ano | Select-String 'LISTENING' | ForEach-Object {
-            if ($_.Line -match ':(\d+)\s+\S+\s+LISTENING\s+(\d+)') {
-                $p = [int]$matches[1]
-                if (($Ports -contains $p) -and (-not $map.ContainsKey($p))) { $map[$p] = [int]$matches[2] }
-            }
-        }
-    }
-    return $map
-}
-
-function Get-ProcInfo([int]$ProcId) {
-    $p = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcId" -ErrorAction SilentlyContinue
-    if (-not $p) { return $null }
-    return [pscustomobject]@{ Id = $ProcId; Path = $p.ExecutablePath; Started = $p.CreationDate }
-}
+# 通用探测函数拆到同目录的 .lib.ps1，主文件保持在 500 行内（AGENTS.md 三.2）。
+$checkLib = Join-Path $PSScriptRoot 'post-cutover-check.lib.ps1'
+if (-not (Test-Path -LiteralPath $checkLib)) { throw "缺少检查函数库：$checkLib（请从仓库重新取 ops\deploy\）" }
+. $checkLib
 
 $startedAt = Get-Date
 Write-Host ''
@@ -232,21 +176,25 @@ Write-Section '5. 原生看板（17 个）'
 try {
     $boards = (Get-Json "$Api/api/native-boards").boards
     if (-not $NoPrewarm) {
-        $pw = (Invoke-WebRequest -Uri "$Api/api/native-boards/_cache/prewarm" -Method POST -UseBasicParsing -TimeoutSec 60)
-        $pending = @((([Text.Encoding]::UTF8.GetString($pw.RawContentStream.ToArray())) | ConvertFrom-Json).pending)
-        # 预热是串行 + 每页间隔 2s（dashboard_service.prewarm）；全部命中时 pending 为空，直接跳过。
-        # 有待办时按缓存文件年龄判断进度（比逐页拉整份 payload 轻得多）。
-        if ($pending.Count -gt 0) {
-            $deadline = (Get-Date).AddSeconds(180)
-            while ((Get-Date) -lt $deadline) {
-                Start-Sleep -Seconds 5
-                $st = Get-Json "$Api/api/native-boards/_cache/stats"
-                $ages = @($st.disk |
-                    Where-Object { $pending -contains (($_.file -split '__')[0]) } |
-                    ForEach-Object { [double]$_.age_s })
-                if ($ages.Count -eq 0) { break }
-                if (($ages | Measure-Object -Maximum).Maximum -lt 120) { break }
+        try {
+            $pw = (Invoke-WebRequest -Uri "$Api/api/native-boards/_cache/prewarm" -Method POST -UseBasicParsing -TimeoutSec 60)
+            $pending = @((([Text.Encoding]::UTF8.GetString($pw.RawContentStream.ToArray())) | ConvertFrom-Json).pending)
+            # 预热是串行 + 每页间隔 2s（dashboard_service.prewarm）；全部命中时 pending 为空，直接跳过。
+            # 有待办时按缓存文件年龄判断进度（比逐页拉整份 payload 轻得多）。
+            if ($pending.Count -gt 0) {
+                $deadline = (Get-Date).AddSeconds(180)
+                while ((Get-Date) -lt $deadline) {
+                    Start-Sleep -Seconds 5
+                    $st = Get-Json "$Api/api/native-boards/_cache/stats"
+                    $ages = @($st.disk |
+                        Where-Object { $pending -contains (($_.file -split '__')[0]) } |
+                        ForEach-Object { [double]$_.age_s })
+                    if ($ages.Count -eq 0) { break }
+                    if (($ages | Measure-Object -Maximum).Maximum -lt 120) { break }
+                }
             }
+        } catch {
+            Add-Result '看板' '预热' 'WARN' ('预热失败，改用现有缓存：' + $_.Exception.Message)
         }
     }
     $bad = 0
@@ -259,8 +207,10 @@ try {
         $stale = [bool]$d.meta.stale
         $failed = [int]$d.meta.failed
         $detail = "widgets=$(@($d.widgets).Count) failed=$failed stale=$stale errs=$errs data=$maxDate"
-        if ($failed -gt 0 -or $errs -gt 0 -or $maxDate -eq 'none') {
+        if ($failed -gt 0 -or $errs -gt 0) {
             Add-Result '看板' $b.slug 'FAIL' $detail; $bad++
+        } elseif ($maxDate -eq 'none') {
+            Add-Result '看板' $b.slug 'WARN' ($detail + '（payload 无日期字段，未做新鲜度判定）')
         } elseif ($stale) {
             Add-Result '看板' $b.slug 'WARN' $detail
         } else {
@@ -496,13 +446,15 @@ if ($Render) {
         Add-Result '渲染' '渲染脚本' 'SKIP' '缺少 post-cutover-render.py'
     } else {
         try {
+            $errFile = [System.IO.Path]::GetTempFileName()
             $oldPyIo2 = $env:PYTHONIOENCODING
             $env:PYTHONIOENCODING = 'utf-8'
-            try {
-                $out = & $py.Source $renderer --base 'http://127.0.0.1/myapp/' 2>&1
-            } finally {
-                $env:PYTHONIOENCODING = $oldPyIo2
-            }
+            # stderr 单独落文件，避免混进 stdout 破坏 JSON 解析（N6）。
+            try { $out = & $py.Source $renderer --base 'http://127.0.0.1/myapp/' 2>$errFile }
+            finally { $env:PYTHONIOENCODING = $oldPyIo2 }
+            $errText = if (Test-Path -LiteralPath $errFile) { [string](Get-Content -LiteralPath $errFile -Raw) } else { '' }
+            Remove-Item -LiteralPath $errFile -Force -ErrorAction SilentlyContinue
+            if ($LASTEXITCODE -ne 0 -or -not $out) { throw ("渲染器失败 exit=$LASTEXITCODE；stderr=" + ($errText -replace '\s+', ' ')) }
             $json = ($out -join "`n") | ConvertFrom-Json
             foreach ($p in $json) {
                 $detail = "console=$($p.console_errors) api4xx5xx=$(@($p.bad_api).Count) text=$($p.text_len)"
