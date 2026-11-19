@@ -61,6 +61,10 @@ cd ../whatsapp-kb-bot && npm ci
 
 生产机上这些目录已就绪，不要为了「对齐」重装。
 
+> **运行前提**：本目录含源码、静态资产与 `runtime\` 便携运行时，但**生产启动用的是本机系统
+> Python 3.12 / Node 24 / PostgreSQL 16**（数据在系统 PG 数据目录），个别任务还依赖本机的
+> CN EMS Java 客户端、Chrome/Edge 与 FineBI 导出目录。完整清单见 `docs/workspace/部署说明.md` §一「运行前提」。
+
 ### 3. 配置
 
 - 后端：`apps/my_app/backend/.env`（`DATABASE_URL`、调度器开关、上游凭据等）
