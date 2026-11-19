@@ -73,15 +73,23 @@ if (-not (Test-Path (Join-Path $Root 'apps\my_app'))) {
     }
 }
 
-# 2026-11-09 ISOLATED COPY guard.
-# While ISOLATED_COPY.flag exists, this copy must never drive start/stop
-# commands: the child .bat files use fixed production ports (80/443/7038/
-# 7090/9267) owned by D:\01_RPA, and running them here would disturb it.
-# Only the read-only status command is allowed. Delete the flag to promote.
-if ((Test-Path -LiteralPath (Join-Path $Root 'ISOLATED_COPY.flag')) -and $Command -ne '0-status') {
-    Write-Host '[BLOCKED] ISOLATED COPY: start/stop commands are disabled here.' -ForegroundColor Red
-    Write-Host 'This copy uses its own ports (8080/8443/...). Use .\start.bat or .\ops\shortcuts\1-start-all.bat instead.' -ForegroundColor Yellow
-    Write-Host 'To promote: restore production ports in .env, then delete ISOLATED_COPY.flag.' -ForegroundColor Yellow
+# 这台机器当前是什么角色，由根目录的标记决定（两个标记互斥，2026-11-19 起）：
+#   ISOLATED_COPY.flag -> 隔离副本：子 .bat 用固定端口，本控制器不能驱动启停
+#   PRODUCTION.flag    -> 生产树：本控制器是 01_RPA 时代的老入口，生产启停
+#                         一律走 ops\deploy\portal-ctl.ps1（避免两套启停并存）
+# 两种情况下都只允许只读的 0-status。
+$isIsolated = Test-Path -LiteralPath (Join-Path $Root 'ISOLATED_COPY.flag')
+$isProduction = Test-Path -LiteralPath (Join-Path $Root 'PRODUCTION.flag')
+if (($isIsolated -or $isProduction) -and $Command -ne '0-status') {
+    if ($isProduction) {
+        Write-Host '[BLOCKED] PRODUCTION TREE: start/stop commands are disabled here.' -ForegroundColor Red
+        Write-Host 'This tree serves 80/443/7038/7090/9267/9268 via the self-healing tasks.' -ForegroundColor Yellow
+        Write-Host 'Use ops\deploy\portal-ctl.ps1 -Action start|stop (or the OLBR desktop links).' -ForegroundColor Yellow
+    } else {
+        Write-Host '[BLOCKED] ISOLATED COPY: start/stop commands are disabled here.' -ForegroundColor Red
+        Write-Host 'This copy uses its own ports (8080/8443/...). Use .\start.bat or .\ops\shortcuts\1-start-all.bat instead.' -ForegroundColor Yellow
+        Write-Host 'To promote: restore production ports in .env, then delete ISOLATED_COPY.flag.' -ForegroundColor Yellow
+    }
     exit 1
 }
 

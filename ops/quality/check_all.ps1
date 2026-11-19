@@ -8,8 +8,8 @@
 #   powershell -NoProfile -File ops\quality\check_all.ps1 -SkipSteps 6,7 -SkipReason '门户 node_modules 尚未安装'
 #
 # 步骤：
-#   1. 当前目录是 02，存在 ISOLATED_COPY.flag
-#   2. .env 端口不在生产端口集合里
+#   1. 当前目录是 02，且带角色标记（PRODUCTION.flag / ISOLATED_COPY.flag 二选一）
+#   2. .env 端口不在生产端口集合里（仅隔离副本；生产树跳过并说明原因）
 #   3. 被跟踪文件里没有 .env、数据库、私钥、session（用 git ls-files，只查已跟踪文件）
 #   4. python -m compileall -q apps ops\deploy
 #   5. 在 apps\my_app 跑 ruff E9,F821
@@ -64,15 +64,31 @@ function Invoke-Checked {
     Write-StepPass -Step $Step -Message "$What 通过"
 }
 
-# 1. 当前目录是 02，且存在 ISOLATED_COPY.flag
+# 1. 当前目录是 02，且带角色标记（二选一）
+# 2026-11-19 起这台机器可能处于两种角色，标记互斥：
+#   PRODUCTION.flag     -> 生产树（80/443/7038/7090/9267/9268，PG 5432）
+#   ISOLATED_COPY.flag  -> 便携副本 / 冒烟副本（8080/8443/...，便携 PG 55432）
+# 两个都在或都不在时拒绝：角色不明时跑质量检查等于在猜。
 if ($Root -notlike '*02_olbr_portal*') {
     throw "当前目录不是 02（$Root），拒绝执行。"
 }
-if (-not (Test-Path -LiteralPath (Join-Path $Root 'ISOLATED_COPY.flag'))) {
-    throw "缺少 ISOLATED_COPY.flag，拒绝执行：当前目录可能不是隔离副本。"
+$isProd = Test-Path -LiteralPath (Join-Path $Root 'PRODUCTION.flag')
+$isIso = Test-Path -LiteralPath (Join-Path $Root 'ISOLATED_COPY.flag')
+if ($isProd -and $isIso) {
+    throw "PRODUCTION.flag 与 ISOLATED_COPY.flag 同时存在，拒绝执行：先删掉不该有的那个（生产树删 ISOLATED_COPY.flag）。"
 }
-Write-StepPass -Step 1 -Message "目录是 02，ISOLATED_COPY.flag 存在"
+if (-not $isProd -and -not $isIso) {
+    throw "既没有 PRODUCTION.flag 也没有 ISOLATED_COPY.flag，拒绝执行：无法判断这台机器的角色。"
+}
+$role = if ($isProd) { 'PRODUCTION.flag（生产树）' } else { 'ISOLATED_COPY.flag（隔离副本）' }
+Write-StepPass -Step 1 -Message "目录是 02，$role"
 
+# 2. 端口断言 —— 只对隔离副本有意义
+# 隔离副本的 .env 生效，所以要确认它没被写成生产端口；生产树的端口不在 .env 里
+# （写死在 ops\deploy\portal-ctl.ps1，线上 nginx.conf 是 80/443），本步跳过并说明。
+if ($isProd) {
+    Write-StepSkip -Step 2 -Reason '生产树：.env 不是生产端口的真相源（端口在 portal-ctl.ps1 / 线上 nginx.conf），端口断言只对隔离副本生效'
+} else {
 # 2. .env 里的端口不是生产端口（80、443、5432、7038、7090、9267）
 # 只比对端口赋值的值，不做子串匹配（否则 8080 会误命中 80、8443 会误命中 443）。
 $ProdPorts = @('80', '443', '5432', '7038', '7090', '9267')
@@ -92,6 +108,7 @@ if ($bad.Count -gt 0) {
     throw ".env 用了生产端口：`n$($bad -join "`n")"
 }
 Write-StepPass -Step 2 -Message ".env 端口不在生产端口集合里"
+}
 
 # 3. 被跟踪文件里没有 .env、数据库、私钥、session
 # 用 git ls-files，只查已跟踪文件，不扫描工作区全部文件（工作区里有未跟踪的

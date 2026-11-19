@@ -63,6 +63,7 @@
 - **启动**：`start_all.ps1` 六步——便携 PG（initdb → pg_ctl start → `SELECT 1` 轮询 → `SHOW data_directory` 校验 → createdb）→ nginx 配置生成（含 `nginx -t`）→ my_app 后端（uvicorn）→ 前端（vite preview）→ 门户（tsx）→ nginx；每步端口等待（30–45 s 超时），端口被外部进程占用时抛错拒绝启动（`Test-OwnPort`）。
 - **停止**：`stop_all.ps1` 七步——nginx `-s quit` 优雅退出 → 按 pid 文件逆序停 wa_bot / wa_analysis / portal / frontend / backend（pid + 进程名 + 启动时间三重校验防 pid 复用误杀）→ `pg_ctl -m fast stop`；绝不按端口盲杀、绝不 tree kill。
 - **干跑**：启动/停止均支持 `-DryRun`；另有 `ops/shortcuts/3-start-dryrun.bat` / `4-stop-dryrun.bat`。
+  （2026-11-19：这两个入口已随 `ops/shortcuts` 改生产转发而删除，本节为当时评审快照，见该目录 `README.txt`。）
 - **健康检查**：`ops/smoke/smoke.ps1` §8.3（见 §三）。
 
 ### 2.3 Linux 侧已核实的覆盖（仅 agent-worker）

@@ -73,9 +73,12 @@ cp scripts/env_template.txt .env
 start.bat
 ```
 
-或用 `ops/shortcuts/` 里的分步入口（`0-status` / `1-start-all` / `5-nginx-check` …）。
+或用 `ops/shortcuts/` 里的分步入口（`0-status` 查状态 / `1-start-all` 启动 / `2-stop-all` 停止 /
+`5-nginx-check` 只读查 nginx）。这套入口转发的是**生产总控** `ops\deploy\portal-ctl.ps1`
+（80/443/7038/7090/9267/9268）；打包交付副本里的分步入口是另一套 `my_portal\`，与它无关。
 
-入口：<https://localhost:8443/>（自签证书，浏览器提示不信任属预期）
+入口：<https://localhost/>（本机生产，443）。隔离副本按 `.env` 的 `NGINX_HTTPS_PORT`（如 8443），
+自签证书提示不信任属预期。
 
 详细部署说明见 **`部署说明.md`**。
 

@@ -24,6 +24,21 @@ $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 
 $Root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
+# 2026-11-19 生产树守卫：本脚本会 `nginx -s quit`，而生产 nginx 正持有 80/443；
+# 它跟踪的 TMP\portable-*.pid 在生产树上并不存在 —— 结果会是「把线上入口停了、
+# 却没停掉后端」。所以生产树一律拒绝，让调用方走 portal-ctl.ps1。
+if (Test-Path -LiteralPath (Join-Path $Root 'PRODUCTION.flag')) {
+    throw @'
+这是生产树（根目录有 PRODUCTION.flag），拒绝用隔离停止器停止。
+生产停止走 ops\deploy\portal-ctl.ps1 -Action stop，或 ops\deploy\olbr-stop.bat（带 Y/N 确认），
+或根目录 stop.bat（按标记分流）。
+'@
+}
+# 与 start_all.ps1 同一约定：角色不明就不跑。丢 ISOLATED_COPY.flag 时本脚本
+# 跟踪的 portable-*.pid 不属于这棵树，仍会执行步骤 1 的 `nginx -s quit`。
+if (-not (Test-Path -LiteralPath (Join-Path $Root 'ISOLATED_COPY.flag'))) {
+    throw '缺 ISOLATED_COPY.flag：本脚本只能在便携副本里运行，拒绝在主仓库停止'
+}
 # P1-6：目录解析集中在 noc-paths.ps1（与 start_all.ps1 共用，唯一真相源）。
 $nocPathsLib = Join-Path $PSScriptRoot 'noc-paths.ps1'
 if (-not (Test-Path -LiteralPath $nocPathsLib)) { throw "缺少目录解析脚本: $nocPathsLib（请从仓库重新取 ops\deploy\）" }

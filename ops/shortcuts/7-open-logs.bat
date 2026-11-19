@@ -1,17 +1,23 @@
 @echo off
 REM ============================================================
-REM  OLBR portable copy - open the runtime log/TMP folders
-REM  Portable: every path is derived from %~dp0, never a fixed drive.
+REM  OLBR production stack - open the runtime log folders
+REM  Root is TWO levels up from this file (ops\shortcuts\ -> tree root).
+REM  The old version used %~dp0.. (i.e. ops\) and therefore looked for
+REM  ops\TMP and ops\nginx-1.28.0\logs, neither of which exists.
 REM  ASCII-only + CRLF on purpose; non-ASCII breaks cmd parsing.
 REM ============================================================
 setlocal
-cd /d "%~dp0.."
-if exist "%~dp0..\TMP" (
-  start "" explorer.exe "%~dp0..\TMP"
+set "ROOT=%~dp0..\.."
+if exist "%ROOT%\TMP" (
+  start "" explorer.exe "%ROOT%\TMP"
 ) else (
-  echo TMP\ not created yet - run 1-start-all.bat first.
+  echo TMP folder missing: %ROOT%\TMP
 )
-echo nginx logs: %~dp0..\nginx-1.28.0\logs\
+if exist "%ROOT%\nginx-1.28.0\logs" (
+  start "" explorer.exe "%ROOT%\nginx-1.28.0\logs"
+) else (
+  echo nginx log folder missing: %ROOT%\nginx-1.28.0\logs
+)
 
 echo.
 echo ---- done. Press any key to close. ----

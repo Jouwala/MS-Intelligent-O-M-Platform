@@ -2,9 +2,9 @@
 
 | 目录 | 内容 |
 | --- | --- |
-| `ops/deploy/` | 02 副本的启停与运维脚本（入口 `start_all.ps1` / `stop_all.ps1`），详见其中 `README.md` |
+| `ops/deploy/` | 启停与运维脚本。**02 自 2026-11-18 起是生产树**：生产启停走 `portal-ctl.ps1` / `olbr-*.bat`，隔离副本启停走 `start_all.ps1` / `stop_all.ps1`，根 `start.bat` / `stop.bat` 按角色标记分流。详见其中 `README.md` 的「角色标记」一节 |
 | `ops/quality/` | 离线质量检查 `check_all.ps1`（完整 9 步，见下） |
-| `ops/shortcuts/` | 桌面快捷方式 bat（状态、干跑、打开首页/日志等） |
+| `ops/shortcuts/` | 生产入口快捷 bat（状态 / 启停 / nginx 只读检查 / 打开首页与日志 / 重建桌面快捷方式），**只转发**到 `ops/deploy/` 的 `portal-ctl.ps1` 与 `olbr-*.bat`；桌面快捷方式生成器在 `desktop_shortcuts/` |
 
 ## 质量检查
 
@@ -14,7 +14,8 @@ powershell -NoProfile -File ops\quality\check_all.ps1
 ```
 
 完整顺序（9 步）以脚本内注释与《NOC-SOC-Intelligent-Platform最终重构执行方案》
-第 7 节批 E 为准：目录与 `ISOLATED_COPY.flag` → `.env` 端口 → 被跟踪文件
+第 7 节批 E 为准：目录与角色标记（`PRODUCTION.flag` / `ISOLATED_COPY.flag` 二选一，
+两个都在或都不在都拒绝执行）→ `.env` 端口（仅隔离副本）→ 被跟踪文件
 无凭据/数据库 → compileall → ruff → 门户 lint/test → 门户文档守卫 →
 my_app 文档一致性守卫 → 路径断言。第 6 到 8 步在依赖或基线还没准备好时可以
 单独跳过，但脚本必须打印跳过原因，不能假装通过；跳过的步骤汇总在脚本末尾。

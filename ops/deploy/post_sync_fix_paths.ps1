@@ -43,6 +43,18 @@
 # Pass -Force to override (needed right after `git clone`, where the flag is not
 # tracked by git and therefore missing).
 #
+# Two role flags, not one:
+#   * ISOLATED_COPY.flag decides WHETHER to rewrite at all (above).
+#   * PRODUCTION.flag decides the nginx watchdog PORT: when the copy root has
+#     PRODUCTION.flag the nginx instance listens on 80, so the port is pinned to
+#     80 instead of NGINX_HTTP_PORT from .env (the root .env still carries the
+#     isolated 8080). Deleting PRODUCTION.flag makes the next checkout rewrite
+#     NginxPort back to 8080 and the 5-minute watchdog then "detects" a dead
+#     nginx and restarts it -- 2026-11-19 measured exactly this on D:\02.
+#     See docs/adr/0003-production-vs-isolated-markers.md.
+#   * Both flags present = ambiguous role: exit 2 even with -Force. Never guess
+#     the port (ADR 0003: 两个都有 = 拒绝执行).
+#
 # Idempotent: safe to run any number of times.
 #
 # Usage:
@@ -170,7 +182,30 @@ function Set-ParamDefault {
     return [regex]::Replace($Text, $pattern, $evaluator)
 }
 
-$httpPort = Read-EnvPort -Key 'NGINX_HTTP_PORT' -Default 8080
+# 生产树（根目录有 PRODUCTION.flag）的 nginx 跑在 80/443；根 .env 里仍是隔离副本时期的
+# 8080/8443。直接套用 .env 会把 nginx 看门狗改成探测 8080 —— 每 5 分钟误判一次「挂了」
+# 并重启 nginx。2026-11-19 实测：一次 git checkout 就把 NginxPort 从 80 改回 8080
+# （02 于 11-18 切成生产，但根 .env 的端口没跟着改）。隔离副本照旧读 .env。
+$productionFlag = Join-Path $CopyRoot 'PRODUCTION.flag'
+$isolatedFlag = Join-Path $CopyRoot 'ISOLATED_COPY.flag'
+$hasProduction = Test-Path -LiteralPath $productionFlag
+$hasIsolated = Test-Path -LiteralPath $isolatedFlag
+if ($hasProduction -and $hasIsolated) {
+    Write-Host '[ERROR] both PRODUCTION.flag and ISOLATED_COPY.flag exist: role is ambiguous; refusing to rewrite paths. Remove the wrong one and rerun.' -ForegroundColor Red
+    exit 2
+}
+$httpPort = if ($hasProduction) {
+    80
+} elseif ($hasIsolated) {
+    Read-EnvPort -Key 'NGINX_HTTP_PORT' -Default 8080
+} else {
+    # Neither marker = role unknown. The hook always calls with -Force, so a
+    # production tree that lost PRODUCTION.flag would otherwise be rewritten to
+    # 8080 with no warning at all. Say it loudly; the isolated copy (which has
+    # ISOLATED_COPY.flag) stays quiet.
+    Write-Msg '[WARN] neither PRODUCTION.flag nor ISOLATED_COPY.flag: role unknown; nginx watchdog port falls back to .env (8080). If this is the production tree, recreate the empty PRODUCTION.flag now.' 'Yellow'
+    Read-EnvPort -Key 'NGINX_HTTP_PORT' -Default 8080
+}
 $nginxDir = Join-Path $CopyRoot 'nginx-1.28.0'
 $nginxExe = Join-Path $nginxDir 'nginx.exe'
 $logPath = Join-Path $CopyRoot 'apps\nginx_monitor.log'
