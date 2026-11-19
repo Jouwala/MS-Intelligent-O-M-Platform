@@ -289,7 +289,8 @@ export const CONFIG = {
   lookupsPathAbs: abs(process.env.LOOKUPS_PATH || raw.lookupsPath || 'data/lookups.json'),
 
   authDirAbs: abs(process.env.AUTH_DIR || 'data/auth'),
-  logDirAbs: abs('data/logs'),
+  // P1-7：BOT_LOG_DIR 覆盖运行日志目录（ZIP 外部日志目录；未设置时默认不变）。
+  logDirAbs: abs(process.env.BOT_LOG_DIR || 'data/logs'),
 
   // 问答记录（SQLite）。与运行日志**分开存**：
   // 运行日志按天滚动会过期，问答记录是长期积累的分析资产。

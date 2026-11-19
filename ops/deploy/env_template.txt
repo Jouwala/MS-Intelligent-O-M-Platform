@@ -110,3 +110,25 @@ START_WA_BOT=0
 START_WA_ANALYSIS=0
 # 1 = 启动 nginx 反代。默认 1；只想单独调某个服务时可设 0。
 START_NGINX=1
+
+# ---- ZIP 部署外部目录（P1-6，NOC_HOME 模式）-----------------------------------
+# 只有 ZIP 绿色部署（versions/ + current 布局）才用这组变量；便携副本（D:\02）
+# 不设 NOC_HOME，走原来的 $Root 派生路径，行为不变。
+# ⚠ NOC_HOME 与 NOC_*_DIR 只从【进程环境】读，写在 .env 里无效——因为 .env
+#   文件本身的位置就靠它们定。由首次启动脚本/部署包装器在拉起前设置。
+# NOC_HOME=D:\noc-soc
+# NOC_CONFIG_DIR=            # 默认 <NOC_HOME>\config（.env、nginx.conf、certs/）
+# NOC_DATA_DIR=              # 默认 <NOC_HOME>\data（pgdata、portal-auth-data、bot-data）
+# NOC_LOGS_DIR=              # 默认 <NOC_HOME>\logs（pid 文件、进程日志、nginx 日志）
+# NOC_RUNTIME_DIR=           # 默认 <NOC_HOME>\runtime（python312、node、postgresql16、nginx）
+# NOC_ENV_FILE=              # 默认 <NOC_CONFIG_DIR>\.env
+# 外部模式下 start_all.ps1 会把 PGDATA、PORTAL_AUTH_DATA_DIR、CHAT_CA_FILE、
+# INDEX_PATH/AUTH_DIR 等派生变量指向上述外部目录，并断言写目标不在版本目录内。
+# bot 的 CA 证书（外部 config 提供，不进 ZIP）：首次启动时放到 <NOC_CONFIG_DIR>\certs\
+# 下，文件名为 liberia-noc-ca.pem（缺失时 bot 只告警，HTTP 场景不受影响）。
+# P1-7 业务代码路径覆盖（外部模式下 start_all.ps1 自动派生，平时不用手设）：
+# MY_APP_DB_PATH=<NOC_DATA_DIR>\app.db（sqlite 库与 uploads/attachments/instance.lock 的根）
+# MW_LINKS_PUBLIC_DIR=off（off = 不写 frontend\public 静态副本；_fe_dist 副本仍写）
+# BOT_LOG_DIR=<NOC_LOGS_DIR>\bot
+# MYAPP_LOG_DIR=<NOC_LOGS_DIR>（portal_qa / realtime_proxy / 看门狗日志根）
+# MY_APP_ENV_FILE=（独立拉起后端时指定 .env 位置；start_all 模式不需要）

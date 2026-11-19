@@ -10,11 +10,17 @@ try:
     from dotenv import load_dotenv
     # 显式读取 backend/.env（DATABASE_URL / MY_APP_DB_MODE）；
     # 缺失则跳过，不影响 sqlite 默认模式。
-    # 顺序：backend/.env 优先，缺失时回退项目根 .env；override=False 保证 OS 环境变量优先。
-    for _env_file in (
+    # 顺序：MY_APP_ENV_FILE（P1-7，如设）优先，其次 backend/.env，缺失时回退项目根 .env；
+    # override=False 保证 OS 环境变量优先。
+    _env_candidates = []
+    _env_override = os.environ.get("MY_APP_ENV_FILE", "").strip()
+    if _env_override:
+        _env_candidates.append(Path(_env_override))
+    _env_candidates.extend((
         Path(__file__).resolve().parent / ".env",
         Path(__file__).resolve().parent.parent / ".env",
-    ):
+    ))
+    for _env_file in _env_candidates:
         if _env_file.is_file():
             load_dotenv(_env_file, override=False)
 except Exception:  # noqa: BLE001
@@ -28,7 +34,9 @@ DB_MODE = os.environ.get("MY_APP_DB_MODE", "sqlite").strip().lower()
 if DB_MODE not in ("sqlite", "pg"):
     raise RuntimeError(f"MY_APP_DB_MODE 必须为 sqlite|pg，收到: {DB_MODE!r}")
 
-DB_PATH = Path(__file__).parent.parent / "db" / "app.db"
+# P1-7：MY_APP_DB_PATH 环境变量覆盖（ZIP 外部数据目录；未设置时默认不变）。
+_DB_PATH_OVERRIDE = os.environ.get("MY_APP_DB_PATH", "").strip()
+DB_PATH = Path(_DB_PATH_OVERRIDE) if _DB_PATH_OVERRIDE else Path(__file__).parent.parent / "db" / "app.db"
 
 # PG 连接串：仅 DB_MODE=pg 时使用；缺失则启动即明确报错（宁可失败也不静默）
 PG_DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()

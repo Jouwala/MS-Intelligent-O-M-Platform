@@ -374,10 +374,19 @@ def export_geojson_files():
         return None
     payload = json.dumps(fc, ensure_ascii=False, separators=(",", ":"))
     root = Path(__file__).resolve().parents[3]
-    targets = [
-        root / "frontend" / "public" / "mw_ume_orange_links.geojson",
-        Path(os.environ.get("FE_DIST_OUT") or root.parent / "_fe_dist") / "mw_ume_orange_links.geojson",
-    ]
+    # P1-7：MW_LINKS_PUBLIC_DIR 覆盖静态副本的首选落盘目录；设为 off 则
+    # 不写 public 副本（ZIP 外部模式：版本目录不写入，_fe_dist 副本已覆盖回退；
+    # off 是跨平台跳过值——Windows 进程环境无法表示空字符串，空值会被删成未设置）。
+    # 未设置时与旧行为一致。
+    targets = []
+    _public_dir = os.environ.get("MW_LINKS_PUBLIC_DIR")
+    if _public_dir is None:
+        _public_dir = str(root / "frontend" / "public")
+    if _public_dir and _public_dir.strip().lower() != "off":
+        targets.append(Path(_public_dir) / "mw_ume_orange_links.geojson")
+    targets.append(
+        Path(os.environ.get("FE_DIST_OUT") or root.parent / "_fe_dist") / "mw_ume_orange_links.geojson"
+    )
     written = []
     for t in targets:
         try:

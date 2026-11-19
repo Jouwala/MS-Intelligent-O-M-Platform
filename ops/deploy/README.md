@@ -5,6 +5,8 @@
 
 - 根 `start.bat` / `stop.bat` → `start_all.ps1` / `stop_all.ps1`
   （一键启动 / 停止本副本的四个子系统：my_app、portal、nginx、WhatsApp bot）
+- 根 `start.sh` / `stop.sh` → `start.sh` / `stop.sh`
+  （Linux 一键启动 / 停止本副本，对标 Windows 版；要求 POSIX sh + GNU coreutils）
 - `ops/shortcuts/` 里的桌面快捷方式 bat（状态、干跑、打开首页/日志等）
 - `setup-git-hooks.mjs`：把 `core.hooksPath` 指向仓库内的 `.githooks/`
 - `post_sync_fix_paths.ps1`：checkout / merge 后把两个监控脚本里的本机
@@ -106,6 +108,21 @@ Agent 在对话里长轮询 CI（`gh pr checks` 循环等待）**极耗 token，
 - `bundle_data.ps1`：把生产 PostgreSQL 快照灌进副本便携实例
 - `my_portal_ctl.ps1`、`write_nginx_conf.ps1`：§11-5 自仓库根归位至此；
   两者都按自身位置向上推导仓库根，`ops/shortcuts/` 的 bat 已指向新位置
+- `build-zip.mjs`（+ `lib/zip-package.mjs`、`lib/zip-writer.mjs`、`lib/zip-dir.mjs`）：
+  ZIP 交付 Phase 1（#146）的构建脚本——白名单组装 + 排除断言 + 凭据扫描 +
+  行尾规范化 + `build-info.json`/SHA256，产出可重复构建的应用 ZIP；
+  流程见 `docs/workspace/zip-build-release.md`
+- `noc-paths.ps1`：ZIP 交付 Phase 1（#146，P1-6）的外部目录解析——`start_all.ps1` /
+  `stop_all.ps1` 共用（唯一真相源）；设了 `NOC_HOME` 时配置/数据/日志/运行时一律
+  走部署根下的外部目录，版本目录零写入；不设则与旧行为一致。见
+  `docs/workspace/zip-external-dirs.md`
+- `start.sh` / `stop.sh` / `noc-paths.sh`：ZIP 交付 Phase 1（#146，P1-4）的 Linux
+  编排器——对标 `start_all.ps1` 六步 + pid 文件 + 熔断 + 干跑；`noc-paths.sh` 与
+  `noc-paths.ps1` 同一套模式/变量/断言；nginx 配置展开用内置 awk 展开器（同一模
+  板、同一占位符集）。ZIP 产物内 `.sh` 带可执行位（构建时按后缀置 0o755）；仓库
+  检出后须 `chmod +x` 或用 `sh` 显式调用。见 `docs/workspace/zip-external-dirs.md` §6
+- `runtime-manifest.json`：运行时发行包清单（`runtime-build.yml` 驱动下载与
+  SHA256 校验；`url`/`sha256` 为空的条目禁止构建，须从官方渠道核实后补齐）
 
 ## 已停用：从 RPA（主仓库）来的同步
 

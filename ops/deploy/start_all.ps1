@@ -13,6 +13,9 @@
     · 解释器一律用副本自带的 runtime\python312 / runtime\node，路径由 $Root 推出。
 
   PowerShell 5.1 兼容：不用 ::new()、三元、-Parallel、$IsWindows。
+  P1-6 外部目录（ZIP 绿色部署）：设了进程环境变量 NOC_HOME 后，配置/数据/
+  日志/运行时一律走部署根下的外部目录（解析见同目录 noc-paths.ps1），版本
+  目录在启动后零写入；不设 NOC_HOME 时全部路径与旧行为一致。
   用法：
     powershell -NoProfile -File ops\deploy\start_all.ps1
     powershell -NoProfile -File ops\deploy\start_all.ps1 -DryRun
@@ -44,12 +47,19 @@ $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
 # 本脚本位于 <Root>\ops\deploy\，故根 = 上两级
 $Root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
-$TmpDir = Join-Path $Root 'TMP'
-$RuntimeDir = Join-Path $Root 'runtime'
-$PyExe = Join-Path $RuntimeDir 'python312\python.exe'
-$NodeExe = Join-Path $RuntimeDir 'node\node.exe'
-$PgBin = Join-Path $RuntimeDir 'postgresql16\bin'
-$NginxDir = Join-Path $Root 'nginx-1.28.0'
+# P1-6：目录解析集中在 noc-paths.ps1（与 stop_all.ps1 共用，唯一真相源）；
+# 缺失则拒绝启动——静默回退会让外部模式的写目标悄悄落回版本目录。
+$nocPathsLib = Join-Path $PSScriptRoot 'noc-paths.ps1'
+if (-not (Test-Path -LiteralPath $nocPathsLib)) { throw "缺少目录解析脚本: $nocPathsLib（请从仓库重新取 ops\deploy\）" }
+. $nocPathsLib
+$paths = Get-NocPaths -Root $Root
+if ($paths.Mode -eq 'external') { Assert-NocPathsOutsideRoot -Paths $paths }
+$TmpDir = $paths.TmpDir
+$RuntimeDir = $paths.RuntimeDir
+$PyExe = $paths.PyExe
+$NodeExe = $paths.NodeExe
+$PgBin = $paths.PgBin
+$NginxDir = $paths.NginxDir
 $NginxExe = Join-Path $NginxDir 'nginx.exe'
 
 if ($Production) {
@@ -69,7 +79,7 @@ if (-not (Test-Path -LiteralPath $PortalRoot)) { $PortalRoot = $null }
 # 但没有 runtime\node\node.exe —— 少了这道检查，误在主仓库跑会往源码树写 .env。
 if (-not (Test-Path -LiteralPath $NodeExe) -or
     -not (Test-Path -LiteralPath (Join-Path $MyAppDir 'backend\main.py'))) {
-    throw "当前目录不是有效副本（缺 runtime\node\node.exe 或 apps\my_app\backend\main.py）：$Root`n本脚本只能在 build_olbr_portable.ps1 生成的副本里运行。"
+    throw "当前目录不是有效副本（缺 $NodeExe 或 apps\my_app\backend\main.py）：$Root`n本脚本只能在 build_olbr_portable.ps1 生成的副本或 ZIP 部署里运行（外部模式请检查 NOC_HOME/NOC_RUNTIME_DIR）。"
 }
 
 function Write-Step { param([string]$m) Write-Host "[*] $m" }
@@ -101,11 +111,15 @@ function Import-DotEnv {
     return $cfg
 }
 
-$envFile = Join-Path $Root '.env'
+$envFile = $paths.EnvFile
 $envTpl = Join-Path $PSScriptRoot 'env_template.txt'
 if (-not (Test-Path -LiteralPath $envFile)) {
     if (-not (Test-Path -LiteralPath $envTpl)) { throw "缺少 .env 模板: $envTpl" }
-    if (-not $DryRun) { Copy-Item -LiteralPath $envTpl -Destination $envFile -Force }
+    if (-not $DryRun) {
+        $envParent = Split-Path $envFile -Parent
+        if ($envParent -and -not (Test-Path -LiteralPath $envParent)) { New-Item -ItemType Directory -Path $envParent -Force | Out-Null }
+        Copy-Item -LiteralPath $envTpl -Destination $envFile -Force
+    }
     Write-Step "首次启动：已从模板生成 $envFile"
 }
 $cfg = Import-DotEnv $envFile
@@ -147,9 +161,9 @@ $dupPorts = $allPorts | Group-Object | Where-Object { $_.Count -gt 1 }
 if ($dupPorts) { throw "副本端口配置有重复: $(($dupPorts | ForEach-Object { $_.Name }) -join ',')" }
 
 # ------------------------------------------------------- 派生变量（盘符无关）
-$PgData = Join-Path $RuntimeDir 'pgdata'
+$PgData = $paths.PgData
 $FeDist = (Join-Path $Root 'apps\_fe_dist').Replace('\', '/')
-$AuthDir = Join-Path $RuntimeDir 'portal-auth-data'
+$AuthDir = $paths.AuthDir
 if (-not $DryRun -and -not (Test-Path -LiteralPath $AuthDir)) {
     New-Item -ItemType Directory -Path $AuthDir -Force | Out-Null
 }
@@ -182,6 +196,25 @@ $derived = [ordered]@{
     # eflow 问答知识库：指向副本同级目录（inspect_tt 等工具据此定位 app.db）。
     'EFLOW_QA_DIR' = (Join-Path $Root 'apps\eflow_Q&A')
 }
+# P1-6 外部模式：把代码已支持环境变量覆盖的运行时写路径一并指向外部目录。
+# 便携模式不设这些键——代码默认值即旧行为，绝不改动。KNOWLEDGE_DIR 故意不设：
+# 知识库是随包只读内容，仍在版本目录内（bot 的 config.js 默认即读它）。
+if ($paths.Mode -eq 'external') {
+    $botData = $paths.BotDataDir
+    $derived['PORTAL_DEFAULT_FILE'] = Join-Path $paths.DataDir 'portal-default.json'
+    $derived['TT_PYTHON'] = $PyExe
+    $derived['CHAT_CA_FILE'] = Join-Path $paths.CertsDir 'liberia-noc-ca.pem'
+    $derived['INDEX_PATH'] = Join-Path $botData 'index.json'
+    $derived['LOOKUPS_PATH'] = Join-Path $botData 'lookups.json'
+    $derived['AUTH_DIR'] = Join-Path $botData 'auth'
+    $derived['QA_LOG_PATH'] = Join-Path $botData 'qa.sqlite'
+    $derived['NOTIFY_AUTH_DIR'] = Join-Path $botData 'auth-notify'
+    $derived['MYAPP_LOG_DIR'] = $paths.LogsDir
+    # P1-7：业务代码新增的三项路径覆盖（MY_APP_DB_PATH / MW_LINKS_PUBLIC_DIR / BOT_LOG_DIR）。
+    $derived['MY_APP_DB_PATH'] = Join-Path $paths.DataDir 'app.db'
+    $derived['MW_LINKS_PUBLIC_DIR'] = 'off'
+    $derived['BOT_LOG_DIR'] = Join-Path $paths.LogsDir 'bot'
+}
 # 无条件覆盖：派生值必须由副本根推导，不能被父进程残留的生产值顶掉。
 foreach ($k in $derived.Keys) { Set-Cfg $k $derived[$k] }
 
@@ -207,8 +240,12 @@ $pathParts = @($env:PATH -split ';' | Where-Object { $_ -and ($_ -notmatch '\\01
 $env:PATH = (@($copyNodeDir, $copyPyDir) + $pathParts) -join ';'
 
 # backend\.env 只写本地 trust 连接串，不含任何真实口令；已存在则不覆盖（使用者可能自己改过）
+# P1-6 外部模式：不写——database.py 的 load_dotenv(override=False) 保证进程环境优先，
+# 本脚本已把同一批值放进进程环境；往版本目录写文件会破坏零写入。服务必须经本脚本启动。
 $backendEnv = Join-Path $MyAppDir 'backend\.env'
-if (-not (Test-Path -LiteralPath $backendEnv)) {
+if ($paths.Mode -eq 'external') {
+    Write-Step '外部模式：跳过 backend\.env 生成（连接串已由进程环境携带）'
+} elseif (-not (Test-Path -LiteralPath $backendEnv)) {
     if (-not $DryRun) {
         $utf8NoBom = New-Object System.Text.UTF8Encoding $false
         $body = "MY_APP_DB_MODE=pg`r`nDATABASE_URL=$dbUrl`r`nMY_APP_DISABLE_SCHEDULER=1`r`n"
@@ -217,6 +254,20 @@ if (-not (Test-Path -LiteralPath $backendEnv)) {
     if ($DryRun) { Write-Step "<干跑> 将生成 $backendEnv（仅本地回环连接，无口令）" }
     else { Write-Step "已生成 $backendEnv（仅本地回环连接，无口令）" }
 }
+
+# P1-6：目录规划（两种模式都打印；干跑时它是零写入核查的输入）。
+Write-Host ''
+Write-Host '==================== 目录规划 ====================' -ForegroundColor Cyan
+Write-Host ("  模式       {0}" -f $paths.Mode)
+Write-Host ("  版本目录   {0}" -f $Root)
+if ($paths.Mode -eq 'external') { Write-Host ("  部署根     {0}" -f $paths.NocHome) }
+Write-Host ("  配置       {0}" -f $paths.EnvFile)
+Write-Host ("  数据       {0}" -f $paths.DataDir)
+Write-Host ("  日志       {0}" -f $paths.LogsDir)
+Write-Host ("  运行时     {0}" -f $paths.RuntimeDir)
+Write-Host ("  PG 数据    {0}" -f $PgData)
+Write-Host ("  nginx 配置 {0}" -f $paths.NginxConfOut)
+Write-Host ''
 
 # ------------------------------------------------------------------ 通用工具
 function Test-PortListening {
@@ -265,7 +316,8 @@ function Test-OwnPort {
             $p = Get-Process -Id ([int]$parts[0]) -ErrorAction SilentlyContinue
             if ($p -and $p.ProcessName -eq $parts[1] -and $p.StartTime.Ticks -eq [long]$parts[2]) {
                 $exe = try { $p.Path } catch { '' }
-                if ($exe -and $exe.StartsWith($Root, [StringComparison]::OrdinalIgnoreCase)) {
+                # 外部模式解释器在 $RuntimeDir（版本目录外），同样算本副本。
+                if ($exe -and ($exe.StartsWith($Root, [StringComparison]::OrdinalIgnoreCase) -or $exe.StartsWith($RuntimeDir, [StringComparison]::OrdinalIgnoreCase))) {
                     Write-Skip "$Name 已由本副本启动（pid=$($parts[0])），端口 $Port 不重复拉起"
                     return $true
                 }
@@ -386,11 +438,50 @@ if (-not (Test-Path -LiteralPath $pgCtl)) {
             $createdb = Join-Path $PgBin 'createdb.exe'
             & $createdb -h 127.0.0.1 -p $PgPort -U $PgUser $PgDb 2>&1 | ForEach-Object { Write-Host "  $_" }
         }
+        # P1-1：首次启动建 schema。alembic 迁移不带 schema 前缀，依赖 search_path 首位为 app；
+        # 空库默认 search_path 只有 public，表会落错位置。两条语句均幂等，每次启动都跑，
+        # 兼修复此前已建好的库（已有表不搬家，见 docs\workspace\zip-p1-1-clean-pg-record.md）。
+        # 注意：此处 $ErrorActionPreference 为 Continue，失败不会自动抛，必须查 $LASTEXITCODE。
+        $schemaOut = & $psql -w -h 127.0.0.1 -p $PgPort -U $PgUser -d $PgDb -tAc 'CREATE SCHEMA IF NOT EXISTS app' 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "创建 app schema 失败：$schemaOut" }
+        $searchOut = & $psql -w -h 127.0.0.1 -p $PgPort -U $PgUser -d $PgDb -tAc "ALTER DATABASE $PgDb SET search_path TO app, public" 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "设置数据库 search_path 失败：$searchOut" }
     } finally { $ErrorActionPreference = $prevEap }
     Write-Ok "便携 PG 就绪 127.0.0.1:$PgPort / $PgDb"
     Write-Step '若数据库为空，请另跑 ops\deploy\bundle_data.ps1 灌入快照'
 } else {
     Write-Step "<干跑> 跳过 initdb / pg_ctl start（$PgData）"
+}
+
+# ------------------------------------------- 数据库迁移（alembic upgrade head，D1）
+# 绿包首次启动时库是空的：此前没有任何脚本跑 alembic，后端起来后表不存在。
+# upgrade head 幂等（已是最新时为空操作），每次启动都跑；失败直接抛错，
+# 不让后端带着未迁移的库启动。MY_APP_DB_MODE/DATABASE_URL 已由派生变量放进
+# 进程环境（见上），alembic env.py 直接读它们，与后端同一套连接串。
+Write-Step '--- 数据库迁移（alembic upgrade head） ---'
+if ($DryRun) {
+    Write-Step '<干跑> 跳过 alembic upgrade head'
+} else {
+    $alembicOut = Join-Path $TmpDir 'portable-alembic.out'
+    $alembicErr = Join-Path $TmpDir 'portable-alembic.err'
+    # 必须用 Start-Process 直接重定向文件，不能写 `& $PyExe ... > out 2> err`：
+    # alembic 的 INFO 日志按设计写到 stderr，而本脚本 $ErrorActionPreference = 'Stop'，
+    # Windows PowerShell 5.1 会把 native 命令的 stderr 包成 NativeCommandError 当终止
+    # 错误抛出 —— 迁移成功也会在第一条 INFO 处炸掉，且两个重定向文件留 0 字节、真因
+    # 只剩 start_all.err 里那一行（2026-11-19 冒烟 PR #151 实测，两文件皆 0 字节）。
+    $alembicProc = Start-Process -FilePath $PyExe -ArgumentList @('-m', 'alembic', 'upgrade', 'head') `
+        -WorkingDirectory $MyAppDir -NoNewWindow -Wait -PassThru `
+        -RedirectStandardOutput $alembicOut -RedirectStandardError $alembicErr
+    if ($alembicProc.ExitCode -ne 0) {
+        $tail = ''
+        if (Test-Path -LiteralPath $alembicErr) { $tail = (Get-Content -LiteralPath $alembicErr -Tail 10) -join "`n" }
+        throw "alembic upgrade head 失败（退出码 $($alembicProc.ExitCode)，见 $alembicErr）：$tail"
+    }
+    # alembic 正常日志在 stderr（INFO 行），一并回显，下次失败不用再翻文件。
+    foreach ($alembicLog in @($alembicOut, $alembicErr)) {
+        Get-Content -LiteralPath $alembicLog -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
+    }
+    Write-Ok 'alembic upgrade head 完成'
 }
 
 # ------------------------------------------------- 2) nginx 配置（含 -t 校验）
@@ -401,7 +492,9 @@ if ($startNginx -and -not $SkipNginxConf) {
     if (-not $DryRun) {
         if (-not (Test-Path -LiteralPath $confScript)) { throw "缺 $confScript（请先跑 -Stage config）" }
         & (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') `
-            -NoProfile -ExecutionPolicy Bypass -File $confScript
+            -NoProfile -ExecutionPolicy Bypass -File $confScript `
+            -EnvFile $envFile -NginxDir $NginxDir -ConfOut $paths.NginxConfOut `
+            -LogsDir $paths.NginxLogsDir -TempDir $paths.NginxTempDir -CertsDir $paths.CertsDir
         if ($LASTEXITCODE -ne 0) { throw 'write_nginx_conf.ps1 失败，未继续启动' }
     } else { Write-Step '<干跑> 跳过 write_nginx_conf.ps1' }
 }
@@ -462,22 +555,26 @@ if ($startNginx) {
     elseif ($DryRun) { Write-Step '<干跑> 跳过 nginx 启动' }
     elseif (-not (Test-Path -LiteralPath $NginxExe)) { Write-Err2 "缺 $NginxExe" }
     else {
-        # Windows nginx 自带 daemon 化，-p 指到副本自己的目录才能正确解析 logs/conf。
+        # Windows nginx 自带 daemon 化，-p 指到 nginx 安装目录才能正确解析相对路径；
+        # 配置文件用 -c 绝对路径（外部模式在 config/ 下）。
         # 同样不能用管道捕获输出：master/worker 常驻并继承管道句柄会把启动器挂死。
         $nginxOut = Join-Path $TmpDir 'portable-nginx.out'
         $nginxErr = Join-Path $TmpDir 'portable-nginx.err'
-        $nginxArg = '-p "{0}" -c "conf/nginx.conf"' -f $NginxDir.TrimEnd('\')
+        # -c 用绝对路径（正斜杠）：外部模式配置在 config/ 下；便携模式与旧的
+        # conf/nginx.conf 是同一文件。-p 仍指 nginx 安装目录（mime.types 相对它解析）。
+        $nginxConfArg = $paths.NginxConfOut.Replace('\', '/')
+        $nginxArg = '-p "{0}" -c "{1}"' -f $NginxDir.TrimEnd('\'), $nginxConfArg
         $nginxProc = Start-Process -FilePath $NginxExe -ArgumentList $nginxArg -PassThru `
             -WindowStyle Hidden -RedirectStandardOutput $nginxOut -RedirectStandardError $nginxErr
         if (-not $nginxProc) { Write-Err2 "nginx 未能启动，见 $nginxErr" }
-        $nginxPidFile = Join-Path $NginxDir 'logs\nginx.pid'
+        $nginxPidFile = Join-Path $paths.NginxLogsDir 'nginx.pid'
         if (Wait-Port $HttpPort 15) {
             if (Test-Path -LiteralPath $nginxPidFile) {
                 $npid = ([System.IO.File]::ReadAllText($nginxPidFile)).Trim()
                 if ($npid -match '^\d+$') { Save-Pid 'nginx' ([int]$npid) }
             }
             Write-Ok "nginx 已监听 $HttpPort"
-        } else { Write-Err2 "nginx 未在 15s 内监听 $HttpPort，见 $NginxDir\logs\error.log" }
+        } else { Write-Err2 ("nginx 未在 15s 内监听 {0}，见 {1}\error.log" -f $HttpPort, $paths.NginxLogsDir) }
     }
 } else { Write-Skip 'START_NGINX=0，不启动 nginx' }
 

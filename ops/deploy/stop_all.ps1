@@ -13,6 +13,8 @@
 
   nginx 特殊：优先用它自己的 -s quit 优雅退出（会读副本 logs\nginx.pid），
   pid 文件只作兜底。便携 PG 用 pg_ctl -m fast 停，只针对 <Root>\runtime\pgdata。
+  P1-6 外部目录：设了 NOC_HOME 时，pid 文件、pgdata、nginx 配置/日志一律走
+  外部目录（解析见 noc-paths.ps1，与 start_all.ps1 共用）；不设则与旧行为一致。
   =============================================================================
 #>
 [CmdletBinding()]
@@ -22,11 +24,17 @@ $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 
 $Root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
-$TmpDir = Join-Path $Root 'TMP'
-$NginxDir = Join-Path $Root 'nginx-1.28.0'
+# P1-6：目录解析集中在 noc-paths.ps1（与 start_all.ps1 共用，唯一真相源）。
+$nocPathsLib = Join-Path $PSScriptRoot 'noc-paths.ps1'
+if (-not (Test-Path -LiteralPath $nocPathsLib)) { throw "缺少目录解析脚本: $nocPathsLib（请从仓库重新取 ops\deploy\）" }
+. $nocPathsLib
+$paths = Get-NocPaths -Root $Root
+$TmpDir = $paths.TmpDir
+$RuntimeDir = $paths.RuntimeDir
+$NginxDir = $paths.NginxDir
 $NginxExe = Join-Path $NginxDir 'nginx.exe'
-$PgData = Join-Path $Root 'runtime\pgdata'
-$PgCtl = Join-Path $Root 'runtime\postgresql16\bin\pg_ctl.exe'
+$PgData = $paths.PgData
+$PgCtl = Join-Path $paths.PgBin 'pg_ctl.exe'
 
 function Write-Step { param([string]$m) Write-Host "[*] $m" }
 function Write-Ok { param([string]$m) Write-Host "[OK] $m" -ForegroundColor Green }
@@ -78,7 +86,7 @@ Write-Host ''
 
 # ------------------------------------------------------ 1) nginx 优雅退出
 Write-Step '--- 1/7 nginx ---'
-$nginxPidFile = Join-Path $NginxDir 'logs\nginx.pid'
+$nginxPidFile = Join-Path $paths.NginxLogsDir 'nginx.pid'
 if ((Test-Path -LiteralPath $NginxExe) -and (Test-Path -LiteralPath $nginxPidFile)) {
     # 先校验 nginx.pid 指向的进程确属副本（exe 在副本根下），再发 -s quit；
     # stale pid 可能被系统复用，盲发信号会误伤无关进程。
@@ -88,13 +96,15 @@ if ((Test-Path -LiteralPath $NginxExe) -and (Test-Path -LiteralPath $nginxPidFil
         $p = Get-Process -Id ([int]$npid) -ErrorAction SilentlyContinue
         if ($p) {
             $exe = try { $p.Path } catch { '' }
-            if ($exe -and $exe.StartsWith($Root, [StringComparison]::OrdinalIgnoreCase)) { $trusted = $true }
+            if ($exe -and ($exe.StartsWith($Root, [StringComparison]::OrdinalIgnoreCase) -or $exe.StartsWith($RuntimeDir, [StringComparison]::OrdinalIgnoreCase))) { $trusted = $true }
         }
     }
     if ($trusted) {
         if ($DryRun) { Write-Step '<干跑> 将执行 nginx -s quit' }
         else {
-            & $NginxExe -s quit -p "$NginxDir\" 2>&1 | ForEach-Object { Write-Host "  $_" }
+            # -c 绝对路径：外部模式配置在 config/ 下；便携模式与默认 conf 相同文件。
+            $nginxConfArg = $paths.NginxConfOut.Replace('\', '/')
+            & $NginxExe -s quit -p "$NginxDir\" -c "$nginxConfArg" 2>&1 | ForEach-Object { Write-Host "  $_" }
             Write-Ok 'nginx -s quit 已发出'
             Start-Sleep -Milliseconds 800
         }
@@ -123,4 +133,4 @@ if ((Test-Path -LiteralPath $PgCtl) -and (Test-Path -LiteralPath (Join-Path $PgD
 } else { Write-Skip '便携 PG 未初始化 / 缺 pg_ctl.exe' }
 
 Write-Host ''
-Write-Ok "完成：只处理了 $Root 下由 start_all.ps1 记录的进程，未触碰任何生产实例。"
+Write-Ok "完成：只处理了由 start_all.ps1 记录的本副本进程，未触碰任何生产实例。"

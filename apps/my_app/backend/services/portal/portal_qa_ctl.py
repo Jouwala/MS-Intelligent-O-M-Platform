@@ -151,7 +151,8 @@ def ensure_service(timeout: float = 25.0) -> dict:
             return {"status": "error", "port": PORT,
                     "error": f"找不到可用的 node 解释器（{node}）；可用 PORTAL_QA_NODE 指定"}
 
-        log_dir = _ROOT / "log"
+        # P1-7：MYAPP_LOG_DIR 覆盖日志根（ZIP 外部日志目录；未设置时默认不变）。
+        log_dir = Path(os.environ.get("MYAPP_LOG_DIR", "") or _ROOT / "log")
         log_dir.mkdir(parents=True, exist_ok=True)
         base_log = log_dir / f"portal_qa_{time.strftime('%Y%m%d')}_console.log"
         log_path = resolve_free_path(base_log)

@@ -13,6 +13,9 @@
   用法（一般由 start_all.ps1 调用，也可单独跑）：
     powershell -NoProfile -File write_nginx_conf.ps1
     powershell -NoProfile -File write_nginx_conf.ps1 -HttpPort 8080 -BePort 17038
+  P1-6 外部目录：start_all.ps1 在外部模式（NOC_HOME）下传 -EnvFile/-NginxDir/
+  -ConfOut/-LogsDir/-TempDir/-CertsDir，配置与日志落到外部目录；单独跑时不传
+  这些参数即走旧行为（配置写 nginx 目录下的 conf/nginx.conf）。
   =============================================================================
 #>
 [CmdletBinding()]
@@ -23,6 +26,12 @@ param(
     [int]$BePort = 0,
     [int]$FePort = 0,
     [int]$PortalPort = 0,
+    [string]$EnvFile = '',
+    [string]$NginxDir = '',
+    [string]$ConfOut = '',
+    [string]$LogsDir = '',
+    [string]$TempDir = '',
+    [string]$CertsDir = '',
     [switch]$SkipValidate
 )
 
@@ -45,7 +54,7 @@ $rootFwd = $Root.Replace('\', '/').TrimEnd('/')
 # start_all.ps1 读 .env 后只留了局部变量、没有回写进程环境，所以本脚本被单独
 # 调用（或改过 .env 端口）时必须自己再读一次，否则 nginx 会退回默认端口而错配。
 $envCfg = @{}
-$envPath = Join-Path $Root '.env'
+if ($EnvFile) { $envPath = $EnvFile } else { $envPath = Join-Path $Root '.env' }
 if (Test-Path -LiteralPath $envPath) {
     foreach ($line in [System.IO.File]::ReadAllLines($envPath, [System.Text.Encoding]::UTF8)) {
         $t = $line.Trim()
@@ -73,10 +82,20 @@ $BePort     = Resolve-Port $BePort     'MY_APP_BE_PORT'   7039
 $FePort     = Resolve-Port $FePort     'MY_APP_FE_PORT'   7091
 $PortalPort = Resolve-Port $PortalPort 'PORTAL_PORT'      9277
 
-$nginxDir = Join-Path $Root 'nginx-1.28.0'
+if (-not $NginxDir) {
+    $NginxDir = Join-Path $Root 'nginx-1.28.0'
+    if (-not (Test-Path -LiteralPath (Join-Path $NginxDir 'nginx.exe'))) {
+        $runtimeNginx = Join-Path $Root 'runtime\nginx-1.28.0'
+        if (Test-Path -LiteralPath (Join-Path $runtimeNginx 'nginx.exe')) { $NginxDir = $runtimeNginx }
+    }
+}
+$nginxDir = $NginxDir
 $tplPath  = Join-Path $Root 'nginx.conf.template'
-$confDir  = Join-Path $nginxDir 'conf'
-$confPath = Join-Path $confDir 'nginx.conf'
+if (-not $ConfOut) { $ConfOut = Join-Path $nginxDir 'conf\nginx.conf' }
+if (-not $LogsDir) { $LogsDir = Join-Path $nginxDir 'logs' }
+if (-not $TempDir) { $TempDir = Join-Path $nginxDir 'temp' }
+if (-not $CertsDir) { $CertsDir = Join-Path $nginxDir 'certs' }
+$confPath = $ConfOut
 
 if (-not (Test-Path -LiteralPath $tplPath)) { throw "缺少模板: $tplPath（请先跑主仓库 scripts\build_olbr_portable.ps1 -Stage config）" }
 if (-not (Test-Path -LiteralPath (Join-Path $nginxDir 'nginx.exe'))) { throw "缺少 nginx.exe: $nginxDir（请先跑 -Stage nginx）" }
@@ -89,13 +108,20 @@ $text = $text.Replace('{{HTTPS_PORT}}', [string]$HttpsPort)
 $text = $text.Replace('{{BE_PORT}}', [string]$BePort)
 $text = $text.Replace('{{FE_PORT}}', [string]$FePort)
 $text = $text.Replace('{{PORTAL_PORT}}', [string]$PortalPort)
+# nginx 在 Windows 上接受正斜杠；反斜杠在 conf 里是转义字符，必须换掉
+$logsFwd = $LogsDir.Replace('\', '/').TrimEnd('/')
+$tempFwd = $TempDir.Replace('\', '/').TrimEnd('/')
+$certsFwd = $CertsDir.Replace('\', '/').TrimEnd('/')
+$text = $text.Replace('{{NGINX_LOGS}}', $logsFwd)
+$text = $text.Replace('{{NGINX_TEMP}}', $tempFwd)
+$text = $text.Replace('{{NGINX_CERTS}}', $certsFwd)
 
 if ($text -match '\{\{[A-Z_]+\}\}') { throw "模板里还有未替换的占位符: $($Matches[0])" }
 
-# nginx 启动前必须能写 logs/ 与 temp/，否则 error_log 打不开直接退出
-foreach ($d in @('conf', 'logs', 'temp')) {
-    $p = Join-Path $nginxDir $d
-    if (-not (Test-Path -LiteralPath $p)) { New-Item -ItemType Directory -Path $p -Force | Out-Null }
+# nginx 启动前必须能写日志与临时目录，否则 error_log 打不开直接退出；
+# 配置输出的父目录也要存在（外部模式在 config/ 下）。
+foreach ($p in @($LogsDir, $TempDir, (Split-Path $confPath -Parent))) {
+    if ($p -and -not (Test-Path -LiteralPath $p)) { New-Item -ItemType Directory -Path $p -Force | Out-Null }
 }
 
 $utf8NoBom = New-Object System.Text.UTF8Encoding $false
@@ -112,7 +138,8 @@ if (-not $SkipValidate) {
     $prevPref = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $tOut = & $exe -t -p "$nginxDir\" -c 'conf/nginx.conf' 2>&1
+        $confArg = $confPath.Replace('\', '/')
+        $tOut = & $exe -t -p "$nginxDir\" -c "$confArg" 2>&1
         $tCode = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $prevPref

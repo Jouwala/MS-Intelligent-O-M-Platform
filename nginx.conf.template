@@ -2,8 +2,12 @@
 # nginx.conf.template —— 离线副本专用（由 write_nginx_conf.ps1 在启动时展开）
 # -----------------------------------------------------------------------------
 # 占位符：{{ROOT}} {{HTTP_PORT}} {{HTTPS_PORT}} {{BE_PORT}} {{FE_PORT}} {{PORTAL_PORT}}
+#   {{NGINX_LOGS}} {{NGINX_TEMP}} {{NGINX_CERTS}}
 #   {{ROOT}} 是副本根目录的绝对路径（正斜杠、无尾斜杠），启动时按实际盘符填入，
 #   所以这份配置**与盘符无关**，拷到 E:\ 或 C:\Users\xxx\ 都能跑。
+#   {{NGINX_LOGS}} / {{NGINX_TEMP}} / {{NGINX_CERTS}} 由 write_nginx_conf.ps1 填入：
+#   便携模式指向 nginx 目录下的 logs/、temp/、certs/（与旧行为一致）；
+#   外部模式（NOC_HOME）指向外部 logs/ 与 config/，版本/运行时目录零写入。
 #
 # 与主仓库 D:\01_RPA\nginx-1.28.0\conf\nginx.conf 的差异（刻意删掉的）：
 #   · 80 -> 443 强制跳转 —— 副本改用 80/443 双监听同一份 location 清单。
@@ -29,6 +33,7 @@
 # =============================================================================
 
 worker_processes  1;
+pid {{NGINX_LOGS}}/nginx.pid;
 
 events {
     worker_connections  1024;
@@ -41,8 +46,12 @@ http {
     log_format  timed  '$remote_addr - $remote_user [$time_local] "$request" '
                        '$status $body_bytes_sent "$http_referer" "$http_user_agent" '
                        'rt=$request_time urt=$upstream_response_time';
-    access_log  logs/access.log  timed;
-    error_log   logs/error.log   warn;
+    access_log  {{NGINX_LOGS}}/access.log  timed;
+    error_log   {{NGINX_LOGS}}/error.log   warn;
+
+    # 临时文件目录：默认会落在 -p 前缀下；显式指向外部目录，运行时目录零写入。
+    client_body_temp_path {{NGINX_TEMP}}/client_body;
+    proxy_temp_path       {{NGINX_TEMP}}/proxy;
 
     sendfile        on;
     keepalive_timeout  65;
@@ -67,8 +76,8 @@ http {
         listen       {{HTTPS_PORT}} ssl;
         listen       [::]:{{HTTPS_PORT}} ssl;
         http2        on;
-        ssl_certificate     {{ROOT}}/nginx-1.28.0/certs/portal.crt;
-        ssl_certificate_key {{ROOT}}/nginx-1.28.0/certs/portal.key;
+        ssl_certificate     {{NGINX_CERTS}}/portal.crt;
+        ssl_certificate_key {{NGINX_CERTS}}/portal.key;
         ssl_protocols       TLSv1.2 TLSv1.3;
         ssl_ciphers         HIGH:!aNULL:!MD5;
         ssl_session_cache   shared:SSL:10m;
