@@ -188,6 +188,8 @@ try {
     $hist = (Get-Json "$Api/api/tasks/history?limit=3000").history
     $since = (Get-Date).AddHours(-1 * $SinceHours)
     $win = @($hist | Where-Object { $_.started_at -and ([datetime]$_.started_at) -ge $since })
+    # 8c 节要用同一份窗口数据判断「降级门禁有没有生效」，避免再拉一次历史
+    $script:TaskHistory = @($win)
     $fails = @($win | Where-Object { -not $_.success })
     $rate = if ($win.Count) { [Math]::Round(100.0 * $fails.Count / $win.Count, 1) } else { 0 }
     $detail = "runs=$($win.Count) fail=$($fails.Count) ($rate%)"
@@ -307,6 +309,166 @@ Write-Section '8. 外部依赖（不判失败）'
 if (Test-Tcp 'exchmail.orange-cit.ci' 443 5000) { Add-Result '外部' 'EWS exchmail:443' 'PASS' '可达' }
 else { Add-Result '外部' 'EWS exchmail:443' 'WARN' 'TCP 5s 不可达 → 邮件类任务会失败（上游/网络）' }
 
+# ═══════════════════════════════════════════════ 8b. 运行时状态是否与 01 一比一
+# 2026-11-19 教训：存活检查全绿，但看板目录/账号/team 分配在切换时没搬全，
+# 用户看到的是「CXO View 只剩 3 条」「OSS Portal Login 只剩 1 个链接」。
+# 这一节比的是**内容**（条目数 / 账号 / 字段 / 配置 JSON），不是端口与 schema。
+Write-Section '8b. 运行时状态一致性（与 01_olbr_portal 对比）'
+$parity = Join-Path $PSScriptRoot 'check_runtime_parity.py'
+$pyCmd = Get-Command python -ErrorAction SilentlyContinue
+$src01 = 'D:\01_olbr_portal'
+if (-not $pyCmd) {
+    Add-Result '状态' '运行时对比' 'SKIP' 'PATH 里没有 python'
+} elseif (-not (Test-Path -LiteralPath $parity)) {
+    Add-Result '状态' '运行时对比' 'SKIP' '缺少 check_runtime_parity.py'
+} elseif (-not (Test-Path -LiteralPath $src01)) {
+    Add-Result '状态' '运行时对比' 'SKIP' '本机没有 D:\01_olbr_portal（冒烟副本/回退后正常）'
+} else {
+    try {
+        # PS 5.1 下 python 子进程的 stdout 默认按系统代码页编码，脚本一 print 中文就
+        # UnicodeEncodeError（2026-11-19 实测 check_runtime_parity.py 就是这么挂的）。
+        $oldPyIo = $env:PYTHONIOENCODING
+        $env:PYTHONIOENCODING = 'utf-8'
+        try {
+            $out = & $pyCmd.Source $parity --source $src01 --target $Root 2>&1
+            $code = $LASTEXITCODE
+        } finally {
+            $env:PYTHONIOENCODING = $oldPyIo
+        }
+        $bad = @($out | Where-Object { $_ -match '^FAIL' })
+        if ($code -eq 0) {
+            Add-Result '状态' '运行时对比' 'PASS' '账号/team/看板目录/UI 配置与 01 一致'
+        } else {
+            Add-Result '状态' '运行时对比' 'FAIL' (($bad | Select-Object -First 3) -join ' | ')
+        }
+    } catch {
+        Add-Result '状态' '运行时对比' 'WARN' $_.Exception.Message
+    }
+}
+
+# ═══════════════════════════════════════ 8c. 邮箱通道（EWS）检测与降级
+# 2026-11-19 教训：EWS 从 11-18 21:24 起不可达，email_recovery 的探测一直在跑，
+# 但「通道已确认不可用 → 纯发信任务整轮延后」这个门禁（ews_deferral，PR #170）
+# 是后加的能力：代码在位 ≠ 运行进程已加载。所以这一节既查探测状态，也查
+# **降级到底有没有在发生**（窗口内有没有 deferred 记录），否则邮件任务会继续
+# 跑满超时、发失败告警、占住 m 组 worker。
+Write-Section '8c. 邮箱通道检测与降级机制'
+$stateFile = Join-Path $Root 'apps\my_app\TMP\email_recovery_state.json'
+$probe = $null
+if (Test-Path -LiteralPath $stateFile) {
+    try { $probe = (Get-Content -LiteralPath $stateFile -Raw -Encoding UTF8 | ConvertFrom-Json).__ews_probe__ } catch { }
+}
+if (-not $probe) {
+    Add-Result '邮箱' 'EWS 探测状态' 'WARN' '没有 email_recovery_state.json 的 __ews_probe__（探测还没跑过）'
+} else {
+    $probeAge = [Math]::Round(((Get-Date) - [datetime]$probe.last_probe_at).TotalMinutes, 0)
+    $detail = "status=$($probe.status) kind=$($probe.kind) age=${probeAge}m down_count=$($probe.down_count)"
+    if ($probeAge -gt 30) {
+        Add-Result '邮箱' 'EWS 探测状态' 'WARN' ($detail + '（探测超过 30 分钟没更新，降级判断会失效）')
+    } else {
+        Add-Result '邮箱' 'EWS 探测状态' 'PASS' $detail
+    }
+    if ($probe.status -eq 'down') {
+        # 先看运行进程到底加载了没有：模块文件比后端进程还新 → 一定没加载，
+        # 这比「等一条 deferred 记录」快得多（可延后任务多为每小时/每天）。
+        $deferPy = Join-Path $Root 'apps\my_app\backend\services\email\ews_deferral.py'
+        $listener7038 = Get-Listeners -Ports @(7038)
+        $backendStart = $null
+        if ($listener7038.ContainsKey(7038)) {
+            $bi = Get-ProcInfo -ProcId $listener7038[7038]
+            if ($bi) { $backendStart = $bi.Started }
+        }
+        if ((Test-Path -LiteralPath $deferPy) -and $backendStart) {
+            $landed = (Get-Item -LiteralPath $deferPy).LastWriteTime
+            if ($landed -gt $backendStart) {
+                Add-Result '邮箱' '门禁代码已加载' 'FAIL' ("ews_deferral.py 落地 $($landed.ToString('HH:mm:ss')) 晚于后端启动 $($backendStart.ToString('HH:mm:ss'))：未加载，需重启后端")
+            } else {
+                Add-Result '邮箱' '门禁代码已加载' 'PASS' ("后端 $($backendStart.ToString('HH:mm:ss')) 启动晚于模块落地，已加载")
+            }
+        } else {
+            Add-Result '邮箱' '门禁代码已加载' 'WARN' '无法判定（缺 ews_deferral.py 或 7038 无监听）'
+        }
+
+        # 只统计**后端这次启动之后**的运行：重启前那些失败是旧进程留下的，
+        # 拿来判门禁会把每次重启都误报成 FAIL。
+        $cut = if ($backendStart) { $backendStart } else { (Get-Date).AddHours(-1 * $SinceHours) }
+        $deferred = @($script:TaskHistory | Where-Object {
+                ([datetime]$_.started_at -ge $cut) -and
+                ($_.trigger -eq 'deferred' -or ([string]$_.error) -like '*EWS_DEFERRED*')
+            }).Count
+        $deferIds = @()
+        $regFile0 = Join-Path $Root 'apps\my_app\backend\task_registry.py'
+        if (Test-Path -LiteralPath $regFile0) {
+            $mm = [regex]::Match((Get-Content -LiteralPath $regFile0 -Raw -Encoding UTF8),
+                                 'EWS_DEFERRABLE_IDS\s*=\s*frozenset\(\{(?s)(.*?)\}\)')
+            if ($mm.Success) {
+                $deferIds = @([regex]::Matches($mm.Groups[1].Value, '"([a-z0-9_]+)"') | ForEach-Object { $_.Groups[1].Value })
+            }
+        }
+        $samples = @($script:TaskHistory | Where-Object {
+                ($deferIds -contains $_.task_id) -and ([datetime]$_.started_at -ge $cut)
+            })
+        if ($deferred -gt 0) {
+            Add-Result '邮箱' '降级实际发生' 'PASS' ("通道 down，重启后 deferred=$deferred 条（延后而非失败）")
+        } elseif ($samples.Count -eq 0) {
+            Add-Result '邮箱' '降级实际发生' 'WARN' ("通道 down，但后端 $($cut.ToString('HH:mm:ss')) 重启后还没有可延后任务运行过，暂无样本")
+        } else {
+            Add-Result '邮箱' '降级实际发生' 'FAIL' ("通道 down，重启后可延后任务跑了 $($samples.Count) 次却 0 条 deferred：门禁没生效")
+        }
+    } else {
+        Add-Result '邮箱' '降级实际发生' 'PASS' '通道未处于 down，无需延后'
+    }
+}
+$regFile = Join-Path $Root 'apps\my_app\backend\task_registry.py'
+if (Test-Path -LiteralPath $regFile) {
+    $regTxt = Get-Content -LiteralPath $regFile -Raw -Encoding UTF8
+    $m = [regex]::Match($regTxt, 'EWS_DEFERRABLE_IDS\s*=\s*frozenset\(\{(?s)(.*?)\}\)')
+    $nDefer = if ($m.Success) { ([regex]::Matches($m.Groups[1].Value, '"[a-z0-9_]+"')).Count } else { 0 }
+    if ($nDefer -ge 10) { Add-Result '邮箱' '可延后任务登记' 'PASS' ("EWS_DEFERRABLE_IDS=$nDefer") }
+    else { Add-Result '邮箱' '可延后任务登记' 'FAIL' ("EWS_DEFERRABLE_IDS 只解析到 $nDefer 个（基线 ≥10）") }
+} else {
+    Add-Result '邮箱' '可延后任务登记' 'FAIL' '找不到 backend\task_registry.py'
+}
+
+# ═══════════════════════════════════════ 8d. 仪表盘报告条目（门户看板目录）
+# 2026-11-19 教训：切换只搬 git 内容，backend\data\portal_catalog.json 没搬 →
+# 门户回落到内置 MsPortal/assets/data.js 的 54 条，CXO View 只剩 3 条、
+# Friends Link 只剩 1 条。这里查的是**内容**（条目数 / 分组 / 编号 / 内链主机），
+# 不依赖 01 还在不在，所以比 8b 的全量对比更适合每天跑。
+Write-Section '8d. 仪表盘报告条目（门户看板目录）'
+$catFile = Join-Path $Root 'apps\my_app\backend\data\portal_catalog.json'
+if (-not (Test-Path -LiteralPath $catFile)) {
+    Add-Result '报告' '看板目录文件' 'FAIL' '缺少 backend\data\portal_catalog.json（v3 门户会回落内置 54 条）'
+} else {
+    try {
+        $cat = Get-Content -LiteralPath $catFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        $items = @($cat.items)
+        $groups = @($cat.groups)
+        $detail = "items=$($items.Count) groups=$($groups.Count) savedAt=$($cat.savedAt)"
+        if ($items.Count -ge 65) { Add-Result '报告' '条目总数' 'PASS' $detail }
+        else { Add-Result '报告' '条目总数' 'FAIL' ($detail + '（基线 65；少了说明没搬全）') }
+
+        foreach ($g in @('CXO View', 'Friends Link')) {
+            $cnt = @($items | Where-Object { @($_.groups) -contains $g }).Count
+            $base = if ($g -eq 'CXO View') { 5 } else { 11 }
+            if ($cnt -ge $base) { Add-Result '报告' ("分组 " + $g) 'PASS' ("$cnt 条") }
+            else { Add-Result '报告' ("分组 " + $g) 'FAIL' ("$cnt 条（基线 $base）") }
+        }
+
+        $nos = @($items | ForEach-Object { $_.no })
+        $uniq = @($nos | Select-Object -Unique)
+        if ($uniq.Count -eq $nos.Count) { Add-Result '报告' '编号唯一' 'PASS' ($nos.Count.ToString() + ' 个 no 无重复') }
+        else { Add-Result '报告' '编号唯一' 'WARN' (($nos.Count - $uniq.Count).ToString() + ' 个重复 no') }
+
+        # 指向本平台的内链必须落在生产主机上（切换后常见错：仍指向 192.168.100.19）
+        $wrong = @($items | Where-Object { ([string]$_.url) -match '^https?://(192\.168\.100\.19|localhost|127\.0\.0\.1)' })
+        if ($wrong.Count -eq 0) { Add-Result '报告' '内链主机' 'PASS' '没有指向 01/localhost 的内链' }
+        else { Add-Result '报告' '内链主机' 'WARN' ($wrong.Count.ToString() + ' 条内链仍指向 01/localhost') }
+    } catch {
+        Add-Result '报告' '看板目录' 'FAIL' $_.Exception.Message
+    }
+}
+
 # ═══════════════════════════════════════════════════════════ 9. 可选：真实渲染
 if ($Render) {
     Write-Section '9. 真实渲染（Playwright）'
@@ -318,7 +480,13 @@ if ($Render) {
         Add-Result '渲染' '渲染脚本' 'SKIP' '缺少 post-cutover-render.py'
     } else {
         try {
-            $out = & $py.Source $renderer --base 'http://127.0.0.1/myapp/' 2>&1
+            $oldPyIo2 = $env:PYTHONIOENCODING
+            $env:PYTHONIOENCODING = 'utf-8'
+            try {
+                $out = & $py.Source $renderer --base 'http://127.0.0.1/myapp/' 2>&1
+            } finally {
+                $env:PYTHONIOENCODING = $oldPyIo2
+            }
             $json = ($out -join "`n") | ConvertFrom-Json
             foreach ($p in $json) {
                 $detail = "console=$($p.console_errors) api4xx5xx=$(@($p.bad_api).Count) text=$($p.text_len)"
