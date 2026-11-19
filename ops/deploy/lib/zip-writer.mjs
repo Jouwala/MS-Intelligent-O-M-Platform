@@ -59,6 +59,7 @@ function checkPath(p) {
 /**
  * @param entries [{ path, data: Buffer, mode = 0o644, dir = false }]
  *   path 为 ZIP 内相对路径（目录以 / 结尾）；mode 为 Unix 权限位（.sh 用 0o755）。
+ *   符号链接条目用 mode 0o120777、data 为目标路径（zip-dir.mjs 用）。
  * @param outPath 写出路径（父目录须已存在；存在则覆盖）。
  * @param mtimeMs 所有条目的统一时间戳（毫秒，UTC）。可重复构建靠它固定。
  * @returns {{ entries: number, bytes: number }}
@@ -139,7 +140,9 @@ export function writeZip(entries, outPath, { mtimeMs = 0 } = {}) {
       header.writeUInt16LE(0, 34) // disk number start
       header.writeUInt16LE(0, 36) // internal attributes
       // 外部属性：高 16 位为 Unix 权限位；目录再加 DOS 目录位。
-      header.writeUInt32LE(((c.mode & 0xffff) << 16) | (c.dir ? 0x10 : 0), 38)
+      // >>> 0：mode 含文件类型位时（如符号链接 0o120777）左移后为负数，
+      // writeUInt32LE 只接受无符号值，须先转无符号。
+      header.writeUInt32LE((((c.mode & 0xffff) << 16) | (c.dir ? 0x10 : 0)) >>> 0, 38)
       header.writeUInt32LE(c.headerOffset, 42)
       write(header)
       write(c.name)
