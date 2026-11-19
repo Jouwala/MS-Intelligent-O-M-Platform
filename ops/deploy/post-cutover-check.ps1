@@ -78,6 +78,15 @@ function Get-Code([string]$Url) {
     }
 }
 
+# 服务正在重启时第一次探测必然失败（2026-11-19 实测：7090 在 11:21:03 才起来，
+# 检查在 11:20:56 探到「未监听 / 502」）。给一次 6 秒后的重试，避免把重启误报成故障。
+function Get-CodeRetry([string]$Url) {
+    $code = Get-Code $Url
+    if ($code -eq 200) { return $code }
+    Start-Sleep -Seconds 6
+    return (Get-Code $Url)
+}
+
 # 本机自签证书：PS 5.1 没有 -SkipCertificateCheck，统一用 curl 探 HTTPS
 function Get-CodeHttps([string]$Url) {
     if (-not (Get-Command curl.exe -ErrorAction SilentlyContinue)) { return -1 }
@@ -123,6 +132,13 @@ Write-Host ('   回看窗口 ' + $SinceHours + ' 小时' + $(if ($NoPrewarm) { '
 Write-Section '1. 端口与进程归属'
 $wantPorts = @(80, 443, 5432, 7038, 7090, 9267, 9268, 9269)
 $listeners = Get-Listeners -Ports $wantPorts
+# 关键服务可能正在重启：缺了就等 6 秒再扫一次，别把「正在拉起」报成「没在跑」
+$criticalPorts = @(7038, 7090, 9267, 9268)
+$missingCritical = @($criticalPorts | Where-Object { -not $listeners.ContainsKey($_) })
+if ($missingCritical.Count -gt 0) {
+    Start-Sleep -Seconds 6
+    $listeners = Get-Listeners -Ports $wantPorts
+}
 foreach ($port in $wantPorts) {
     if ($listeners.ContainsKey($port)) {
         $proc = Get-ProcInfo -ProcId $listeners[$port]
@@ -159,7 +175,7 @@ $httpChecks = @(
     @{ Name = '80 /api/health'; Url = 'http://127.0.0.1/api/health' }
 )
 foreach ($c in $httpChecks) {
-    $code = Get-Code $c.Url
+    $code = Get-CodeRetry $c.Url
     if ($code -eq 200) { Add-Result '接口' $c.Name 'PASS' '200' }
     else { Add-Result '接口' $c.Name 'FAIL' ("HTTP " + $code) }
 }
