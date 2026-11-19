@@ -7,28 +7,25 @@
   （一键启动 / 停止本副本的四个子系统：my_app、portal、nginx、WhatsApp bot）
 - 根 `start.sh` / `stop.sh` → `start.sh` / `stop.sh`
   （Linux 一键启动 / 停止本副本，对标 Windows 版；要求 POSIX sh + GNU coreutils）
-- `ops/shortcuts/` 里的桌面快捷方式 bat（状态、干跑、打开首页/日志等）
+- `ops/shortcuts/` 里的分步入口 bat（状态 / 启停 / nginx 只读检查 / 打开首页与日志 / 重建桌面快捷方式）：
+  **只转发**到本目录的 `portal-ctl.ps1` 与 `olbr-*.bat`，自身不含启停逻辑（2026-11-19 改写）
 - `setup-git-hooks.mjs`：把 `core.hooksPath` 指向仓库内的 `.githooks/`
 - `post_sync_fix_paths.ps1`：checkout / merge 后把两个监控脚本里的本机
   绝对路径改成本机副本根目录（由 `.githooks/post-checkout`、`post-merge` 调用）
 - `local_authority_tools.py`：迁移时校验 / 复制 SQLite 本地权威三表
   （`credentials`、`task_schedule_config`、`email_recipients`）
+- `check_runtime_parity.py`：**运行时状态一比一核对（只读，2026-11-19 加）**：
+  `python ops\deploy\check_runtime_parity.py [--source D:\01_olbr_portal] [--target D:\02_olbr_portal]`。
+  对比门户 `auth-data/portal-auth.db`（账号、team 分配、待审申请、team_scope）、
+  `portal-default.json`、my_app `backend\data\*.json`（含看板目录条目数与分组计数，
+  CXO View / Friends Link 缩水会直接 FAIL）、本地权威表与 `.env` 键。
+  缺东西 exit 2，单纯内容不同只给 WARN。切完、回退后、改过用户或目录后都跑一次。
+  ⚠️ 2026-11-19 的「CXO View 只剩 3 条、OSS Portal Login 只剩 1 个、team 分配丢失」
+  就是只查存活不查内容的检查方式漏掉的。
 - `portal-ctl.ps1`：**生产启停总控（2026-11-18 起 02 即生产）**。`-Action start|stop|restart|status`：
   `start` 清掉 `stopped.flag` 后 `schtasks /run` 三个自愈任务（与 5 分钟周期同一路径），再等端口就绪；
   `stop` 走 my_app `stop.bat` + 门户 `stop_services.ps1` + 02 的 `nginx -s quit`；`status` 打端口归属/健康/任务状态。
   桌面入口见同目录 `olbr-start.bat` / `olbr-stop.bat` / `olbr-status.bat`（快捷方式已建）。
-- `post-cutover-check.ps1` + `olbr-check.bat`：**生产检查点（手动执行，刻意不挂定时）**。
-  把 2026-11-19 切换后那次人工复核的检查项固化成一条命令：端口与进程归属（80/443 必须归本树
-  nginx）、HTTP 探活（80/443、7038 health 的 `db_mode=pg`、7090、9267/9268）、openapi 特征路由
-  （证明跑的是本树代码）、近 N 小时任务失败率与 Top 失败任务、17 个原生看板（预热后逐页核对
-  failed / stale / 组件 error / 数据里最新日期）、关键看板数据新鲜度（CXO、CN KPI、OLIB、可用率、
-  MW、丢包、电池、SOC、MS SLA、eFlow）、WhatsApp bot 与 notify 心跳及 4 个计划任务指向、外部
-  EWS 可达性（只报告不判失败）。`-Render` 额外用 Playwright 渲染 10 个看板页抓 console error。
-  **只读为主**：唯一的写操作是触发原生看板预热（`-NoPrewarm` 可关）和在
-  `TMP\post-cutover-check\<时间戳>.json` 落一份报告（不入库）。有 FAIL 时 exit 1。
-  用法：双击 `olbr-check.bat`，或
-  `powershell -NoProfile -ExecutionPolicy Bypass -File ops\deploy\post-cutover-check.ps1 [-Render] [-NoPrewarm] [-SinceHours 12]`。
-  默认 ~20 秒；`-Render` 约 +60 秒。伴生渲染脚本：`post-cutover-render.py`（缺 playwright 自动 SKIP）。
 - `cutover/`：**生产切换（D:\01 → D:\02）专用**
   - `snapshot-prod-state.ps1`：切前只读快照（端口归属 / 守护任务状态 / 02 的 .env
     端口键 / 两侧 nginx.conf / 三表行数），落 `TMP\cutover\<时间戳>\`，不入库；
@@ -118,8 +115,11 @@ Agent 在对话里长轮询 CI（`gh pr checks` 循环等待）**极耗 token，
   （见 `TMP\smoke-pr-44-vs-grok.md`）。对齐后方可停 Grok；停之前不要动
   agent-orchestrator 的 webhook。
 - `bundle_data.ps1`：把生产 PostgreSQL 快照灌进副本便携实例
-- `my_portal_ctl.ps1`、`write_nginx_conf.ps1`：§11-5 自仓库根归位至此；
-  两者都按自身位置向上推导仓库根，`ops/shortcuts/` 的 bat 已指向新位置
+- `my_portal_ctl.ps1`、`write_nginx_conf.ps1`：§11-5 自仓库根归位至此，两者都按自身位置向上推导仓库根。
+  **2026-11-19 起 `ops/shortcuts/` 不再调用它们**（那套入口改为转发 `portal-ctl.ps1` / `olbr-*.bat`）。
+  `write_nginx_conf.ps1` 只用于隔离副本与打包：它按 `.env` 取端口，而本树 `.env` 仍是隔离端口
+  （8080/8443/7039/7091/9277），在生产树上跑会用 8080/8443 覆盖线上 80/443 的 `nginx.conf` ——
+  `ops/shortcuts/5-nginx-check.bat` 已因此降级为只读，需要重建生产配置时显式给端口参数。
 - `build-zip.mjs`（+ `lib/zip-package.mjs`、`lib/zip-writer.mjs`、`lib/zip-dir.mjs`）：
   ZIP 交付 Phase 1（#146）的构建脚本——白名单组装 + 排除断言 + 凭据扫描 +
   行尾规范化 + `build-info.json`/SHA256，产出可重复构建的应用 ZIP；

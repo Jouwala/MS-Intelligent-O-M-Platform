@@ -4,7 +4,7 @@
 | --- | --- |
 | `ops/deploy/` | 02 副本的启停与运维脚本（入口 `start_all.ps1` / `stop_all.ps1`），详见其中 `README.md` |
 | `ops/quality/` | 离线质量检查 `check_all.ps1`（完整 9 步，见下） |
-| `ops/shortcuts/` | 桌面快捷方式 bat（状态、干跑、打开首页/日志等） |
+| `ops/shortcuts/` | 生产入口快捷 bat（状态 / 启停 / nginx 只读检查 / 打开首页与日志 / 重建桌面快捷方式），**只转发**到 `ops/deploy/` 的 `portal-ctl.ps1` 与 `olbr-*.bat`；桌面快捷方式生成器在 `desktop_shortcuts/` |
 
 ## 质量检查
 

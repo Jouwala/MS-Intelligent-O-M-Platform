@@ -1,14 +1,13 @@
 @echo off
 REM ============================================================
-REM  OLBR portable copy - stop only services this copy started
-REM  Portable: every path is derived from %~dp0, never a fixed drive.
+REM  OLBR production stack - stop
+REM  Forward ONLY: the Y/N confirmation lives in
+REM  ops\deploy\olbr-stop.bat, so there is exactly one place that
+REM  decides "stop everything?" (the old version called
+REM  my_portal_ctl.ps1 9-stop-all and killed the stack with no prompt).
 REM  ASCII-only + CRLF on purpose; non-ASCII breaks cmd parsing.
 REM ============================================================
 setlocal
-cd /d "%~dp0.."
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\..\ops\deploy\my_portal_ctl.ps1" 9-stop-all
-
-echo.
-echo ---- done. Press any key to close. ----
-pause >nul
+cd /d "%~dp0..\.."
+call "%~dp0..\deploy\olbr-stop.bat"
 endlocal
