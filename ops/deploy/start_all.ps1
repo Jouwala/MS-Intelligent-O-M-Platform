@@ -454,16 +454,23 @@ if ($DryRun) {
 } else {
     $alembicOut = Join-Path $TmpDir 'portable-alembic.out'
     $alembicErr = Join-Path $TmpDir 'portable-alembic.err'
-    Push-Location -LiteralPath $MyAppDir
-    try {
-        & $PyExe -m alembic upgrade head > $alembicOut 2> $alembicErr
-        if ($LASTEXITCODE -ne 0) {
-            $tail = ''
-            if (Test-Path -LiteralPath $alembicErr) { $tail = (Get-Content -LiteralPath $alembicErr -Tail 10) -join "`n" }
-            throw "alembic upgrade head 失败（见 $alembicErr）：$tail"
-        }
-    } finally { Pop-Location }
-    Get-Content -LiteralPath $alembicOut -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
+    # 必须用 Start-Process 直接重定向文件，不能写 `& $PyExe ... > out 2> err`：
+    # alembic 的 INFO 日志按设计写到 stderr，而本脚本 $ErrorActionPreference = 'Stop'，
+    # Windows PowerShell 5.1 会把 native 命令的 stderr 包成 NativeCommandError 当终止
+    # 错误抛出 —— 迁移成功也会在第一条 INFO 处炸掉，且两个重定向文件留 0 字节、真因
+    # 只剩 start_all.err 里那一行（2026-11-19 冒烟 PR #151 实测，两文件皆 0 字节）。
+    $alembicProc = Start-Process -FilePath $PyExe -ArgumentList @('-m', 'alembic', 'upgrade', 'head') `
+        -WorkingDirectory $MyAppDir -NoNewWindow -Wait -PassThru `
+        -RedirectStandardOutput $alembicOut -RedirectStandardError $alembicErr
+    if ($alembicProc.ExitCode -ne 0) {
+        $tail = ''
+        if (Test-Path -LiteralPath $alembicErr) { $tail = (Get-Content -LiteralPath $alembicErr -Tail 10) -join "`n" }
+        throw "alembic upgrade head 失败（退出码 $($alembicProc.ExitCode)，见 $alembicErr）：$tail"
+    }
+    # alembic 正常日志在 stderr（INFO 行），一并回显，下次失败不用再翻文件。
+    foreach ($alembicLog in @($alembicOut, $alembicErr)) {
+        Get-Content -LiteralPath $alembicLog -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
+    }
     Write-Ok 'alembic upgrade head 完成'
 }
 
