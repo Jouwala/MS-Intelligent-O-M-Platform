@@ -41,7 +41,11 @@ def render(base, wait_ms, pages):
             url = base + "?page=" + key
             page = ctx.new_page()
             console_err, page_err, bad = [], [], []
-            page.on("console", lambda m: console_err.append(m.text[:160]) if m.type == "error" else None)
+            # favicon.ico 的 404 是全站都有的装饰性问题（*.ico 被 gitignore，没进构建产物），
+            # 记进来只会每天刷一条假 WARN，这里直接忽略。
+            page.on("console",
+                    lambda m: console_err.append(m.text[:160])
+                    if m.type == "error" and "favicon" not in m.text.lower() else None)
             page.on("pageerror", lambda e: page_err.append(str(e)[:160]))
             page.on("response",
                     lambda r: bad.append("%s %s" % (r.status, r.url[:120]))
