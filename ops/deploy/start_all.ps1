@@ -21,7 +21,9 @@
 [CmdletBinding()]
 param(
     [switch]$DryRun,
-    [switch]$SkipNginxConf
+    [switch]$SkipNginxConf,
+    # 生产模式：不套用「隔离副本」那套改写，直接委托 portal-ctl.ps1 走三个自愈任务。
+    [switch]$Production
 )
 
 $ErrorActionPreference = 'Stop'
@@ -49,6 +51,14 @@ $NodeExe = Join-Path $RuntimeDir 'node\node.exe'
 $PgBin = Join-Path $RuntimeDir 'postgresql16\bin'
 $NginxDir = Join-Path $Root 'nginx-1.28.0'
 $NginxExe = Join-Path $NginxDir 'nginx.exe'
+
+if ($Production) {
+    # 生产模式下本脚本不做任何「副本改造」：不改端口、不关调度器、不把 DATABASE_URL 指向副本 PG。
+    # 起停都交给 portal-ctl.ps1（它 schtasks /run 三个自愈任务，与 5 分钟周期同一路径）。
+    Write-Host '[*] 生产模式：委托 ops\deploy\portal-ctl.ps1 -Action start' -ForegroundColor Cyan
+    & (Join-Path $Root 'ops\deploy\portal-ctl.ps1') -Action start
+    exit $LASTEXITCODE
+}
 $MyAppDir = Join-Path $Root 'apps\my_app'
 $FeDir = Join-Path $MyAppDir 'frontend'
 $BotDir = Join-Path $Root 'apps\whatsapp-kb-bot'

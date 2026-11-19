@@ -43,7 +43,10 @@ from pathlib import Path
 
 logger = logging.getLogger("log_cleanup")
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+# 本文件在 backend/services/cleanup/ 下：要退到 my_app 根得用 parents[3]。
+# 2026-11-18 切生产后发现它写成 parent.parent.parent（只退到 backend/），
+# 导致 LOG_DIR 指向不存在的 backend/log —— 清理任务「成功」但一个文件都没处理。
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 LOG_DIR = PROJECT_ROOT / "log"
 
 

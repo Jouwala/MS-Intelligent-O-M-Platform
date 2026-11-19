@@ -11,11 +11,19 @@
   绝对路径改成本机副本根目录（由 `.githooks/post-checkout`、`post-merge` 调用）
 - `local_authority_tools.py`：迁移时校验 / 复制 SQLite 本地权威三表
   （`credentials`、`task_schedule_config`、`email_recipients`）
+- `portal-ctl.ps1`：**生产启停总控（2026-11-18 起 02 即生产）**。`-Action start|stop|restart|status`：
+  `start` 清掉 `stopped.flag` 后 `schtasks /run` 三个自愈任务（与 5 分钟周期同一路径），再等端口就绪；
+  `stop` 走 my_app `stop.bat` + 门户 `stop_services.ps1` + 02 的 `nginx -s quit`；`status` 打端口归属/健康/任务状态。
+  桌面入口见同目录 `olbr-start.bat` / `olbr-stop.bat` / `olbr-status.bat`（快捷方式已建）。
 - `cutover/`：**生产切换（D:\01 → D:\02）专用**
   - `snapshot-prod-state.ps1`：切前只读快照（端口归属 / 守护任务状态 / 02 的 .env
     端口键 / 两侧 nginx.conf / 三表行数），落 `TMP\cutover\<时间戳>\`，不入库；
-  - `rollback-to-01.ps1`：切换失败时把线上拉回 01（停 02 → 恢复 02 的隔离形态 →
-    恢复并触发 01 的守护任务 → 探活），**不碰数据库**；先 `-DryRun` 再实跑。
+  - `cutover-to-02.ps1`：**切**。默认干跑，`-Apply` 才动；停 01（自愈任务 / my_app / 01_RPA 门户 / nginx）→
+    搬门户状态 → 用 01 的 `backend\.env` 生成 02 的（路径改写 + 调度器 0 + CA 证书）→ 生产端口 nginx →
+    用 02 自带的 `apps\my_app\start_hidden.ps1`、`apps\portal\start_hidden.ps1` 起栈 → 探活 → 写 manifest。
+    **不要用 `start_all.ps1` 切生产**：它是隔离启动器（生产端口直接 throw、强制关调度器、DATABASE_URL 指 55432）；
+  - `rollback-to-01.ps1`：切换失败时把线上拉回 01（用 02 自己的 `stop.bat` 停栈 → 还原 `.env.bak_cutover_*` →
+    恢复并触发 01 的守护任务 → 探活），**不碰数据库**；先 `-DryRun` 再实跑；
   - 操作底稿见 `docs/workspace/cutover-2026-11-20.md`。
 - `sync-ui-config-from-01.ps1`：把生产（`D:\01_olbr_portal`）的三份「全局 UI 配置」
   （`ui_tool_visibility.json` / `ui_tool_order.json` / `ui_menu_layout.json`）同步到本副本。

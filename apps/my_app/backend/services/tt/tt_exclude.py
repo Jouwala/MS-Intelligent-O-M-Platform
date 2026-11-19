@@ -67,6 +67,34 @@ class ExcludeImportError(ValueError):
     """上传内容不合规（供路由层转成 400）。"""
 
 
+# 「上传人」列的真实列名（首次使用时探测，见 _by_column）。
+_BY_COL_CACHE: Optional[str] = None
+
+
+def _by_column(conn) -> str:
+    """返回「上传人」列的真实列名。
+
+    ⚠ 2026-11-18 切生产后复核发现：`replace_all` 与 `fetch_meta` 都写死
+    `_uploaded_by`，而生产 PG 与本地 SQLite 的实际列名是 `uploaded_by`
+    （只有 `_source_file` / `_import_time` 带下划线）。后果：
+      · `fetch_meta` 抛 `column "_uploaded_by" does not exist`，被 except 吞成
+        count=0/None —— 页面把 998 条名单显示成「0 条」；
+      · `replace_all` 的 INSERT 同样失败 —— **上传排除名单直接不可用**。
+    这里用 `cursor.description` 取真实列，SQLite / PG 通用，也不依赖 PRAGMA。
+    """
+    global _BY_COL_CACHE
+    if _BY_COL_CACHE:
+        return _BY_COL_CACHE
+    cur = conn.cursor()
+    cur.execute(f"SELECT * FROM {TABLE} LIMIT 0")
+    cols = [d[0] for d in cur.description]
+    for cand in ("_uploaded_by", "uploaded_by"):
+        if cand in cols:
+            _BY_COL_CACHE = cand
+            return cand
+    raise RuntimeError(f"{TABLE} 缺「上传人」列，现有列：{cols}")
+
+
 # ============================================================
 # 解析（xlsx/csv 字节 → 票号集合）
 # ============================================================
@@ -177,9 +205,10 @@ def fetch_meta() -> Dict[str, Any]:
     try:
         conn = get_raw_connection()
         try:
+            by_col = _by_column(conn)
             cur = conn.cursor()
             cur.execute(
-                f"SELECT count(*), max(_import_time), max(_uploaded_by), max(_source_file) "
+                f"SELECT count(*), max(_import_time), max({by_col}), max(_source_file) "
                 f"FROM {TABLE}"
             )
             n, t, by, src = cur.fetchone()
@@ -227,10 +256,11 @@ def replace_all(tickets: List[str], source_file: str,
     ts = datetime.now().isoformat(timespec="seconds")
     conn = get_raw_connection()
     try:
+        by_col = _by_column(conn)
         cur = conn.cursor()
         cur.execute(f"DELETE FROM {TABLE}")
         cur.executemany(
-            f"INSERT INTO {TABLE} (ticket_no, _source_file, _source_sheet, _import_time, _uploaded_by) "
+            f"INSERT INTO {TABLE} (ticket_no, _source_file, _source_sheet, _import_time, {by_col}) "
             f"VALUES (?, ?, ?, ?, ?)",
             [(tk, source_file, "Sheet1", ts, uploaded_by) for tk in uniq],
         )

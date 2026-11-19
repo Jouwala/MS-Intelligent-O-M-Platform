@@ -261,6 +261,35 @@ def norm_alarm_code_text(v) -> str:
     return re.sub(r'\.0+$', '', str(v).strip())
 
 
+def norm_alarm_severity(v) -> str:
+    """展示用：把上游的告警级别**数字码**还原成人能读的等级。
+
+    ## 为什么要这一步（2026-11-18 切生产后复核发现）
+
+    `eflow_tt.alarm_severity` 在上游导出里是数字码（生产 PG 实测 41k 行全是
+    `1005001`/`1005002`/`1005003`/`1005004`），而值班群要看的格式是
+    `Alarm: 9910(Critical)`。此前告警消息里直接是 `Alarm: 9910(1005001)` ——
+    人看不出严重程度，回归用例 `test_real_engine_matches_user_specified_format`
+    也一直是红的。
+
+    只做**展示层**归一化，不改数据：映射沿用 ZTE UME 的告警级别码。
+    改这里不影响规则匹配（规则用的是 `ticket_severity` P1~P4）。
+    """
+    if v is None:
+        return ''
+    s = str(v).strip()
+    return _ALARM_SEVERITY_LABELS.get(s, s)
+
+
+_ALARM_SEVERITY_LABELS = {
+    "1005001": "Critical",
+    "1005002": "Major",
+    "1005003": "Minor",
+    "1005004": "Warning",
+    "1005005": "Info",
+}
+
+
 def build_value_frame(row: dict) -> dict:
     """把规则用到的字段归一化，键名对应规则里的 field。
 
@@ -3320,7 +3349,7 @@ def render_text(res: dict, lang: str = DEFAULT_LANG) -> str:
     # ── 告警与影响面 ──
     alarm = (
         f"{L['alarm']}{norm_alarm_code_text(r.get('alarm_code')) or '-'}"
-        f"{L['lparen']}{r.get('alarm_severity') or '-'}{L['rparen']}"
+        f"{L['lparen']}{norm_alarm_severity(r.get('alarm_severity')) or '-'}{L['rparen']}"
     )
     if r.get('domain'):
         alarm += sep + r['domain']

@@ -1,4 +1,4 @@
-# start_hidden.ps1 - Hidden startup of the liberia-noc_soc portal + its companion
+﻿# start_hidden.ps1 - Hidden startup of the liberia-noc_soc portal + its companion
 # WhatsApp local analysis service (the one the portal page calls on localhost:9268).
 #
 # Usage:
@@ -187,7 +187,7 @@ Add-Report '----- 1) Portal production server (9267) -----'
 function Ensure-Portal {
     if (Test-PortListening 9267) {
         $owner = Get-PortOwnerPid 9267
-        if (Test-OwnedByProject $owner 'liberia-noc_soc') {
+        if ((Test-OwnedByProject $owner $base) -or (Test-OwnedByProject $owner 'liberia-noc_soc')) {
             Add-Report ("[OK] Portal production server already running (pid={0}, port 9267)" -f $owner)
             return $true
         }
@@ -236,7 +236,10 @@ Add-Report '----- 2) WhatsApp local analysis service (9268) -----'
 function Test-WaHealthy {
     try {
         $r = Invoke-WebRequest -Uri 'http://127.0.0.1:9268/api/health' -TimeoutSec 10 -UseBasicParsing -ErrorAction Stop
-        return ([string]$r.Content -match '"status"\s*:\s*"ok"')
+        $body = [string]$r.Content
+        # 两种健康响应都算健康：老格式 {"status":"ok"}，当前分析服务返回 {"ok":true,...}
+        # （2026-11-18 实测：只认前者会让 02 自己的服务每 5 分钟报一条假 WARN）。
+        return (($body -match '"status"\s*:\s*"ok"') -or ($body -match '"ok"\s*:\s*true'))
     } catch {
         return $false
     }

@@ -50,18 +50,25 @@
 #   - 隔离说明：D:\01_RPA\_quarantine_20260929_nginx_dup\README.md
 
 param(
-    [string]$NginxExe = 'D:\01_olbr_portal\nginx-1.28.0\nginx.exe',
-    [string]$NginxDir = 'D:\01_olbr_portal\nginx-1.28.0',
+    [string]$NginxExe = '',
+    [string]$NginxDir = '',
     [string]$HostName = "127.0.0.1",
-    [int]$NginxPort = 8080,
+    [int]$NginxPort = 80,
     [int]$ConnectTimeoutMs = 5000,
     [int]$ReadyTimeoutSeconds = 60,
     # 连续多少轮探测失败才认定「真的挂了」并重启。配合 5 分钟周期，
     # 默认 2 表示连续 2 轮（约 10 分钟）都失败才动手，避免瞬时抖动触发重启。
     [int]$FailThreshold = 2,
-    [string]$LogPath = 'D:\01_olbr_portal\Task\nginx_monitor.log',
-    [string]$StatePath = 'D:\01_olbr_portal\Task\nginx_monitor.state'
+    [string]$LogPath = '',
+    [string]$StatePath = ''
 )
+
+# 路径默认值按脚本位置推导（monitor_fixes -> my_app -> apps -> 仓库根），不写死盘符/目录名。
+$RepoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..')).Path
+if (-not $NginxExe) { $NginxExe = Join-Path $RepoRoot 'nginx-1.28.0\nginx.exe' }
+if (-not $NginxDir) { $NginxDir = Join-Path $RepoRoot 'nginx-1.28.0' }
+if (-not $LogPath) { $LogPath = Join-Path $RepoRoot 'TMP\nginx_monitor.log' }
+if (-not $StatePath) { $StatePath = Join-Path $RepoRoot 'TMP\nginx_monitor.state' }
 
 $ErrorActionPreference = 'Continue'
 

@@ -40,7 +40,9 @@ from pathlib import Path
 
 logger = logging.getLogger("tmp_cleanup")
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+# 同 log_cleanup.py：backend/services/cleanup/ 深三层，必须 parents[3] 才回到 my_app 根。
+# 写成 parent.parent.parent 会让 TMP_DIR 指向不存在的 backend/TMP，清理永远空转。
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 TMP_DIR = PROJECT_ROOT / "TMP"
 QUARANTINE_PREFIX = "_quarantine_"
 

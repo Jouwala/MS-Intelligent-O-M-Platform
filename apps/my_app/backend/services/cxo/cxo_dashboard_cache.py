@@ -42,7 +42,13 @@ from backend.services.realtime_proxy_ctl import (PROXIES, _proxy_healthy,
 
 logger = logging.getLogger(__name__)
 
-_ROOT = Path(__file__).resolve().parent.parent.parent  # my_app/
+# ⚠ 2026-11-18 修：本模块在 services/cxo/ 子包内，`parent.parent.parent` 只到
+# backend/，会把缓存写到 backend/data/cxo_dashboard/；而读它的
+# routers/vmax_cxo_dashboard.py（原版看板 ?page=vmaxCxoDashboard）读的是
+# my_app/data/cxo_dashboard/ —— 两边路径分叉，任务每 10 分钟照常写、页面却一直
+# 停在旧值（2026-11-18 切到 02 后实测：任务写 21:50，页面读 11-16 08:41）。
+# 必须用 parents[3] 回到 my_app/，与同目录 vmax_cxo_daily_cache.py 及文档口径一致。
+_ROOT = Path(__file__).resolve().parents[3]  # my_app/
 DATA_DIR = _ROOT / "data" / "cxo_dashboard"
 CACHE_FILE = DATA_DIR / "last_known_good.json"
 HISTORY_FILE = DATA_DIR / "history.jsonl"

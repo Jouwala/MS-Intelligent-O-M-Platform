@@ -438,7 +438,7 @@ $ProductionRoot = 'D:\01_olbr_portal'
 if ($Root.TrimEnd('\') -eq $ProductionRoot -or $Root -like ($ProductionRoot + '\*')) {
     throw "拒绝执行：$Root 落在生产目录 $ProductionRoot 下面。冒烟只在 D:\02_olbr_portal 隔离副本上跑。"
 }
-if ($Root -notlike '*02_olbr_portal') { throw "当前目录不是 02（$Root），拒绝执行。" }
+if ($Root -notlike '*02_olbr_portal*') { throw "当前目录不是隔离副本（$Root），拒绝执行。" }
 if (-not (Test-Path -LiteralPath (Join-Path $Root 'ISOLATED_COPY.flag'))) {
     throw '缺少 ISOLATED_COPY.flag，拒绝执行：当前目录可能不是隔离副本。'
 }

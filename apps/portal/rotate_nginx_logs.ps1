@@ -1,4 +1,4 @@
-# rotate_nginx_logs.ps1 - bound the size of THIS host's nginx access log.
+﻿# rotate_nginx_logs.ps1 - bound the size of THIS host's nginx access log.
 #
 # Why: nginx.conf now writes the access log as logs/access-$hostname.log inside the
 # nginx install prefix. Since 2026-10-01 this host's prefix is the LOCAL path
@@ -31,11 +31,17 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -File rotate_nginx_logs.ps1
 #   powershell -NoProfile -ExecutionPolicy Bypass -File rotate_nginx_logs.ps1 -DryRun
 param(
-    [string]$Prefix = 'D:\02_olbr_portal\nginx-1.28.0\',
+    [string]$Prefix = '',
     [int]$MinSizeMB = 20,
     [int]$KeepDays = 14,
     [switch]$DryRun
 )
+
+if (-not $Prefix) {
+    # apps\portal\rotate_nginx_logs.ps1 -> 仓库根下的 nginx 目录
+    $RepoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
+    $Prefix = (Join-Path $RepoRoot 'nginx-1.28.0') + '\'
+}
 
 $ErrorActionPreference = 'Continue'
 $logDir = Join-Path $Prefix 'logs'

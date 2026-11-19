@@ -133,6 +133,9 @@ _probe_file.txt
 # 上面 `!backend/data/` 的取反会让这个目录变成可提交，必须在这里挡回来：
 # 号码清单入库等于把订阅者数据分发给每一个拿到仓库的人，且永久留在 git 历史里。
 /backend/data/gp_ran/
+# CXO 看板的「上次已知良好」快照（last_known_good.json，实测 4.6MB）+ 历史，运行时产物。
+# 2026-11-18 切到生产后由服务自己写出；不入库，删了会自动重建。
+/backend/data/cxo_dashboard/
 
 # outputs/ 整体是**产物目录**（`ume_in_screen_render.py:97` 的默认输出就落在这里）。
 # 里面的 `ume_screen_caps/`、`ume_screen_platform/` 两份是被人为入库当样例，维持现状不动；

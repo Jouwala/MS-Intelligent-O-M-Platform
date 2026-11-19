@@ -63,7 +63,9 @@ $ErrorActionPreference = 'Continue'
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
-$Root        = 'D:\02_olbr_portal'
+# 根目录按脚本位置推导：02（生产）与冒烟专用副本（D:\02_olbr_portal_smoke）都用同一份脚本。
+# 2026-11-18 之前这里写死 'D:\02_olbr_portal'，导致无法在独立副本上跑冒烟。
+$Root        = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
 $Tmp         = Join-Path $Root 'TMP'
 $Here        = Split-Path -Parent $MyInvocation.MyCommand.Path
 
@@ -345,7 +347,9 @@ $NpmCmd      = Join-Path $NodeDir 'npm.cmd'
 $PsqlExe     = Join-Path $Root 'runtime\postgresql16\bin\psql.exe'
 $PgPort      = 55432
 $PgUser      = 'myapp'
-$ProdNginx   = 'D:\01_olbr_portal\nginx-1.28.0\nginx.exe'
+# 生产 nginx 的路径会随切换而变（2026-11-18 起是 D:\02_olbr_portal\nginx-1.28.0），
+# 所以不再写死路径：开跑前记录 80/443 的 pid->exe，收尾要求逐字一致。
+$ProdNginx   = ''
 $PyExe       = Join-Path $Root 'runtime\python312\python.exe'
 $AppDir      = Join-Path $Root 'apps\my_app'
 $AuthSrc     = 'D:\01_olbr_portal\Task\my_app\db\app.db'
@@ -870,7 +874,10 @@ $busy = @()
 foreach ($p in $TestPorts) { $pp = @(Get-ListenPid $p); if ($pp.Count -gt 0) { $busy += ("{0}->{1}" -f $p, ($pp -join ',')) } }
 if ($busy.Count -gt 0) { $refuse += ("02 端口已被占用（可能有别的冒烟在跑）: " + ($busy -join ' ')) }
 $prodPre = @(); foreach ($x in (Get-ListenPid 80)) { $prodPre += ("{0}->{1}" -f $x, (Get-ExePath $x)) }
+$prod443Pre = @(); foreach ($x in (Get-ListenPid 443)) { $prod443Pre += ("{0}->{1}" -f $x, (Get-ExePath $x)) }
+$script:ProdBefore = @($prodPre + $prod443Pre)
 Write-Host ("  启动前 80 归属: {0}" -f ($prodPre -join ', '))
+Write-Host ("  启动前 443 归属: {0}" -f ($prod443Pre -join ', '))
 if ($refuse.Count -gt 0) {
     foreach ($r in $refuse) { Add-R '预检' $false $r }
     Stop-Stage; Save-Result 'REFUSED'
@@ -925,7 +932,7 @@ if ($SkipFeBuild) {
         if (Test-Path -LiteralPath $FeDistDir) { $resolved = [IO.Path]::GetFullPath($FeDistDir) }
         $placeOk = ($resolved -ne '') -and $resolved.StartsWith($Root, [StringComparison]::OrdinalIgnoreCase) -and (Test-Path -LiteralPath $FeDistIndex)
         $notProd = ($resolved -notlike 'D:\01_*')
-        Add-R '§8.1 构建产物落在 D:\02_olbr_portal\apps\_fe_dist（未写入 01）' ($placeOk -and $notProd) "dir=$resolved indexExists=$(Test-Path -LiteralPath $FeDistIndex)"
+        Add-R ("§8.1 构建产物落在 $Root\apps\_fe_dist（未写入 01）") ($placeOk -and $notProd) "dir=$resolved indexExists=$(Test-Path -LiteralPath $FeDistIndex)"
     } elseif (-not $SkipFeBuild -and $baseUsed -and ($null -ne $diff) -and $diff.Ok) {
         Add-R '§8.1 前端无需重建' $true "相对 $baseUsed，apps\my_app\frontend 与 lockfile 无改动；沿用现有 apps\_fe_dist"
     }
@@ -969,7 +976,7 @@ try {
     }
     $normDir = ($dataDir -replace '/', '\')
     $dirOk = ($dataDir -ne '') -and $normDir.StartsWith($Root, [StringComparison]::OrdinalIgnoreCase) -and ($normDir -notlike 'D:\01_*')
-    Add-R '§8.2 SHOW data_directory 在 D:\02_olbr_portal 下（非生产 5432）' $dirOk "pgReady=$pgReady data_directory='$dataDir' port=$PgPort"
+    Add-R ("§8.2 SHOW data_directory 在 $Root 下（非生产 5432）") $dirOk "pgReady=$pgReady data_directory='$dataDir' port=$PgPort"
 
     $authOut = ''
     $authCode = -1
@@ -1054,8 +1061,8 @@ try {
 
         $own = @()
         foreach ($p2 in $TestPorts) { foreach ($x in (Get-ListenPid $p2)) { $own += ("{0}:{1}->{2}" -f $p2, $x, (Get-ExePath $x)) } }
-        $ownOk = ($own.Count -gt 0) -and (@($own | Where-Object { $_ -notlike '*->D:\02_olbr_portal\*' }).Count -eq 0)
-        Add-R '02 端口均由 D:\02_olbr_portal 下的进程监听' $ownOk ($own -join '; ')
+        $ownOk = ($own.Count -gt 0) -and (@($own | Where-Object { $_ -notlike ('*->' + $Root + '\*') }).Count -eq 0)
+        Add-R ("副本端口均由 $Root 下的进程监听") $ownOk ($own -join '; ')
     }
 }
 finally {
@@ -1078,9 +1085,10 @@ for ($i = 0; $i -lt 15; $i++) {      # 端口释放最多等 15 秒
 }
 $postProd = @(); foreach ($x in (Get-ListenPid 80)) { $postProd += ("{0}->{1}" -f $x, (Get-ExePath $x)) }
 $post443 = @(); foreach ($x in (Get-ListenPid 443)) { $post443 += ("{0}->{1}" -f $x, (Get-ExePath $x)) }
+$prodAfter = @($postProd + $post443)
 $prodOk = ($postProd.Count -gt 0) -and ($post443.Count -gt 0) -and `
-    (@($postProd + $post443 | Where-Object { $_ -notlike "*->$ProdNginx" }).Count -eq 0)
-Add-R '80/443 仍由 D:\01_olbr_portal\nginx-1.28.0\nginx.exe 监听' $prodOk ("80: " + ($postProd -join ', ') + " ; 443: " + ($post443 -join ', '))
+    (($prodAfter -join '|') -eq ($script:ProdBefore -join '|'))
+Add-R '80/443 未被冒烟触碰（归属进程与开跑前逐字一致）' $prodOk ("before: " + ($script:ProdBefore -join ', ') + " ; after: " + ($prodAfter -join ', '))
 Add-R ('02 的 {0} 已释放' -f ($TestPorts -join '/')) $releaseOk ($rel -join ' ')
 foreach ($p4 in $ExtraPorts) {
     foreach ($x in (Get-ListenPid $p4)) { Add-Note ("端口 {0} 仍被 pid {1} ({2}) 监听：后端派生代理，stop_all 不托管，仅记录不杀" -f $p4, $x, (Get-ExePath $x)) }

@@ -6,16 +6,20 @@ last-known-good 缓存裁剪成原版 Summary 大屏需要的稳定数据模型�
 """
 import json
 import logging
-from pathlib import Path
 from typing import Any, Dict
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
+# 缓存路径的唯一真相源在写它的服务里（同 routers/cxo_dashboard.py）。
+# ⚠ 不要在这里另算一份 `_ROOT / "data" / ...`：2026-11-18 重构把服务移进
+# services/cxo/ 子包后，服务端多退了一层到 backend/，而这里仍按 my_app/ 算，
+# 于是「任务每 10 分钟照常写、页面一直读旧文件」——原版 CXO 看板（no=6）
+# 因此停在 2026-11-16 08:41。两边共用一个常量，再移文件也不会分叉。
+from backend.services.cxo.cxo_dashboard_cache import CACHE_FILE
+
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/vmax-cxo-dashboard", tags=["vmax-cxo-dashboard"])
-_ROOT = Path(__file__).resolve().parents[2]
-CACHE_FILE = _ROOT / "data" / "cxo_dashboard" / "last_known_good.json"
 SERVICE_MANIFEST = {
     "Mobility": [391, 392, 393], "Voice": [412, 413, 414],
     "Data": [431, 433, 434], "Video": [451],
