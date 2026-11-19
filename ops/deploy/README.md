@@ -29,6 +29,15 @@ PG 5432），所以本目录同时装着「生产启停」与「便携/冒烟副
   `start` 清掉 `stopped.flag` 后 `schtasks /run` 三个自愈任务（与 5 分钟周期同一路径），再等端口就绪；
   `stop` 走 my_app `stop.bat` + 门户 `stop_services.ps1` + 02 的 `nginx -s quit`；`status` 打端口归属/健康/任务状态。
   桌面入口见同目录 `olbr-start.bat` / `olbr-stop.bat` / `olbr-status.bat`（快捷方式已建）。
+- `post-cutover-check.ps1`：**切后过夜复核（一条命令）**。端口与进程归属（80/443 必须归本树
+  nginx，带启动时长）、HTTP 探活（80/443、7038 `db_mode=pg`、7090、9267/9268）、openapi 特征路由、
+  近 N 小时任务失败率 + Top 失败任务、17 个原生看板逐页 failed/stale/组件 error/数据最新日期、
+  关键看板数据新鲜度、WhatsApp bot/notify 心跳与计划任务指向、EWS 可达性（只报告），
+  以及 **8b 运行时状态一比一**（调 `check_runtime_parity.py`，只读）、8c 邮箱通道降级、8d 仪表盘报告条目。
+  `-NoPrewarm` 跳过预热、`-SinceHours N` 改失败率窗口、`-Render` 追加 Playwright 渲染探针
+  （10 个看板页，缺依赖自动 SKIP）。**有 FAIL 时 exit 1**，报告落 `TMP\post-cutover-check\*.json`。
+  手动双击 `olbr-check.bat`；计划任务入口 `olbr-check-task.bat`（不 pause，输出重定向到 TMP）。
+- `check_runtime_parity.py`：上面 8b 用的**只读**比对器（见下方条目）。
 - `cutover/`：**生产切换（D:\01 → D:\02）专用**
   - `snapshot-prod-state.ps1`：切前只读快照（端口归属 / 守护任务状态 / 02 的 .env
     端口键 / 两侧 nginx.conf / 三表行数），落 `TMP\cutover\<时间戳>\`，不入库；

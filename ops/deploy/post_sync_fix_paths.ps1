@@ -188,6 +188,13 @@ $productionFlag = Join-Path $CopyRoot 'PRODUCTION.flag'
 $httpPort = if (Test-Path -LiteralPath $productionFlag) {
     80
 } else {
+    # Neither marker = role unknown. The hook always calls with -Force, so a
+    # production tree that lost PRODUCTION.flag would otherwise be rewritten to
+    # 8080 with no warning at all. Say it loudly; the isolated copy (which has
+    # ISOLATED_COPY.flag) stays quiet.
+    if (-not (Test-Path -LiteralPath (Join-Path $CopyRoot 'ISOLATED_COPY.flag'))) {
+        Write-Msg '[WARN] neither PRODUCTION.flag nor ISOLATED_COPY.flag: role unknown; nginx watchdog port falls back to .env (8080). If this is the production tree, recreate the empty PRODUCTION.flag now.' 'Yellow'
+    }
     Read-EnvPort -Key 'NGINX_HTTP_PORT' -Default 8080
 }
 $nginxDir = Join-Path $CopyRoot 'nginx-1.28.0'

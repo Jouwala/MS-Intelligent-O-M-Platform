@@ -1,4 +1,4 @@
-<#
+﻿<#
   stop_all.ps1 —— 只停「本副本」启动的服务（铺在 <副本根>\ops\deploy\）
   =============================================================================
   入口：副本根目录的 stop.bat（薄壳，只调本脚本）。
@@ -33,6 +33,11 @@ if (Test-Path -LiteralPath (Join-Path $Root 'PRODUCTION.flag')) {
 生产停止走 ops\deploy\portal-ctl.ps1 -Action stop，或 ops\deploy\olbr-stop.bat（带 Y/N 确认），
 或根目录 stop.bat（按标记分流）。
 '@
+}
+# 与 start_all.ps1 同一约定：角色不明就不跑。丢 ISOLATED_COPY.flag 时本脚本
+# 跟踪的 portable-*.pid 不属于这棵树，仍会执行步骤 1 的 `nginx -s quit`。
+if (-not (Test-Path -LiteralPath (Join-Path $Root 'ISOLATED_COPY.flag'))) {
+    throw '缺 ISOLATED_COPY.flag：本脚本只能在便携副本里运行，拒绝在主仓库停止'
 }
 # P1-6：目录解析集中在 noc-paths.ps1（与 start_all.ps1 共用，唯一真相源）。
 $nocPathsLib = Join-Path $PSScriptRoot 'noc-paths.ps1'
