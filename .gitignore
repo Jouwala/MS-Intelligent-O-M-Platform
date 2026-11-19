@@ -386,6 +386,15 @@ Task/PS_CS_CORE_Scripts/openclaw_new.json
 /.agent-worktrees/
 /.agent-work/
 
+# 冒烟运行副本（2026-11-19 起在项目内，默认 <项目>\.smoke）
+# 背景：02 在 2026-11-18 成为生产后，冒烟不能再在生产树里跑（它会重建
+# apps\_fe_dist、并在本副本根下 nginx -s quit）；但把副本放到项目外
+# （D:\02_olbr_portal_smoke）又违反「便携副本完全自包含」的约定。
+# 现在由 ops\deploy\provision-smoke-runner.ps1 在项目内生成/修复，
+# 内含自己的 .git、nginx 副本与 junction（指向本项目 runtime/node_modules）。
+# 忽略跟踪 ≠ 可以删除：它是冒烟门禁的运行体，删了 watcher 就没得跑。
+/.smoke/
+
 # AI 工具规则真源的本地备份（2026-11-02 新增）
 # `/_agents/` 是规则真源目录（rules\ 入库）；`_backup\` 下是改前完整快照，
 # 按 AGENTS.md 第四节第 7 条「快照一律不进版本库」，只留在本机磁盘。
@@ -566,17 +575,19 @@ apps/my_app/backup/
 *.lnk
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 隔离实例标记文件
+# 角色标记文件（两个互斥，都是本机运行态标记，不入库）
 #
-# ISOLATED_COPY.flag 是**本机运行态标记**（让 my_portal_ctl.ps1 拦截所有
-# start/stop 命令）。它记录的是"这台机器当前是什么角色"，不是源码 ——
-# 换台机器该文件该不该存在，取决于那台机器是生产还是副本。
-# 标记语义已在 docs/workspace/部署说明.md 里写清，故不入库。
+# 这台机器当前是「生产」还是「隔离副本」，只看根目录上哪一个标记存在：
+#   PRODUCTION.flag    -> 生产树：80/443/7038/7090/9267/9268，PG 5432
+#   ISOLATED_COPY.flag -> 隔离副本 / 冒烟副本：8080/8443/7039/7091/9277，便携 PG 55432
+# 2026-11-18/19 切生产后，D:\02_olbr_portal 是生产树，只应有 PRODUCTION.flag；
+# 两个同时存在或都没有时，start.bat / stop.bat / check_all.ps1 / start_all.ps1
+# 都会拒绝执行（角色不明时宁可不跑）。语义见 docs/adr/0003-production-vs-isolated-markers.md。
 # ─────────────────────────────────────────────────────────────────────────────
 /ISOLATED_COPY.flag
-# PRODUCTION.flag 同理：2026-11-19 起用它区分「这台机跑生产端口 80/443」。
-# post_sync_fix_paths.ps1（git post-checkout 钩子）据此决定是否按 .env 把
-# nginx 看门狗写回隔离端口 8080 —— 没有它，一次 checkout 就会把生产看门狗改坏。
+# PRODUCTION.flag 还兼任另一件事：post_sync_fix_paths.ps1（git post-checkout 钩子）
+# 据此决定不按 .env 把 nginx 看门狗写回隔离端口 8080 —— 删掉它，一次 checkout
+# 就会把生产看门狗改成探测 8080，每 5 分钟误判一次「挂了」并重启 nginx。
 /PRODUCTION.flag
 
 # ─────────────────────────────────────────────────────────────────────────────
