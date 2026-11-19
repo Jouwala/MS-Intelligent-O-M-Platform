@@ -58,8 +58,37 @@ PG 5432），所以本目录同时装着「生产启停」与「便携/冒烟副
   `*.bak_<时间>_from01`（每份只留最近 3 份），运行记录写 `TMP\sync-ui-config.log`；
   目标推导出落在生产目录下时直接拒绝执行。
 - `ensure_portal.ps1`：门户保活（计划任务调用）
+### 冒烟运行副本：`<项目>\.smoke`（2026-11-19 起）
+
+02 现在是生产，冒烟**不能**在生产树里跑：它会重建 `apps\_fe_dist`、按副本根
+重写 `nginx.conf`，并在本副本根下 `nginx -s quit`。2026-11-18 的应急做法是把
+隔离栈放到项目外的 `D:\02_olbr_portal_smoke`，但那份树是手工搭的、仓库里
+没有脚本能重建，junction 还指回项目 —— 违反便携副本自包含的约定。
+
+现在改为项目内副本，由 **`provision-smoke-runner.ps1`** 生成/修复（默认干跑，
+`-Apply` 才写；目标默认 `<项目>\.smoke`，已在 `.gitignore`）：
+
+```powershell
+# 生成 / 修补副本（clone + junction + 复制 nginx/构建产物 + 从生产库克隆 schema
+# 与三张本地权威表）
+powershell -NoProfile -File ops\deploy\provision-smoke-runner.ps1 -Apply
+
+# 改计划任务指向副本（需管理员）
+powershell -NoProfile -File D:\02_olbr_portal\.smoke\ops\deploy\install-smoke-watcher.ps1 -Start
+```
+
+> ⚠ **完整性标签**：项目内副本会继承工作区根的 **Low** 完整性标签；Low 的 `nginx.exe`
+> 在 `smoke.ps1` 的隐藏控制台链里会以 `0xC0000142`（DLL 初始化失败）起不来，start_all 直接失败。
+> 提权运行时 provision 会把副本根改成 Medium（子文件随继承）；非提权会话生成后按提示补跑
+> `icacls "<项目>\.smoke" /setintegritylevel (OI)(CI)Medium /T`。2026-11-19 实测，改完 watcher 冒烟通过。
+
+副本里有 `.smoke-runner` 标记，`smoke-local.ps1` / `smoke-watcher.ps1` /
+`install-smoke-watcher.ps1` / `smoke-queue-status.ps1` 都以它作为「这是不是
+冒烟副本」的判据；在生产 02 根或旧的 `D:\02_olbr_portal_smoke` 上直接拒绝执行。
+
 - `ops/smoke/smoke.ps1`：真正的检查引擎（§8.1–§8.4 + 离线 pytest，PR #26–#43
-  已反复使用）。`smoke-local.ps1` 只是薄壳：UTF-8 BOM 让 PS 5.1 能解析、
+  已反复使用）。只在 `.smoke` 副本里跑；根目录按脚本位置推导，不写死盘符，缺
+  `.smoke-runner` 标记直接拒绝。`smoke-local.ps1` 只是薄壳：UTF-8 BOM 让 PS 5.1 能解析、
   `TMP\smoke.lock` 防并发、校验 HEAD == `-HeadSha`、写
   `TMP\smoke-pr-<PR>-<sha7>.md`（干跑写 `.dryrun.md`，不覆盖真跑报告）。
 - `smoke-watcher.ps1`：每 60 秒轮询 GitHub，CI 变绿且无 `smoke-passed` 的
@@ -68,7 +97,7 @@ PG 5432），所以本目录同时装着「生产启停」与「便携/冒烟副
   （Grok 当年的 checkout 由它接管）；工作树有未提交的已跟踪改动时跳过该 PR，
   不覆盖他人在途工作。Token 依次取 `SMOKE_GITHUB_TOKEN`/`GITHUB_TOKEN`/
   `GH_TOKEN`，都没有时回落本机 `gh auth token`（只在内存，不落盘）。
-  开头有硬守卫：推导出的根目录落在 `D:\01_olbr_portal` 下直接拒绝执行（生产只读）。
+  开头有硬守卫：根目录落在 `D:\01_olbr_portal` 下、或缺 `.smoke-runner` 标记时直接拒绝执行。
 - `install-smoke-watcher.ps1`：把 watcher 注册成常驻计划任务 `OLBR_SmokeWatcher`
   （登录自启、崩溃每分钟重启、单实例）；`-Status` 查、`-Uninstall` 卸、
   **改 `smoke-watcher.ps1` 后跑 `-Start` 重启进程**（否则内存里仍是旧逻辑）。
