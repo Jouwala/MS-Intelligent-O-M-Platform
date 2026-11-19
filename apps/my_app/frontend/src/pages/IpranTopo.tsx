@@ -7,8 +7,11 @@
  * 本页只负责「怎么画得好看、点得动」：
  *
  *   布局 3 种（力导向默认且带主归属聚类 / 地理 / 分层），原力导向留在 layoutForceClassic。
- *   着色 3 种：按层级（默认）/ 按在线状态 / 按最高告警级 —— 告警色**不是默认**：
- *     实测 80% 网元都带紧急告警，按告警级填色会全红、失去区分度（后端 warnings 也会说明）。
+ *   着色 4 种：按层级（默认）/ 按在线状态 / 按最高告警级 / 按流量负载（Weathermap）。
+ *     前三种里告警色**不是默认**：实测 80% 网元都带紧急告警，按告警级填色会全红、
+ *     失去区分度（后端 warnings 也会说明）。第四种是唯一让连线颜色表达业务量的模式，
+ *     只在用户主动切过去时**额外取一次流量**（`?traffic=1`），不切就不付这份钱；
+ *     端口流量只有 KPI 采集覆盖的那几个网元有，其余显示 N/A（不是 0%）。
  *   告警只做节点右上角小红点；带宽只做线宽；断链红色虚线。颜色全部服务于故障态。
  *
  * 交互：点节点聚焦（其余变暗、只显示一跳邻居），详情从右侧滑出；
@@ -82,6 +85,9 @@ export default function IpranTopo() {
   const [drill, setDrill] = useState<Drill | null>(null)
   // 快速连切页签时先发的请求可能后返回，只认最后一次请求的响应
   const reqSeq = useRef(0)
+  /* 是否要端口流量：用 ref 而不是 state，避免切回别的着色时又白取一次 UME。
+     切到流量模式时由下面的 effect 触发一次带 traffic=1 的请求。 */
+  const wantTraffic = useRef(false)
 
   /* 取数：silent 供原地自动刷新（不清 loading、失败保留旧数据），force 绕过后端 120s 缓存 */
   const load = useCallback(async (opts?: { silent?: boolean; force?: boolean }) => {
@@ -89,7 +95,7 @@ export default function IpranTopo() {
     const silent = !!opts?.silent
     if (!silent) { setLoading(true); setError('') }
     try {
-      const r = await getIpranTopoGraph(layer, opts?.force ? 1 : 0)
+      const r = await getIpranTopoGraph(layer, opts?.force ? 1 : 0, wantTraffic.current ? 1 : 0)
       if (seq !== reqSeq.current) return
       setResp(r.data as TopoResp)
       if (!silent) setError('')
@@ -102,6 +108,14 @@ export default function IpranTopo() {
   }, [layer])
 
   useEffect(() => { void load() }, [load])
+  /* 着色切到「流量负载」时才去取端口速率（多读 6 张 KPI 表）；已经有这份数据就不重复取。
+     切走时**不重取** —— 服务端两份响应各自缓存，回来时还能直接命中。 */
+  useEffect(() => {
+    const on = colorMode === 'traffic'
+    if (on === wantTraffic.current) return
+    wantTraffic.current = on
+    if (on && !resp?.meta?.traffic) void load()
+  }, [colorMode, resp, load])
   useEffect(() => {
     const onInplaceRefresh = () => { void load({ silent: true }) }
     document.addEventListener('myapp-refresh', onInplaceRefresh)
@@ -147,6 +161,23 @@ export default function IpranTopo() {
   const critPct = ne ? Math.round((critNe * 100) / ne) : 0
   const downNe = useMemo(() => nodes.filter((v) => v.tier > 0 && !v.up).length, [nodes])
 
+  const footMap = (w: string): string | null => {
+    const tm = meta?.traffic
+    if (w.startsWith('traffic_no_data')) return t('ipranTopo.warn.trafficNoData')
+    if (w.startsWith('traffic_unmatched')) {
+      return t('ipranTopo.warn.trafficUnmatched', { n: tm?.totalEdges ?? 0 })
+    }
+    if (w.startsWith('traffic_partial')) {
+      const m = tm?.matchedEdges ?? 0
+      const n = tm?.totalEdges ?? 0
+      return t('ipranTopo.warn.trafficPartial', { m, n, pct: n ? Math.round((m * 100) / n) : 0 })
+    }
+    if (w.startsWith('traffic_no_bandwidth')) {
+      return t('ipranTopo.warn.trafficNoBandwidth', { n: tm?.noBandwidthPorts ?? 0 })
+    }
+    return null
+  }
+
   /* 告警按页面已知的口径就地重建成中英双语；后端未知前缀（如 load_failed）原样显示，不吞。
      取数降级（stale）留在工具条下，用户正在看的不是本次结果。
      告警饱和 / 缺坐标 / 近似匹配是说明，不是本次取数失败，放到页底，避免把画布顶下去。 */
@@ -163,7 +194,10 @@ export default function IpranTopo() {
     const fuzzy = meta.geo?.fuzzy ?? 0
     if (fuzzy) foot.push(t('ipranTopo.warn.geoFuzzy', { n: fuzzy }))
     for (const w of meta.warnings || []) {
-      if (!/^(alarm_saturated|geo_miss|geo_fuzzy|upstream_unreachable):/.test(w)) foot.push(w)
+      if (/^(alarm_saturated|geo_miss|geo_fuzzy|upstream_unreachable):/.test(w)) continue
+      const mapped = footMap(w)
+      if (mapped) { foot.push(mapped); continue }
+      foot.push(w)
     }
     return { topWarns: top, footWarns: foot }
   }, [meta, ne, critNe, critPct, t])
@@ -266,6 +300,7 @@ export default function IpranTopo() {
       resp.nodes[idx.byId[e.s]]?.name ?? e.s,
       resp.nodes[idx.byId[e.t]]?.name ?? e.t,
       e.n, e.gb ?? '', e.down, e.crit, e.major, e.ports.join(' | '),
+      e.rxUtil ?? '', e.txUtil ?? '',
     ])
     void exportReport([
       {
@@ -284,20 +319,40 @@ export default function IpranTopo() {
           t('ipranTopo.col.peerA'), t('ipranTopo.col.peerB'), t('ipranTopo.col.physLinks'),
           t('ipranTopo.col.gb'), t('ipranTopo.col.downLinks'), t('ipranTopo.col.crit'),
           t('ipranTopo.col.major'), t('ipranTopo.col.ports'),
+          t('ipranTopo.col.rxUtil'), t('ipranTopo.col.txUtil'),
         ],
-        rows: linkRows, numericCols: [2, 3, 4, 5, 6], autoWidth: false,
-        columnWidths: [28, 28, 12, 12, 12, 10, 10, 60],
+        rows: linkRows, numericCols: [2, 3, 4, 5, 6, 8, 9], autoWidth: false,
+        columnWidths: [26, 26, 10, 10, 10, 9, 9, 52, 10, 10],
       },
     ], `UME_Topo_${layer}_${dayjs().format('YYYYMMDD_HHmmss')}.xlsx`)
   }, [resp, idx, t, layer])
 
-  /* 口径说明按层切换：ipran 用实测版，其余三层用通用版（不套用 93/167 这类实测数字） */
-  const calcSections = useMemo<CalcChainSection[]>(
-    () => calcSectionKeys(layer).map((s) => ({
+  /* 口径说明按层切换：ipran 用实测版，其余三层用通用版（不套用 93/167 这类实测数字）。
+     切到流量模式且本次响应带了流量数据时，再补一节流量口径（含本次实际覆盖数）。 */
+  const calcSections = useMemo<CalcChainSection[]>(() => {
+    const out = calcSectionKeys(layer).map((s) => ({
       title: t(s.title), lines: s.lines.map((k) => t(k)),
-    })),
-    [layer, t],
-  )
+    }))
+    const tm = colorMode === 'traffic' ? meta?.traffic : undefined
+    if (tm) {
+      const m = tm.matchedEdges
+      const n = tm.totalEdges
+      out.push({
+        title: t('ipranTopo.calc.traffic.title'),
+        lines: [
+          t('ipranTopo.calc.traffic.l1', {
+            tables: tm.tables.length,
+            at: tm.sampledAt ? formatDateTime(tm.sampledAt) : t('ipranTopo.detail.na'),
+          }),
+          t('ipranTopo.calc.traffic.l2'),
+          t('ipranTopo.calc.traffic.l3'),
+          t('ipranTopo.calc.traffic.l4'),
+          t('ipranTopo.calc.traffic.l5', { m, n, pct: n ? Math.round((m * 100) / n) : 0 }),
+        ],
+      })
+    }
+    return out
+  }, [layer, t, meta, colorMode])
 
   const openDrill = (kind: DrillKind) => (e: ReactMouseEvent<HTMLDivElement>) =>
     setDrill({ kind, anchor: { x: e.clientX, y: e.clientY } })
@@ -332,6 +387,7 @@ export default function IpranTopo() {
             dimmed={dimmed} impacted={impacted} selectedEdge={selectedEdge}
             viewCmd={viewCmd} resetKey={`${layer}:${layoutKey}`}
             markGeo={layoutKey === 'geo'}
+            trafficAt={meta?.traffic?.sampledAt ? formatDateTime(meta.traffic.sampledAt) : null}
             onToggleFocus={(i) => { setFocus((prev) => (prev === i ? -1 : i)); setSelectedEdge(-1) }}
             onSelectEdge={(i) => { setSelectedEdge(i); setFocus(-1) }}
             onBackgroundClick={() => { setFocus(-1); setSelectedEdge(-1) }}
@@ -388,7 +444,9 @@ export default function IpranTopo() {
           sec: (meta.elapsedSec ?? 0).toFixed(2),
           at: formatDateTime(meta.fetchedAt),
           cached: meta.cached ? t('ipranTopo.meta.cached') : '',
-        }) : null}
+        }) + (colorMode === 'traffic' && meta.traffic?.sampledAt
+          ? t('ipranTopo.meta.traffic', { at: formatDateTime(meta.traffic.sampledAt) })
+          : '') : null}
         query={query} onQuery={setQuery} onLocate={locate}
         tierFilter={tierFilter} onTier={setTierFilter}
         statusFilter={statusFilter} onStatus={setStatusFilter}
@@ -438,6 +496,7 @@ export default function IpranTopo() {
                       showAllLabels={showAllLabels} foldParallel={foldParallel}
                       dimmed={dimmed} impacted={impacted} selectedEdge={selectedEdge}
                       markGeo={layoutKey === 'geo'}
+                      trafficAt={meta?.traffic?.sampledAt ? formatDateTime(meta.traffic.sampledAt) : null}
                       viewCmd={viewCmd} resetKey={`${layer}:${layoutKey}`}
                       onToggleFocus={(i) => { setFocus((prev) => (prev === i ? -1 : i)); setSelectedEdge(-1) }}
                       onSelectEdge={(i) => { setSelectedEdge(i); setFocus(-1) }}

@@ -68,7 +68,7 @@ from datetime import datetime, timezone
 
 from backend.database import get_raw_connection
 from backend.services.ipran.ipran_ume_kpi_service import HOST, PORT, UmeSessionClient
-from backend.services.ipran_topo import layers
+from backend.services.ipran_topo import layers, topo_traffic
 from backend.services.ipran_topo.layers import DEFAULT_LAYER, TIER_EXT
 
 logger = logging.getLogger("ipran_topo")
@@ -76,6 +76,9 @@ logger = logging.getLogger("ipran_topo")
 # 一次聚合约 1.5~3.0s，8 次调用。缓存 120s（页面建议刷新 300s），
 # 避免每个用户每次刷新都把 NMS 打一遍。
 CACHE_TTL_SEC = 120
+
+# 带流量利用率的缓存槽后缀（见 _cache_key）
+TRAFFIC_SLOT_SUFFIX = "|traffic"
 
 # 站点名 -> 坐标的索引来源（由 services/mw_ume/mw_links_store.py 从 KML 写入）
 SITE_TABLE = "kml_mw_links"
@@ -107,8 +110,17 @@ _site_index: dict | None = None
 _site_lock = threading.Lock()
 
 
-def _cache_slot(layer: str) -> dict:
-    return _cache.setdefault(layer, {"ts": 0.0, "data": None})
+def _cache_key(layer: str, with_traffic: bool) -> str:
+    """缓存槽键：同一层「纯拓扑」与「带流量利用率」是两份数据。
+
+    流量要额外读 6 张 KPI 表（实测 ~0.5s），不该让不切流量模式的用户一起付；
+    两份分开缓存，切换着色模式时才补那一次。
+    """
+    return f"{layer}{TRAFFIC_SLOT_SUFFIX if with_traffic else ''}"
+
+
+def _cache_slot(key: str) -> dict:
+    return _cache.setdefault(key, {"ts": 0.0, "data": None})
 
 
 # ----------------------------------------------------------------------------
@@ -247,16 +259,22 @@ def _is_up(v) -> bool:
     return str(v) == "1"
 
 
-def build_graph(layer: str = DEFAULT_LAYER, force: bool = False) -> dict:
+def build_graph(layer: str = DEFAULT_LAYER, force: bool = False,
+                with_traffic: bool = False) -> dict:
     """返回指定层的完整图数据；每层独立缓存 CACHE_TTL_SEC 秒。
 
     `layer` 必须在 `layers.LAYERS` 白名单内（路由层已校验）。不带 layer 时仍是
     原来的 IP RAN 光纤层，现有页面与旧调用方式无需改动。
+
+    `with_traffic=True` 时额外把 KPI 端口速率贴到边上（`rxUtil` / `txUtil` /
+    `utilPorts` + `meta.traffic`），并**单独占一个缓存槽** —— 不切流量模式的
+    用户不会为这次额外读库付钱。
     """
     spec = layers.resolve_layer(layer)
     if spec is None:
         raise ValueError(f"未知拓扑层: {layer}")
-    slot = _cache_slot(layer)
+    key = _cache_key(layer, with_traffic)
+    slot = _cache_slot(key)
     now = time.time()
     if not force and slot["data"] is not None and now - slot["ts"] < CACHE_TTL_SEC:
         data = dict(slot["data"])
@@ -265,7 +283,7 @@ def build_graph(layer: str = DEFAULT_LAYER, force: bool = False) -> dict:
 
     # 上游一次取数要 1.5~3.0s；四层共用一把锁串行化，后来者复用前者的结果
     with _fetch_lock:
-        slot = _cache_slot(layer)
+        slot = _cache_slot(key)
         now = time.time()
         if not force and slot["data"] is not None and now - slot["ts"] < CACHE_TTL_SEC:
             data = dict(slot["data"])
@@ -276,6 +294,8 @@ def build_graph(layer: str = DEFAULT_LAYER, force: bool = False) -> dict:
         try:
             raw = fetch_raw(spec)
             payload = _aggregate(raw, spec)
+            if with_traffic:
+                _attach_traffic(payload, spec)
         except Exception:
             if slot["data"] is not None:
                 # 上游抖动时返回该层上一版可用数据，并在 meta 里显式标注，界面必须能看到
@@ -298,6 +318,18 @@ def build_graph(layer: str = DEFAULT_LAYER, force: bool = False) -> dict:
                     layer, payload["meta"]["ne"], payload["meta"]["rawLinks"],
                     payload["meta"]["foldedLinks"], elapsed)
         return payload
+
+
+def _attach_traffic(payload: dict, spec: layers.LayerSpec) -> None:
+    """把端口流量利用率贴到 payload 的 edges 上，附加的告警并入 meta.warnings。
+
+    单位与方向口径见 `topo_traffic` 模块 docstring；这里只负责接线，不重算。
+    """
+    traffic = topo_traffic.annotate_edges(payload.get("edges") or [], payload.get("nodes") or [], spec)
+    warnings = list(traffic.pop("warnings", []) or [])
+    payload.setdefault("meta", {})["traffic"] = traffic
+    if warnings:
+        payload["meta"].setdefault("warnings", []).extend(warnings)
 
 
 def _aggregate(raw: dict, spec: layers.LayerSpec) -> dict:
@@ -433,9 +465,12 @@ def refresh_site_index() -> int:
 
 
 def clear_cache(layer: str | None = None) -> None:
-    """清图缓存；传 layer 只清该层，不传则清全部层（历史行为）。"""
+    """清图缓存；传 layer 只清该层（含该层的流量槽），不传则清全部层（历史行为）。"""
     with _fetch_lock:
-        targets = (_cache_slot(layer),) if layer else tuple(_cache.values())
+        if layer:
+            targets = (_cache_slot(layer), _cache_slot(_cache_key(layer, True)))
+        else:
+            targets = tuple(_cache.values())
         for slot in targets:
             slot["ts"] = 0.0
             slot["data"] = None

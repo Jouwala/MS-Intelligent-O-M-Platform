@@ -11,6 +11,11 @@
 
 `refresh=1` 绕过该层图缓存并重载站点坐标缓存（页面「刷新」按钮用），对应 UME
 侧 8 次调用，约 1.5~3.0s；只清当前层，不会把另外三层缓存一起打掉。
+
+`traffic=1` 额外把 KPI 端口收发速率贴到边上（`rxUtil` / `txUtil` / `utilPorts`
++ `meta.traffic`），多读 6 张 15 分钟表（实测 +0.5s）。它**单独占一个缓存槽**：
+不传 traffic 的老调用方取到的响应与加这个参数之前逐字段一致。口径见
+`backend/services/ipran_topo/topo_traffic.py` 模块 docstring。
 取数口径、折叠规则、坐标来源与告警饱和度的说明见
 `backend/services/ipran_topo/ipran_topo_service.py` 模块 docstring；层清单与
 每层口径见同目录 `layers.py`。
@@ -37,6 +42,7 @@ def list_layers():
 def graph(
     layer: str = Query(DEFAULT_LAYER, description="拓扑层 key，见 /layers"),
     refresh: int = Query(0, ge=0, le=1, description="1 = 绕过缓存重新取数"),
+    traffic: int = Query(0, ge=0, le=1, description="1 = 附带端口流量利用率（多读 KPI 库）"),
 ):
     if layers.resolve_layer(layer) is None:
         raise HTTPException(status_code=400, detail=f"未知拓扑层: {layer}")
@@ -44,7 +50,7 @@ def graph(
         if refresh:
             svc.clear_cache(layer)
             svc.refresh_site_index()
-        return svc.build_graph(layer=layer, force=bool(refresh))
+        return svc.build_graph(layer=layer, force=bool(refresh), with_traffic=bool(traffic))
     except Exception as exc:
         logger.exception("[ipran-topo/graph] layer=%s failed: %s", layer, exc)
         return {
