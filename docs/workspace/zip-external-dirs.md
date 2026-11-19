@@ -117,6 +117,7 @@ find <版本目录> -newer /tmp/p16-mark -print
 | 问答/代理服务日志 | `portal_qa_ctl.py`、`realtime_proxy_ctl.py`（`_ROOT` 派生） | `MYAPP_LOG_DIR` 覆盖日志根 |
 | 后端 `.env` 搜索路径 | `database.py`（只读 `backend/.env` 与父级 `.env`） | `MY_APP_ENV_FILE` 优先（独立拉起时用；start_all 模式不需要） |
 | 看门狗日志 `PROJECT_ROOT/log` | `backend_watchdog.py`（看门狗链专用，副本不跑） | `MYAPP_LOG_DIR` 覆盖 |
+| `outputs/auth_health/`（每日巡检报告） | `auth_health_check.py:44` `REPORT_DIR`；`:359/:361` mkdir + 写盘；`task_registry.py:783` 每日 07:00 任务调 `run_auth_health_check()` 必写 md + JSON | 无覆盖口；后续事项（需新增环境变量覆盖口或记为例外，待 Muse 1 定，不静默修） |
 
 注：`FE_DIST_OUT` 在外部模式下仍指向版本目录内的预构建 `_fe_dist`（vite
 preview 就从那里提供服务），geojson 刷新会写版本目录内的一个可再生静态文件。
