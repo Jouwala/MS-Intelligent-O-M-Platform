@@ -1,16 +1,20 @@
-"""告警收件箱：四类告警统一路由给 Muse 1（Issue #143，审计 P1-8）。
+"""告警收件箱：五类告警统一路由给 Muse 1（Issue #143，审计 P1-8）。
 
 背景：此前 CI 失败只通知 builder、Reaper 失败只开通用告警 Issue、长期无进展 /
 阻塞升级没有告警出口，Muse 1 只能靠自己轮询发现问题——正是用户 2026-11-17
 批评的被动模式。
 
-做法：仓库里一个固定收件箱 Issue（标题 `INBOX_TITLE`），四类告警都以机器可读
+做法：仓库里一个固定收件箱 Issue（标题 `INBOX_TITLE`），五类告警都以机器可读
 标记往里追加；同一（类别，key）只留一条评论，就地 PATCH 更新，不刷屏：
 
 - ci-failure：key = `pr-<N>`（同一 PR 多次失败只更新一条，附最新运行）
 - reaper-failure：key = `latest`（每次失败更新同一条，附最新运行）
 - no-progress：key = `issue-<N>`（认领后 4 小时无进展，被 claim-expiry 过期时发）
 - blocked-escalation：key = `issue-<N>`（高优先级立即；普通 30 分钟后）
+- ownerless-task：key = `current`（无 agent 标签的 state:todo 任务清单，
+  整份只留一条滚动更新；#176 并入——此前 lease-reaper.yml 用 bash 单独
+  维护同名告警 Issue，查找靠 Search 标题模糊匹配，间歇落空就新建一个，
+  攒出 #154/#164/#165/#167 四个内容相同的 Issue）
 
 只通知，不改代码、不改标签、不重跑。告警正文只含任务/PR 编号、原因、时间、
 已采取的自动动作、下一步建议；token/密码只出现在环境变量里，永不进正文。
@@ -46,22 +50,31 @@ INBOX_TITLE = "[告警收件箱] Muse 1"
 INBOX_INTRO = (
     "<!-- muse1-alert-inbox -->\n"
     "# 告警收件箱（Muse 1）\n\n"
-    "本 Issue 是四类告警的唯一收件箱，各 workflow 以机器可读标记往里追加，"
+    "本 Issue 是五类告警的唯一收件箱，各 workflow 以机器可读标记往里追加，"
     "不另开新 Issue、不刷屏：\n\n"
     "- `ci-failure`：CI（quality）失败，key 为 PR 编号\n"
     "- `reaper-failure`：lease-reaper 运行失败，key 为 latest（只留最新一次）\n"
     "- `no-progress`：任务认领后 4 小时无进展被过期，key 为 Issue 编号\n"
-    "- `blocked-escalation`：任务阻塞升级，key 为 Issue 编号\n\n"
+    "- `blocked-escalation`：任务阻塞升级，key 为 Issue 编号\n"
+    "- `ownerless-task`：无负责人任务（state:todo 且无 agent 标签），key 为 "
+    "current（整份清单只留一条滚动更新）\n\n"
     "同一（类别，key）只留一条评论，就地更新。只通知，不改代码、不改标签、"
     "不重跑。\n"
 )
 
-#: 四类告警（审计 #143 验收标准）。
+#: 五类告警（前四类为审计 #143 验收标准；ownerless-task 于 #176 并入）。
 ALERT_CLASSES = frozenset(
-    {"ci-failure", "reaper-failure", "no-progress", "blocked-escalation"}
+    {
+        "ci-failure",
+        "reaper-failure",
+        "no-progress",
+        "blocked-escalation",
+        "ownerless-task",
+    }
 )
 
 BLOCKED_LABEL = "state:blocked"
+TODO_LABEL = "state:todo"
 
 #: 普通优先级阻塞满 30 分钟才升级；高优先级（P0/P1）立即升级。
 NORMAL_ESCALATION_DELAY = timedelta(minutes=30)
@@ -164,7 +177,7 @@ def post_alert(
 
 
 # ---------------------------------------------------------------------------
-# 四类告警的构造器（纯函数：好测试；CLI 与 lease_reaper.py 都调它们）
+# 五类告警的构造器（纯函数：好测试；CLI 与 lease_reaper.py 都调它们）
 # ---------------------------------------------------------------------------
 
 
@@ -245,6 +258,34 @@ def blocked_escalation_alert(
         at=at,
         actions_taken=["未自动改派（阻塞升级只通知，由 Muse 1 决定）"],
         next_step="请 Muse 1 查看任务 Issue 上的阻塞说明，决定改派、放宽范围或人工介入。",
+    )
+
+
+def ownerless_alert(
+    *, issues: list[tuple[int, str]], at: str
+) -> Alert:
+    """无负责人任务告警：key 固定 `current`，整份清单只留一条滚动更新。
+
+    `at` 取清单里最新任务的创建时间（事件时间）：清单不变则正文逐字
+    相同，重复投递被 `post_alert` 直接跳过——这正是旧 bash 实现缺的
+    稳定 key（它用每轮唯一的时间戳 marker，又靠 Search 标题模糊匹配
+    找已有 Issue，落空即新建，见 #176）。
+    """
+    numbers = "、".join(f"#{number}" for number, _title in issues)
+    listing = "\n".join(
+        f"- #{number} {title}".rstrip() for number, title in issues
+    )
+    return Alert(
+        alert_class="ownerless-task",
+        key="current",
+        heading="存在无负责人任务（分派不可见）",
+        task_ref=numbers,
+        reason=(
+            f"以下 {len(issues)} 个 state:todo 任务没有 agent:* 标签，"
+            f"auto-dispatch 永远不会分派它们：\n{listing}"
+        ),
+        at=at,
+        next_step="请 Muse 1 确认负责人后补 agent 标签，或关闭不需要的任务。",
     )
 
 
@@ -369,6 +410,82 @@ def escalate_blocked_tasks(
 
 
 # ---------------------------------------------------------------------------
+# 无负责人任务扫描：state:todo 且无 agent:* 标签（#176）
+# ---------------------------------------------------------------------------
+
+
+def _label_names(issue: dict[str, Any]) -> list[str]:
+    """Issue 的标签名列表（API 返回 dict 列表；容忍纯字符串写法）。"""
+    names: list[str] = []
+    for label in issue.get("labels") or []:
+        if isinstance(label, dict):
+            names.append(str(label.get("name") or ""))
+        else:
+            names.append(str(label or ""))
+    return names
+
+
+def scan_ownerless_tasks(
+    client: GitHubClient,
+    repo: str,
+    *,
+    now: Optional[datetime] = None,
+    log=print,
+) -> list[int]:
+    """扫描 open 的 `state:todo` 里没有 `agent:*` 标签的任务，汇总成一条
+    ownerless-task 告警发到收件箱（#176）。
+
+    返回本轮新发/更新了告警的无负责人任务编号；清单为空时不发（也不建
+    收件箱，与旧行为一致），清单未变时 `post_alert` 判定正文相同直接
+    跳过、返回空列表。发送失败只记日志、不抛错（同阻塞升级口径：通知
+    失败不应让 Reaper 整轮变红，下一轮会重新推导）。
+    """
+    current = now or datetime.now(timezone.utc)
+    try:
+        issues = [
+            issue
+            for issue in client.list_open_issues(TODO_LABEL)
+            if "pull_request" not in issue
+        ]
+        ownerless = [
+            issue
+            for issue in issues
+            if not any(
+                name.startswith("agent:") for name in _label_names(issue)
+            )
+        ]
+        if not ownerless:
+            log("[alert-inbox] 无无负责人 state:todo 任务，无需告警")
+            return []
+        ownerless.sort(key=lambda issue: int(issue["number"]))
+        # 事件时间取清单里最新任务的创建时间：清单不变则正文不变。
+        at = max(
+            (str(issue.get("created_at") or "") for issue in ownerless),
+            default="",
+        ) or current.strftime("%Y-%m-%dT%H:%M:%SZ")
+        result = post_alert(
+            client,
+            repo,
+            ownerless_alert(
+                issues=[
+                    (int(issue["number"]), str(issue.get("title") or ""))
+                    for issue in ownerless
+                ],
+                at=at,
+            ),
+        )
+        numbers = [int(issue["number"]) for issue in ownerless]
+        log(
+            f"[alert-inbox] 无负责人任务 {len(numbers)} 个，"
+            f"告警已发（{result['action']}）"
+        )
+        return numbers if result["action"] in ("created", "updated") else []
+    except Exception as exc:  # noqa: BLE001 - 只记日志，下一轮重新推导
+        log(f"[alert-inbox] 无负责人任务扫描失败：{exc!r}")
+        return []
+
+
+# ---------------------------------------------------------------------------
 # CLI：供 workflow 的 bash 步骤调用（ci-failure-notify / lease-reaper）
 # ---------------------------------------------------------------------------
 
@@ -413,6 +530,10 @@ def main(
 
     sub.add_parser("blocked-scan", help="扫描 state:blocked 并按规则升级")
 
+    sub.add_parser(
+        "ownerless-scan", help="扫描无负责人 state:todo 任务并汇总告警（#176）"
+    )
+
     args = parser.parse_args(argv)
     try:
         repo, token = _env_config(env)
@@ -420,7 +541,9 @@ def main(
         print(f"[alert-inbox] 配置错误：{exc}", file=sys.stderr)
         return 2
     client = client or UrllibGitHubClient(repo=repo, token=token)
-    at = args.at or _utcnow_iso()
+    # 扫描类子命令（blocked-scan / ownerless-scan）没有 --at：它们用各自的
+    # 事件时间渲染正文，不吃这个值；用 getattr 兜底，避免 AttributeError。
+    at = getattr(args, "at", None) or _utcnow_iso()
     try:
         if args.command == "ci-failure":
             result = post_alert(
@@ -447,6 +570,12 @@ def main(
         elif args.command == "blocked-scan":
             escalated = escalate_blocked_tasks(client, repo)
             print(f"[alert-inbox] 阻塞升级扫描完成：升级 {len(escalated)} 个任务")
+        elif args.command == "ownerless-scan":
+            numbers = scan_ownerless_tasks(client, repo)
+            print(
+                "[alert-inbox] 无负责人扫描完成："
+                f"{len(numbers)} 个任务新发/更新告警"
+            )
         else:  # pragma: no cover - argparse required=True 已拦住
             parser.error(f"未知子命令：{args.command}")
     except Exception as exc:  # noqa: BLE001 - CLI 失败必须显式：非零退出
