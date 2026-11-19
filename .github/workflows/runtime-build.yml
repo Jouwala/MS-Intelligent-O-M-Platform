@@ -19,6 +19,13 @@
 # curl 解析主机 "null" 失败，exit 6）。本工作流所有用 jq 的 run 块都在
 # 开头定义 jq() 包装（command jq "$@" | tr -d '\r'），统一去掉 \r；
 # Linux 下 jq 输出本就是 LF，此处理无操作。新增 jq 调用须走此包装。
+#
+# 2026-11-19 #173（第二个 bug）：win-x64 四个组件全是 .zip（nginx / node /
+# postgresql / python embed），而 Windows runner 的 bash 里 `tar` 是 GNU tar，
+# 解不了 zip —— 干跑 Run #2 报 `tar: This does not look like a tar archive`
+# （exit 2），下载与哈希校验其实都过了。现在通用循环按扩展名分流：.zip 走
+# Windows 自带 bsdtar（C:\Windows\System32\tar.exe，libarchive，原生支持
+# --strip-components）或 unzip；.tar.* 仍走 GNU tar。
 
 name: runtime-build
 
@@ -62,8 +69,17 @@ jobs:
         with:
           node-version: "24"
 
-      - name: 工具预检（tar/jq/sha256sum/curl/tr）
-        run: command -v tar jq sha256sum curl tr || { echo "错误：缺构建工具（GitHub 托管 runner 应预装 tar/jq/sha256sum/curl/tr；自托管 runner 须补齐，见 zip-build-release.md）"; exit 1; }
+      - name: 工具预检（tar/jq/sha256sum/curl/tr，win-x64 另需 zip 解包器）
+        run: |
+          command -v tar jq sha256sum curl tr || { echo "错误：缺构建工具（GitHub 托管 runner 应预装 tar/jq/sha256sum/curl/tr；自托管 runner 须补齐，见 zip-build-release.md）"; exit 1; }
+          # win-x64 的四个组件是 .zip；GNU tar 解不了，须有 bsdtar 或 unzip（#173）。
+          if [ "${{ matrix.platform }}" = "win-x64" ]; then
+            if [ -x /c/Windows/System32/tar.exe ] || command -v unzip >/dev/null 2>&1; then
+              echo "zip 解包器可用：$( [ -x /c/Windows/System32/tar.exe ] && echo 'Windows bsdtar' || echo 'unzip' )"
+            else
+              echo "错误：win-x64 需要 zip 解包器（C:\\Windows\\System32\\tar.exe 或 unzip）"; exit 1
+            fi
+          fi
 
       - name: 解析清单版本
         id: manifest
@@ -95,6 +111,42 @@ jobs:
           # 去 CRLF（Windows jq 输出 \r\n；见文件头 #173）
           jq() { command jq "$@" | tr -d '\r'; }
           PLATFORM="${{ matrix.platform }}"
+
+          # 解包一个清单组件，strip 语义与清单一致（丢弃前 N 层路径）。
+          # .zip：Windows 自带 bsdtar（libarchive，能读 zip 且支持
+          # --strip-components）优先；退而用 unzip，strip=1 时要求根部
+          # 恰好一个顶层目录（nginx/node/pgsql 都是），否则宁可失败也不猜。
+          unpack() {
+            local file="$1" dest="$2" strip="$3"
+            mkdir -p "${dest}"
+            case "${file}" in
+              *.zip)
+                if [ -x /c/Windows/System32/tar.exe ]; then
+                  /c/Windows/System32/tar.exe -xf "${file}" --strip-components="${strip}" -C "${dest}"
+                elif command -v unzip >/dev/null 2>&1; then
+                  local tmp; tmp="$(mktemp -d)"
+                  unzip -q "${file}" -d "${tmp}"
+                  if [ "${strip}" -eq 0 ]; then
+                    cp -a "${tmp}/." "${dest}/"
+                  else
+                    local entry; entry="$(find "${tmp}" -mindepth 1 -maxdepth 1 | head -n 2)"
+                    if [ "$(printf '%s\n' "${entry}" | wc -l)" -ne 1 ]; then
+                      echo "错误：${file} 根部不是单一顶层目录，无法按 strip=${strip} 组装" >&2
+                      rm -rf "${tmp}"; return 1
+                    fi
+                    cp -a "${entry}/." "${dest}/"
+                  fi
+                  rm -rf "${tmp}"
+                else
+                  echo "错误：解不了 zip（缺 Windows 自带 bsdtar 与 unzip）：${file}" >&2; return 1
+                fi
+                ;;
+              *)
+                tar -xf "${file}" --no-same-owner --strip-components="${strip}" -C "${dest}"
+                ;;
+            esac
+          }
+
           mkdir -p downloads runtime-staging
           for NAME in $(jq -r --arg p "${PLATFORM}" '.platforms[$p] | keys[]' ops/deploy/runtime-manifest.json); do
             # Linux 专用条目由后续专用步骤处理，通用循环跳过：
@@ -116,7 +168,8 @@ jobs:
             # --no-same-owner：以 root 解包时 tar 默认 --same-owner，
             # 归属 uid 在沙箱/容器里不存在即 exit 2（2026-11-19 本地实测）；
             # 非 root 时本就是默认行为，加此旗标两边都稳。
-            tar -xf "${FILE}" --no-same-owner -C "runtime-staging/${DIR}" --strip-components="${STRIP}"
+            # zip 的分流见函数 unpack（#173）。
+            unpack "${FILE}" "runtime-staging/${DIR}" "${STRIP}"
             echo "${NAME} 已组装到 runtime-staging/${DIR}"
           done
           node -e "
