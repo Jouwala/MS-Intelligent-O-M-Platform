@@ -89,7 +89,7 @@ auto-dispatch / dispatch-check）的内嵌 Python 已抽成
 
 ### 告警收件箱（2026-11-18，#143）
 
-四类告警统一路由给 Muse 1 的固定收件箱 Issue（标题 `[告警收件箱] Muse 1`，
+五类告警统一路由给 Muse 1 的固定收件箱 Issue（标题 `[告警收件箱] Muse 1`，
 首次使用时由 `alert_inbox.py` 自动创建）。实现：`apps/control-plane/backend/dispatch/alert_inbox.py`
 （标准库 only）+ `github_client.py` 新增的 `create_issue` / `update_issue_comment` /
 `list_issue_events`。
@@ -100,18 +100,22 @@ auto-dispatch / dispatch-check）的内嵌 Python 已抽成
 | `reaper-failure` | `lease-reaper.yml` 的 `failure()` 步 | `latest` | 每次失败更新同一条评论，只留最新一次 |
 | `no-progress` | `lease_reaper.py --claim-expiry` 过期时 | `issue-<N>` | 认领后 4 小时无进展被过期时发 |
 | `blocked-escalation` | `lease_reaper.py --alert-blocked` 每轮扫描 | `issue-<N>` | 高优先级（P0/P1）立即；普通（P2/未注明）满 30 分钟 |
+| `ownerless-task` | `lease-reaper.yml` 每轮扫描（`alert_inbox.py ownerless-scan`，#176） | `current` | 整份无负责人清单只留一条，清单变化才更新，不变零写操作 |
 
 口径：同一（类别，key）只留一条评论，就地 PATCH 更新；正文完全相同时直接
 跳过，不产生无意义的 PATCH。正文只含任务/PR 编号、原因、事件时间、已采取的
 自动动作、下一步建议，不含敏感值。只通知，不改代码、不改标签、不重跑。
-`no-progress` 与阻塞升级的告警发送失败只记日志、不让 Reaper 整轮变红
-（认领过期的 CLAIM_EXPIRED 评论与标签收敛已经完成，信息仍在任务 Issue 上；
-阻塞扫描下一轮会重新推导）。
+`no-progress`、阻塞升级与无负责人扫描的告警发送失败只记日志、不让 Reaper
+整轮变红（认领过期的 CLAIM_EXPIRED 评论与标签收敛已经完成，信息仍在任务
+Issue 上；两类扫描下一轮都会重新推导）。
 Reaper 失败告警的 `failure()` 步依赖检出：检出失败时退化为直接往收件箱追加
 一条最小告警（同 marker），下一轮 CLI 成功时会就地更新它。
 
-已知遗留：`lease-reaper.yml` 的无负责人任务告警（ownerless-alert）仍走单独的
-同名告警 Issue，未并入收件箱——后续可顺手迁移，不在本 Issue 范围内。
+无负责人任务告警已于 #176 并入收件箱（类别 `ownerless-task`，见上表）：
+旧实现用 bash 单独维护同名告警 Issue，marker 用每轮唯一的时间戳、查找靠
+Search 标题模糊匹配，间歇落空即新建，先后攒出 #154/#164/#165/#167 四个
+内容相同的 Issue；自 #176 起只往收件箱发一条滚动评论，旧告警 Issue 不再
+更新。
 
 ### 状态视图（2026-11-18，#142）
 
