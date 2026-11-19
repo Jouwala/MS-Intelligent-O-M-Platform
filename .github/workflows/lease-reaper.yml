@@ -24,7 +24,8 @@
 # - Reaper→dispatch：本轮释放了任务（reaped > 0）时即时触发一次自动分派，
 #   不等每小时巡检（P1-4）；无释放时不空跑。
 # - 静默卡住检查：每轮查无负责人（无 agent 标签）的 state:todo 任务，
-#   有则开/更新同名告警 Issue（P1-4）。
+#   有则往 Muse 1 告警收件箱发 ownerless-task 告警（#176 并入统一
+#   路由；旧实现单独开同名告警 Issue、间歇重复建，已废弃）。
 # - 幂等：没有可删项也正常退出 0。HWM ref 默认永不删除。
 
 name: lease-reaper
@@ -80,65 +81,17 @@ jobs:
           PYTHONIOENCODING: utf-8
         run: python apps/control-plane/backend/dispatch/auto_dispatch.py
 
-      - name: 无负责人任务告警（静默卡住检查）
+      - name: 无负责人任务告警（路由到 Muse 1 告警收件箱）
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PYTHONIOENCODING: utf-8
-        run: |
-          set -euo pipefail
-          API="https://api.github.com/repos/$REPO"
-          AUTH=(-H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json')
-          # 找 open 的 state:todo Issue 里没有 agent:* 标签的（对分派永久不可见）。
-          # 列表端点也会返回 PR（带 pull_request 键），须排除；跟 Link 分页拉满，
-          # 不只取前 100 条（仓库 Issue 已过 130）。
-          : > /tmp/ownerless_list.txt
-          URL="$API/issues?state=open&labels=state:todo&per_page=100"
-          while [ -n "$URL" ]; do
-            curl -sS -D /tmp/ownerless_headers.txt "${AUTH[@]}" "$URL" \
-              | jq -r '.[] | select(.pull_request | not) | select(.labels | map(.name) | map(test("^agent:")) | any | not) | "#\(.number) \(.title)"' >> /tmp/ownerless_list.txt
-            # 单页结果时 GitHub 不返回 Link 头，grep 退出 1；pipefail + set -e
-            # 会直接杀死整个步骤，故管道末尾加 || true（无 next 链接即结束循环）。
-            URL="$(grep -i '^Link:' /tmp/ownerless_headers.txt | tr ',' '\n' | sed -n 's/.*<\([^>]*\)>; rel="next".*/\1/p' | head -n 1 || true)"
-          done
-          OWNERLESS="$(cat /tmp/ownerless_list.txt)"
-          if [ -z "$OWNERLESS" ]; then
-            echo "无无负责人 state:todo 任务，无需告警。"
-            exit 0
-          fi
-          echo "发现无负责人 state:todo 任务："
-          echo "$OWNERLESS"
-          TITLE="[告警] 存在无负责人任务（分派不可见）"
-          # 去重：已有同名 open 告警 Issue 就地更新最新一条同类评论（PATCH），
-          # 不再每 5 分钟追加一条（否则一日约 288 条重复评论刷屏）；没有同类
-          # 评论时才 POST 新评论，没有同名 Issue 时才新建。
-          EXISTING="$(curl -sS "${AUTH[@]}" "$API/search/issues?q=repo:$REPO+state:open+in:title+%22%E5%AD%98%E5%9C%A8%E6%97%A0%E8%B4%9F%E8%B4%A3%E4%BA%BA%E4%BB%BB%E5%8A%A1%22" | jq -r '.items[0].number // empty')"
-          NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          {
-            echo "<!-- ownerless-alert: $(date -u +%Y%m%dT%H%M%SZ) -->"
-            echo "以下 state:todo 任务没有 agent 标签，auto-dispatch 永远不会分派它们（$NOW）。"
-            echo
-            echo "$OWNERLESS" | sed 's/^/- /'
-            echo
-            echo "请 Muse 1 确认负责人后补 agent 标签，或关闭不需要的任务。"
-          } > /tmp/ownerless.md
-          if [ -n "$EXISTING" ]; then
-            COMMENT_ID="$(curl -sS "${AUTH[@]}" "$API/issues/$EXISTING/comments?per_page=100" \
-              | jq -r '[.[] | select((.body // "") | contains("ownerless-alert:")) | .id] | last // empty')"
-            if [ -n "$COMMENT_ID" ]; then
-              jq -n --rawfile body /tmp/ownerless.md '{body: $body}' \
-                | curl -sS -X PATCH "${AUTH[@]}" "$API/issues/$EXISTING/comments/$COMMENT_ID" --data-binary @- > /dev/null
-              echo "已就地更新既有告警 Issue #$EXISTING 的同类评论（comment $COMMENT_ID）。"
-            else
-              jq -n --rawfile body /tmp/ownerless.md '{body: $body}' \
-                | curl -sS -X POST "${AUTH[@]}" "$API/issues/$EXISTING/comments" --data-binary @- > /dev/null
-              echo "已在既有告警 Issue #$EXISTING 发第一条清单评论。"
-            fi
-          else
-            jq -n --arg title "$TITLE" --rawfile body /tmp/ownerless.md '{title: $title, body: $body}' \
-              | curl -sS -X POST "${AUTH[@]}" "$API/issues" --data-binary @- > /dev/null
-            echo "已新建告警 Issue。"
-          fi
+        # #176：旧实现在这一步用 bash 单独维护同名告警 Issue——marker 用
+        # 每轮唯一的时间戳、查找靠 Search 标题模糊匹配，间歇落空就新建
+        # 一个（#154/#164/#165/#167 四个重复 Issue）。改走 alert_inbox.py
+        # 统一路由：ownerless-task 类别、key=current，只往收件箱（#148）
+        # 发一条、清单变化才就地更新，清单不变零写操作。
+        run: python apps/control-plane/backend/dispatch/alert_inbox.py ownerless-scan
 
       - name: 失败告警（路由到 Muse 1 告警收件箱）
         if: failure()
