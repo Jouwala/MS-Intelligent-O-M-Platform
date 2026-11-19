@@ -128,6 +128,10 @@ _probe_file.txt
 # 2026-11-16 实测它一直**被 git 跟踪**（重构搬目录时随目录一起入库），于是谁在界面上
 # 改一次顺序、工作区就变脏，很容易被顺手提交进去 —— 与同目录另外两份的约定不一致。
 /backend/data/ui_tool_order.json
+# ipran_me_aliases.json → backend/services/ipran/ipran_me_alias.py 的 12h 缓存
+# （fetched_at + 「旧 ME/端口 → 新名」映射，刷新失败沿用旧缓存）。2026-11-16 加该模块时
+# 漏了这条，未跟踪时每次 git status 都会冒出来；它由 UME 现查重建，属运行时缓存、不入库。
+/backend/data/ipran_me_aliases.json
 /backend/data/tt_timeline_cache/
 # gp_ran 导出的 VoLTE / N78 用户号码清单（D023=MSISDN，**用户个人信息**）。
 # 上面 `!backend/data/` 的取反会让这个目录变成可提交，必须在这里挡回来：

@@ -1,4 +1,4 @@
-﻿<#
+<#
   sync-derived-data.ps1 —— 切换前把「上一版生产」的本地派生数据补到新树
   ============================================================================
   为什么需要它（2026-11-18 切生产实测事故）：
@@ -53,9 +53,21 @@ Write-Host ("目标：{0}" -f $TargetRoot) -ForegroundColor DarkGray
 $ExcludeDirs = @('__pycache__', '_tmp_', 'native_board_cache')
 $ExcludeFiles = @('*.wal', '*.shm', '*.log', '*.tmp', '*.pid', '*.bak', '*.bak_*', '*_bak_*', '*.corrupt*', '*.rpltmp')
 
-# data\ 之外、但由定时任务生成的**功能性**文件（不搬就会直接坏页面/丢配置）。
+# data\ 之外、但由定时任务或管理员操作生成的**功能性**文件（不搬就会直接坏页面/丢配置）。
 # 只列「任务产物 / 运行配置」，不列源码（源码走 git）、不列归档报告（outputs\）。
+#
+# ⚠️ 2026-11-19 补：`backend\data\*.json` 是**用户可见的运行时状态**，之前漏在这里。
+#    切换后 v3 门户的看板目录为空 → 回落 MsPortal 内置 data.js：
+#      · Domain Dashboard 的 CXO View 从 5 条掉到 3 条；
+#      · OSS Portal Login（Friends Link）从 11 个链接掉到 1 个；
+#      · eflow_qa 页的工具顺序/隐藏项回到出厂值。
+#    这些文件 my_app 每次请求现读、复制即生效（无需重启），必须跟 data\ 一起搬。
 $ArtifactPaths = @(
+    'backend\data\portal_catalog.json',
+    'backend\data\settings.json',
+    'backend\data\ui_tool_order.json',
+    'backend\data\ui_tool_visibility.json',
+    'backend\data\ui_menu_layout.json',
     'backend\services\eflow_rules\*.xlsx',
     'backend\services\eflow_rules\*_latest.json',
     'backend\services\eflow_rules\tt_proivity_skill.json',

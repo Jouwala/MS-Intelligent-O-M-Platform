@@ -1,4 +1,4 @@
-﻿<#
+<#
   cutover-to-02.ps1 —— 把生产从 D:\01_olbr_portal 切到 D:\02_olbr_portal
   ============================================================================
   为什么不是 start_all.ps1：那是「隔离副本启动器」，有三道硬护栏（见 start_all.ps1:134/180/
@@ -49,6 +49,12 @@ function Write-Bad { param([string]$m) Write-Host "[FAIL] $m" -ForegroundColor R
 $Root02 = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..')).Path
 $Root01 = 'D:\01_olbr_portal'
 $Portal01 = 'D:\01_RPA\liberia-noc_soc-数据看板统一门户'
+# ⚠️ 2026-11-19 修正：9267 进程属于 $Portal01（01_RPA），但**权威的门户状态**
+#   （账号 / team 分配 / 待审申请 / portal-default.json）在 $Root01 那一版里。
+#   2026-11-18 首切时第 4 步从 $Portal01 搬，结果账号从 33 个变成 30 个、
+#   3 个账号的 team 分配丢失、4 条待审申请消失 —— 用户当天报障。
+#   停进程仍用 $Portal01（见第 3 步），**搬状态改用 $Root01**。
+$PortalState01 = Join-Path $Root01 'liberia-noc_soc-数据看板统一门户'
 if ($Root02 -notlike '*02_olbr_portal') { throw "当前脚本不在 02 副本内（$Root02），拒绝执行。" }
 if (-not (Test-Path -LiteralPath $Root01)) { throw "找不到生产副本 $Root01。" }
 if (-not (Test-Path -LiteralPath $Portal01)) { throw "找不到 01_RPA 门户 $Portal01。" }
@@ -137,7 +143,7 @@ foreach ($f in 'Task\my_app\stop.bat', 'Task\my_app\backend\.env', 'Task\whatsap
     if (-not (Test-Path -LiteralPath (Join-Path $Root01 $f))) { Write-Bad "01 缺 $f"; $pre = $false }
 }
 foreach ($f in 'portal-default.json', 'auth-data\portal-auth.db') {
-    if (-not (Test-Path -LiteralPath (Join-Path $Portal01 $f))) { Write-Bad "01_RPA 门户缺 $f"; $pre = $false }
+    if (-not (Test-Path -LiteralPath (Join-Path $PortalState01 $f))) { Write-Bad "01 门户状态缺 $f（$PortalState01）"; $pre = $false }
 }
 if (-not $SnapshotDir -or -not (Test-Path -LiteralPath (Join-Path $SnapshotDir 'state.json'))) {
     Write-Warn2 '没有可用快照（回退脚本要靠它恢复 02 的 .env）。请先跑 snapshot-prod-state.ps1'
@@ -228,7 +234,9 @@ if ($left.Count -gt 0) { Write-Bad '旧门户没停干净，已中止。'; exit 
 Write-Step '4/10 搬门户状态到 02'
 $pdst = Join-Path $Root02 'apps\portal'
 foreach ($name in @('portal-default.json', 'auth-data')) {
-    $src = Join-Path $Portal01 $name
+    # 来源是 $PortalState01（= 01_olbr_portal），不是 9267 的 $Portal01 ——
+    # 后者只是进程主人，账号库是旧的一份（30 个账号、缺 team 分配）。
+    $src = Join-Path $PortalState01 $name
     $dst = Join-Path $pdst $name
     if (Test-Path -LiteralPath $dst) {
         $bak = '{0}.bak_cutover_{1}' -f $dst, $Stamp
