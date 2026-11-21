@@ -40,10 +40,11 @@ def test_auto_merge_review_gate_fails_closed() -> None:
 
 
 def test_auto_merge_checks_out_master_for_gate_script() -> None:
-    """门禁脚本取 master 检出的可信版本，不取 PR 分支的——PR 作者不得自带门禁脚本。"""
+    """门禁脚本取主线检出的可信版本，不取 PR 分支的——PR 作者不得自带门禁脚本。"""
     text = _read(AUTO_MERGE)
     assert "actions/checkout@v4" in text
     checkout_pos = text.index("actions/checkout@v4")
+    # 本仓库（MS-Intelligent-O-M-Platform）主线是 master；noc-soc 仓库的副本是 main。
     assert "ref: master" in text[checkout_pos:checkout_pos + 400]
     assert "review_gate.py" in text[checkout_pos:checkout_pos + 400]
 
