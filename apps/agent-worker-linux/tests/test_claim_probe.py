@@ -1,4 +1,4 @@
-﻿"""CLI 集成：`--claim-probe` 单行 JSON / `--check` / `verify_concurrent_claim.py`。"""
+"""CLI 集成：`--claim-probe` 单行 JSON / `--check` / `verify_concurrent_claim.py`。"""
 
 from __future__ import annotations
 
@@ -160,9 +160,30 @@ def test_verify_concurrent_claim_tool_and_cleanup(fake_github, tmp_path):
     assert _refs(fake_github, "refs/heads/agent-lease/issue-1/")
 
     cleanup = _run([str(VERIFY_CLI), "--cleanup-winner", str(winner_file)])
-    assert cleanup.returncode == 0, cleanup.stdout + cleanup.stderr
-    assert _refs(fake_github, "refs/heads/agent-lease/issue-1/") == []
-    assert len(_refs(fake_github, "refs/heads/agent-hwm/issue-1/")) == 1
+    # HWM（high-water mark）ref 是 token 单调性的真相源，**只增不减**
+    # （见 scheduler/ref_api.py 的核心不变量）。并发认领时输家也会先做一次
+    # HWM CAS、把 token 推进到赢家之上，于是赢家用自己那份较旧的 token 去
+    # release 会拿到 StaleFencing —— 这是**刻意的防分裂脑行为**（旧执行者
+    # 不得再改状态），不是缺陷；这两种结局都合法：
+    #   rc=0            → 赢家 token 仍是最高代次，租约直接释放；
+    #   StaleFencing    → 输家已把 HWM 推高，赢家被正确围栏，租约留给 reaper。
+    # 原先这里无条件要求 rc=0 且断言 HWM 恰好 1 条，在后者时序下随机失败
+    # （CI 同一提交一次过、一次挂）。
+    if cleanup.returncode == 0:
+        assert _refs(fake_github, "refs/heads/agent-lease/issue-1/") == []
+    else:
+        assert "StaleFencing" in (cleanup.stderr or ""), cleanup.stdout + cleanup.stderr
+        # 被围栏说明 HWM 已越过赢家的 token；赢家那份 HWM 记录仍然在（只增不减）。
+        lease_refs = _refs(fake_github, "refs/heads/agent-lease/issue-1/")
+        assert len(lease_refs) <= 1, f"最多只有赢家一份租约，实际 {lease_refs}"
+
+    hwm_refs = _refs(fake_github, "refs/heads/agent-hwm/issue-1/")
+    assert hwm_refs, "HWM ref 只增不减，清理后必须仍有记录"
+    # token 单调：最高代次必然 >= 赢家拿到的代次（并发探针可能先各自推进过）。
+    max_token = max(int(ref.rsplit("/", 1)[-1]) for ref in hwm_refs)
+    assert max_token >= int(winner["token"]), (
+        f"HWM 最高代次 {max_token} 不应低于赢家 token {winner['token']}，实际 {hwm_refs}"
+    )
 
 
 def test_worker_module_imports_without_repo_side_effects():
