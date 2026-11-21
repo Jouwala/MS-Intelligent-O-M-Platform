@@ -15,6 +15,11 @@
   pid 文件只作兜底。便携 PG 用 pg_ctl -m fast 停，只针对 <Root>\runtime\pgdata。
   P1-6 外部目录：设了 NOC_HOME 时，pid 文件、pgdata、nginx 配置/日志一律走
   外部目录（解析见 noc-paths.ps1，与 start_all.ps1 共用）；不设则与旧行为一致。
+
+  ⚠ 只适用于**隔离副本**（根目录有 ISOLATED_COPY.flag）。根目录 stop.bat 按这个 flag
+  分流：已转正的副本走 my_portal_ctl.ps1 9-stop-all。本脚本在生产副本上是**静默空操作**
+  （它只认 TMP\portable-*.pid，而生产进程由 start_hidden.ps1 / watchdog 拉起，从不写这些文件），
+  所以绝不能拿它当生产停机命令。
   =============================================================================
 #>
 [CmdletBinding()]

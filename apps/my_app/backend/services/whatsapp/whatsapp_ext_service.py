@@ -25,6 +25,18 @@ WhatsApp 扩展发送服务（配合 Chrome 扩展 extensions/whatsapp_sender_ex
 （`python -m backend.services.whatsapp_ext_service`）；若要恢复定时发送，
 按 task_registry.py 5b 注释里的回滚方式加回任务即可。
 
+⚠️ 2026-11-16：由本服务驱动的定时任务 `whatsapp_send_ext`（WhatsApp 消息发送（扩展））
+已按用户要求**下线**（见 `backend/task_registry.py` 的 5b 注释）。本模块**不能删** ——
+它还是扩展通道的服务端：
+  * `build_outbox_payload()` / `resolve_image_path()` 供 `/api/whatsapp/outbox`
+    （扩展侧栏手动发送、扩展自身定时直发）取图片清单；
+  * 「投递作业 → 扩展认领 → 回报」的作业状态机仍是 `/api/whatsapp/ext/job` 的
+    发图分支（`whatsapp_job_claim` 按 `kind` 分发），并与 eFlow P1 告警的
+    `tt_alert_job`（文本分支）共用同一个认领口。
+所以 `run_whatsapp_send_ext()` 现在**没有调度器调用**，只保留为人工/脚本投递入口
+（`python -m backend.services.whatsapp_ext_service`）；若要恢复定时发送，
+按 task_registry.py 5b 注释里的回滚方式加回任务即可。
+
 与 whatsapp_service.run_whatsapp_send（Playwright 自启浏览器）**并行**的第二种实现，
 两者共用同一份图片目录与群组/备注配置；原任务保持不动。
 

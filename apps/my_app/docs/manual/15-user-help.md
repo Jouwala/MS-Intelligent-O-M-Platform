@@ -10,7 +10,7 @@
 
 - [1. 平台简介](#1-平台简介)
 - [2. 通用操作](#2-通用操作)
-- [3. 任务管理详解（85 个任务）](#3-任务管理详解)
+- [3. 任务管理详解（86 个任务）](#3-任务管理详解)
 - [4. 页面指南](#4-页面指南)
 - [5. 运维与排障](#5-运维与排障)
 - [6. 常见问题](#6-常见问题)
@@ -83,7 +83,7 @@
 
 > ⚠️ **新增任务必须同时登记进 `worker_watchdog.py` 的 `GROUP_TASK_MAP`** —— 只写 `TASK_SPECS` 不分组 = 任务入队后永远 pending。这是本项目已发生过四次的事故模式（finebi_report_sync / whatsapp_send_ext / sp_email_details / 2026-09-18 的 olib_soc 与 vmax_multi_data_sync）。
 
-### 3.3 全量任务清单（85 个）
+### 3.3 全量任务清单（86 个）
 
 | 任务 | task_id | 默认 cron | 组 | 工作流脚本 |
 | --- | --- | --- | --- | --- |
@@ -110,6 +110,7 @@
 | BP Cells Report 更新 | `bp_report_sync` | `20 6 * * *` | u | `services/bp/bp_report_sync.py → run_bp_report_sync` |
 | CNN UME KPI 同步 | `cnn_kpi_sync` | `0 6 * * *` | n | `services/cnn/ccn_ume_kpi_service.py → run_cnn_kpi_sync` |
 | CNN UME KPI 5分钟同步 | `cnn_kpi_sync_5mins` | `*/15 * * * *` | n | `services/cnn/cnn_ume_kpi_5mins_service.py → run_cnn_kpi_sync_5mins` |
+| CN 小时KPI同步 | `cn_hourly_kpi_sync` | `20 6 * * *` | n | `services/cn_kpl/cn_hourly_kpi_service.py → run_cn_hourly_kpi_sync` |
 | CN 小时KPI同步 | `cn_hourly_kpi_sync` | `20 6 * * *` | n | `services/cn_kpl/cn_hourly_kpi_service.py → run_cn_hourly_kpi_sync` |
 | SP 备件数据同步 | `sp_data_sync` | `10 * * * *` | s | `services/sp/get_sp_table.py → run_sp_data_sync` |
 | iPRAN UME KPI 同步 | `ipran_kpi_sync` | `0 * * * *` | u | `services/ipran/ipran_ume_kpi_service.py → run_ipran_kpi_sync` |
@@ -658,6 +659,27 @@
 - 页面消费方：?page=cn_hourly_kpi（routers/cn_hourly_kpi.py + cn_kpl/cn_hourly_kpi_service.py 读取侧）；Capacity/DNS 表供 ?page=cs_cn_kpi / ?page=ps_cn_kpi
 - 上游改模板后重新导出 xlsx 覆盖 cn_kpl/KPI Template.xlsx 即可，无需改代码
 
+#### CN 小时KPI同步（`cn_hourly_kpi_sync`）
+
+- 默认 cron: `20 6 * * *`　|　worker 组: **n**
+- 工作流脚本: `services/cn_kpl/cn_hourly_kpi_service.py → run_cn_hourly_kpi_sync`
+
+**功能**: 从 UME「KPI 模板管理」导出件 KPI Template.xlsx 解析 3 个新模板（PS_xGW_Session_Capacity_OSS / PS_xGW_Throughput_Capacity_OSS / CS_MRFP96_Resource_Utilization_OSS），以小时粒度（gr=3600）查询并 API 写入 DB CNN 的 <模板名>_UME 三张表，供「CN 小时KPI」看板按日期区间出图；Object Scope=ALL 覆盖全部网元，Utilization/Capacity 两族重复只留 Utilization（用户 2026-11-18 定）
+
+**工作流与数据流**:
+
+1. 解析 KPI Template.xlsx（缺文件时用内置兜底配置并告警）
+1. 登录 CNN UME（与 cnn_kpi_sync 共用会话缓存）
+1. 按模板逐个查询小时粒度数据（默认 2 天增量窗口；首次回补 python -m ... --days 31）
+1. 写入 db_ps_cs_cn 的 <模板名>_UME 表（upsert，主键 Begin Time+NE(+SERVICE)）
+
+**维护要点**:
+
+- ⚠ 导出 0 行视为空态跳过、不计失败（与 5 分钟任务同约定）
+- 与 cnn_kpi_sync / cnn_kpi_sync_5mins 同在 n 组串行，避免共用 CNN UME 会话互踢
+- 页面消费方：?page=cn_hourly_kpi（routers/cn_hourly_kpi.py + cn_kpl/cn_hourly_kpi_service.py 读取侧）
+- 上游改模板后重新导出 xlsx 覆盖 cn_kpl/KPI Template.xlsx 即可，无需改代码
+
 #### SP 备件数据同步（`sp_data_sync`）
 
 - 默认 cron: `10 * * * *`　|　worker 组: **s**
@@ -1163,6 +1185,7 @@
 
 - 验证码/锁定出现时按报告第 4 节处置，不要反复重试登录（连续 3 次密码错误会锁 1440 分钟）
 - 报告每天一份在 outputs/auth_health/，排查先看最新一份
+- 结论里的「未发现验证码」和本任务失败回声不算登录失败（2026-11-12 曾因此自激误报）；真失败要看到上游原文，如 Image verification code
 
 #### MTTR/TT 宽表重建（`mttr_tt_sync`）
 

@@ -97,7 +97,7 @@
       "en": "GIS MAP",
       "excelDomain": "GIS MAP",
       "portalAnchor": "l0Map",
-      "_comment_new_tabs": "2026-11-11 加（用户要求 fo/bo/flm 三个团队门户也要 IP/PL 页签）。2026-11-16：IP 页签的 page 从 ipranTopo 改为 olibTopo（物理图），子键必须跟着改，否则页签静默消失。packet_loss 仍是 PL。⚠️ 子键必须与 MAP_TABS 的 page 值逐字一致。⚠️ Excel 里没有这两行，excel 留空、不参与 --check-excel 对账；只勾 fo/bo/flm，smc/cxo 不开放。",
+      "_comment_new_tabs": "2026-11-11 加（用户要求 fo/bo/flm 三个团队门户也要 IP/PL 页签）。2026-11-16：IP 页签的 page 从 ipranTopo 改为 olibTopo（物理图），子键必须跟着改，否则页签静默消失。packet_loss 仍是 PL。⚠️ 子键必须与 MAP_TABS 的 page 值逐字一致。⚠️ Excel 里没有这两行，excel 留空、不参与 --check-excel 对账；只勾 fo/bo/flm，smc/cxo 不开放。⚠️ 2026-11-17：上游把 GIS Map 的 IP 页签（olibTopo）整体搬进 Knowledge Q&A 当第四页签「Topology」——本域的 olibTopo 子键**仍是它的可见性真源**（map-filter 钩子已消费不到它，改由 qa-filter 钩子按 ok('map','olibTopo') 过滤 QA 的 topology 页签），勾选名单不变；将来矩阵里若要单独收回 Topology，再考虑把它挪进 qa 域。⚠️ 2026-11-20：QA 栏里该页签改名「MW Topology」，并在其后新增「Fiber Topology」（同一页的 view=logical 逻辑图）——两个页签同进同出，都仍由本域的 olibTopo 子键放行，勾选名单不变。",
       "items": [
         { "key": "gis",        "zh": "告警地图", "en": "Alarm Map",   "excel": "Alarm MAP" },
         { "key": "person",     "zh": "人员地图", "en": "Person Map",  "excel": "Person MAP" },

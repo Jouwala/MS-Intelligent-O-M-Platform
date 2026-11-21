@@ -48,7 +48,7 @@
       "sub": null,
       "probe": "SCOPE.mapPages()",
       "title": "GIS MAP 地图",
-      "note": "按 MAP_TABS 的 page 过滤（gis / person / mwRealTime / ipt_power / olibTopo / packet_loss）。olibTopo 是 IP 页签（2026-11-16 起为物理图），与 packet_loss 只勾 fo / bo / flm。"
+      "note": "按 MAP_TABS 的 page 过滤（gis / person / mwRealTime / ipt_power / packet_loss）。⚠️ 2026-11-17：olibTopo（IP 页签）已从上游 MAP_TABS 移除、搬进 Knowledge Q&A 当第四页签「Topology」，map-filter 钩子不再消费它；可见性仍由本清单 map 域的 olibTopo 子键（fo / bo / flm）经 qa-filter 钩子把守。"
     },
     {
       "id": "qaSlot",
@@ -57,7 +57,7 @@
       "sub": null,
       "probe": "SCOPE.qaTabs()",
       "title": "Knowledge Q&A 页签区",
-      "note": "页签级过滤：eflow / rag / master_site / topology。⚠️ 2026-11-04 起第三页签 CCH 已拆成独立面板 #cchSlot（见 cch 域），这里不再有 vmax；右下角悬浮助手由 qa-assistant.js 按 assistant 判断。⚠️ 2026-11-17：第四页签 topology（Topology）＝ 原 GIS Map 的 IP 页签（olibTopo）搬来，qa-filter 钩子按 map 域 olibTopo 子键（fo / bo / flm）放行，不在 qa 域另立键。"
+      "note": "页签级过滤：eflow / rag / master_site / topology。⚠️ 2026-11-04 起第三页签 CCH 已拆成独立面板 #cchSlot（见 cch 域），这里不再有 vmax；右下角悬浮助手由 qa-assistant.js 按 assistant 判断。⚠️ 2026-11-17：第四页签 topology（Topology）＝ 原 GIS Map 的 IP 页签（olibTopo）搬来，qa-filter 钩子按 map 域 olibTopo 子键（fo / bo / flm）放行，不在 qa 域另立键。⚠️ 2026-11-20：该页签改名「MW Topology」（qa 页签键 mw_topology），并在其后新增第五页签「Fiber Topology」（fiber_topology，同一页的 view=logical 逻辑图）；两个页签同进同出，仍由 map 域 olibTopo 子键经 qa-filter 钩子放行，qa 域不新增键。"
     },
     {
       "id": "ossSlot",

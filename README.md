@@ -9,7 +9,7 @@
 | 角色 | 生产树（根目录有 `PRODUCTION.flag`，**勿删**）。启停走 `start.bat` / `stop.bat` → `ops\deploy\portal-ctl.ps1` |
 | 包含 | 统一门户、my_app、WhatsApp 知识库 bot、eFlow 知识库、Agent Worker / 控制面，以及 `docs/`、`ops/` 下的文档与运维脚本 |
 | 不包含 | 运行时二进制、数据库、构建产物、任何凭据（见第三节「不入库的内容」） |
-| 版本库 | `Jouwala/noc-soc-intelligent-platform`（`main` 跟踪 `platform` 远程；`origin` 指向同名镜像 `MS-Intelligent-O-M-Platform`） |
+| 版本库 | `Jouwala/MS-Intelligent-O-M-Platform`（`origin`；远端默认分支 **`master`**，分支保护也开在 `master` 上）。另有 `platform` 远程指向 `Jouwala/noc-soc-intelligent-platform`，本地 `main` 跟踪 `platform/main` |
 | 与 `D:\01_RPA` | **已完全脱离**：不同步、不互为主副本、没有共享入口；见第四节 |
 
 ---
@@ -147,7 +147,19 @@ nginx 看门狗会去探测一个不存在的目录。
 
 ---
 
-## 五、角色标记与隔离副本
+## 五、运行模式与角色标记（2026-11-18/19 已转正为生产）
+
+本目录不再是与生产并行的隔离副本：**它自己就是生产**。根目录有 `PRODUCTION.flag`、**没有**
+`ISOLATED_COPY.flag`；`D:\01_RPA` 与 `D:\01_olbr_portal` 的进程都不再服务本机 80/443，
+后者只作回退目标（见第四节）。
+
+| | 本目录（现状 / 生产） | 新打包的隔离副本（默认） |
+| --- | --- | --- |
+| HTTP / HTTPS | 80 / 443 | 8080 / 8443 |
+| my_app 后端 / 前端 | 7038 / 7090 | 7039 / 7091 |
+| 门户 / bot / 分析 | 9267 / 9269 / 9268 | 9277 / 9279 / 9278 |
+| 实时代理 FMS / VMAX | 8787 / 8790 | 8887 / 8890 |
+| PostgreSQL | 本机已安装的 16（5432） | 便携版 55432 |
 
 同一套脚本要服务「这台机器是生产」和「这台机器是便携 / 冒烟副本」两种角色，角色**只由根目录的两个标记决定，且必须二选一**（两者都不入库）：
 
@@ -156,11 +168,39 @@ nginx 看门狗会去探测一个不存在的目录。
 | `PRODUCTION.flag` | 切生产时人工放（**当前本树就有，勿删**） | 生产树，调度器在跑 | 80/443/7038/7090/9267/9268，PG 5432 |
 | `ISOLATED_COPY.flag` | `provision-smoke-runner.ps1` / 打包脚本 | 便携 / 冒烟副本 | 8080/8443/7039/7091/9277，便携 PG 55432 |
 
-- 根 `start.bat` / `stop.bat` 按标记分流；`start_all.ps1` 见到 `PRODUCTION.flag` 直接 throw
-  （它会改 `apps\my_app\backend\.env`、起 55432 的第二套 PG、往 8080/8443 起第二套服务）。
+**两个启动器不能混用**：
+
+| 目录状态 | `start.bat` / `stop.bat` 实际执行 | 原因 |
+| --- | --- | --- |
+| 有 `ISOLATED_COPY.flag`（隔离副本） | `ops\deploy\start_all.ps1` / `stop_all.ps1` | 强制 `MY_APP_DISABLE_SCHEDULER=1`、自带便携 PG、拒绝生产端口 |
+| 有 `PRODUCTION.flag`（本目录） | `ops\deploy\portal-ctl.ps1 -Action start\|stop` | 生产编排：my_app → 门户 → bot → nginx；桌面 `olbr-start` / `olbr-stop` 快捷方式走的就是它 |
+
+2026-11-16 修复的正是这里：转正只改了 `.env` 并删了 flag，`start.bat` 仍直连 `start_all.ps1`，
+于是被「副本端口 80 与生产端口冲突」拦住，整台机器起不来。现在由 flag 决定分流：
+`start_all.ps1` 见到 `PRODUCTION.flag` 直接 throw（它会改 `apps\my_app\backend\.env`、起 55432 的
+第二套 PG、往 8080/8443 起第二套服务），在已转正目录里直接调它仍会拒绝生产端口 —— 这是刻意的。
+`portal-ctl.ps1` 的起停命令也受同一个 flag 拦截（防误停生产），flag 删除后才会放行。
+
+- 根 `.env` 是**隔离副本 / 打包**用的端口模板（8080/8443/7039/7091/9277/55432、
+  `MY_APP_DISABLE_SCHEDULER=1`），生产启动不读它；生产端口由各启动脚本与
+  `nginx-1.28.0\conf\nginx.conf` 决定，后端开关在 `apps\my_app\backend\.env`（生产为
+  `MY_APP_DISABLE_SCHEDULER=0`）。**不要**在生产树上跑 `write_nginx_conf.ps1` —— 它按根 `.env`
+  展开，会把 80/443 覆盖成 8080/8443。
+- 想**退回隔离试跑**：把根 `.env` 端口改回 8080/8443/7039/7091/9277/55432，重建 `ISOLATED_COPY.flag`
+  并删掉 `PRODUCTION.flag`，然后先停掉生产栈（`stop.bat`）。
+- `start_all.ps1` 的隔离保障仍适用于隔离副本：副本 `.env` 优先于继承的进程环境（防生产污染）、
+  拒绝任何落在生产端口上的配置、派生变量无条件按副本根覆盖、清除 `PYTHONPATH/PYTHONHOME/NODE_PATH`、
+  强制 `MY_APP_DISABLE_SCHEDULER=1` 与 `START_WA_BOT=0`、启动前预检核心入口、PG 写入前校验
+  `data_directory` 属于副本。实时代理控制器按「进程命令行含本副本脚本绝对路径」验归属，
+  **绝不复用或击杀生产 8787/8790 代理**。
+- 生产模式下这些都不适用：调度器按 `apps\my_app\backend\.env` 的 `MY_APP_DISABLE_SCHEDULER=0`
+  正常运行（生产树是唯一采集端），PG 是本机 5432，`start_hidden.ps1` 负责 backend/worker watchdog 与按需拉起。
 - 冒烟**不在生产树里跑**：用 `ops/deploy/provision-smoke-runner.ps1 -Apply` 在项目内生成
   `.smoke\` 副本（已 gitignore），再按 `ops/deploy/README.md` 的说明装 watcher。
 - 生产树只应有 `PRODUCTION.flag`；两个都在或都不在时，入口一律拒绝执行（角色不明宁可不跑）。
+
+> 源码侧的 `D:\01_RPA` 硬编码路径已于 2026-11-11 收口：业务数据目录、邮件/代理解释器（`sys.executable`）、
+> 前端产物目录（`FE_DIST_OUT`/相对路径）、Chrome、cn_ems 模板、eflow 问答工具均改为按副本位置定位或 env 覆盖。
 
 细节与事故背景见 `ops/deploy/README.md`「角色标记」与 `docs/adr/0003-production-vs-isolated-markers.md`。
 
@@ -195,7 +235,7 @@ nginx 看门狗会去探测一个不存在的目录。
 - **快照不进版本库**：`*_bak_*` / `*.bak_*` / `*.bak-*` / `*.bak.*` 一律排除。
 - **改动前先跑守卫**：门户 `npm run lint` / `npm run build` / `npm run check:docs` / `npm run check:i18n`；
   my_app `npm run check:i18n` + `python tests\test_doc_consistency.py`。
-- **合入走 PR**：分支 → PR 到 `main` → CI 全绿且 `smoke-passed` 后合并；**不要直接推 `main`**。
+- **合入走 PR**：分支 → PR 到 `master`（远端默认分支，分支保护开在这里）→ CI 全绿且 `smoke-passed` 后合并；**不要直接推 `master`**。
 - 更多约束见 `AGENTS.md` 与 `docs/workspace/development.md`。
 
 ## 八、许可

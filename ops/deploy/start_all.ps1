@@ -19,6 +19,11 @@
   用法：
     powershell -NoProfile -File ops\deploy\start_all.ps1
     powershell -NoProfile -File ops\deploy\start_all.ps1 -DryRun
+
+  ⚠ 只适用于**隔离副本**（根目录有 ISOLATED_COPY.flag）。根目录 start.bat 按这个 flag
+  分流：flag 不在（= 已转正为生产）时走 my_portal_ctl.ps1 8-start-all，不进本脚本。
+  在已转正目录里直接跑本脚本，仍会被下面的生产端口熔断拦住 —— 这是刻意的：
+  本脚本会强制关调度器、起便携 PG、拒绝 80/443，用在生产副本上等于把机器关掉一半。
   =============================================================================
 #>
 [CmdletBinding()]

@@ -4843,7 +4843,7 @@ UME 只是自动同步的补充。**这个优先级是口径决定，不是性�
 只重跑 VLR / VOICE 两张 UME 日表：
 
 ```powershell
-cd D:\01_olbr_portal\Task\my_app   # 在生产副本里跑；回补脚本在它的 TMP\，属一次性工具、不入库
+cd D:\02_olbr_portal\apps\my_app   # 在生产树里跑；回补脚本在它的 TMP\，属一次性工具、不入库
 $env:PYTHONIOENCODING='utf-8'; $env:PYTHONPATH='.'
 python TMP\_backfill_vlr_voice_ume.py 80
 ```

@@ -10,7 +10,7 @@
 
 - [1. Platform Overview](#1-platform-overview)
 - [2. General Usage](#2-general-usage)
-- [3. Task Manager Deep Dive (85 tasks)](#3-task-manager-deep-dive)
+- [3. Task Manager Deep Dive (86 tasks)](#3-task-manager-deep-dive)
 - [4. Pages Guide](#4-pages-guide)
 - [5. Ops & Troubleshooting](#5-ops-troubleshooting)
 - [6. FAQ](#6-faq)
@@ -83,7 +83,7 @@ Built for the NOC scenario "boards every day, reports must go out": 41+ schedule
 
 > ⚠️ **New tasks MUST also be registered in `GROUP_TASK_MAP` in worker_watchdog.py** — declaring them only in TASK_SPECS leaves them pending forever. This accident happened four times (finebi_report_sync / whatsapp_send_ext / sp_email_details / the olib_soc and vmax_multi_data_sync tasks found on 2026-09-18).
 
-### 3.3 Full task catalog (85 tasks)
+### 3.3 Full task catalog (86 tasks)
 
 | Task | task_id | Default cron | Group | Workflow script |
 | --- | --- | --- | --- | --- |
@@ -110,6 +110,7 @@ Built for the NOC scenario "boards every day, reports must go out": 41+ schedule
 | BP Cells Report Sync | `bp_report_sync` | `20 6 * * *` | u | `services/bp/bp_report_sync.py → run_bp_report_sync` |
 | CNN UME KPI Sync | `cnn_kpi_sync` | `0 6 * * *` | n | `services/cnn/ccn_ume_kpi_service.py → run_cnn_kpi_sync` |
 | CNN UME KPI 5-Min Sync | `cnn_kpi_sync_5mins` | `*/15 * * * *` | n | `services/cnn/cnn_ume_kpi_5mins_service.py → run_cnn_kpi_sync_5mins` |
+| CN Hourly KPI Sync | `cn_hourly_kpi_sync` | `20 6 * * *` | n | `services/cn_kpl/cn_hourly_kpi_service.py → run_cn_hourly_kpi_sync` |
 | CN Hourly KPI Sync | `cn_hourly_kpi_sync` | `20 6 * * *` | n | `services/cn_kpl/cn_hourly_kpi_service.py → run_cn_hourly_kpi_sync` |
 | SP Spare Data Sync | `sp_data_sync` | `10 * * * *` | s | `services/sp/get_sp_table.py → run_sp_data_sync` |
 | iPRAN UME KPI Sync | `ipran_kpi_sync` | `0 * * * *` | u | `services/ipran/ipran_ume_kpi_service.py → run_ipran_kpi_sync` |
@@ -658,6 +659,27 @@ Workflow & maintenance notes per task:
 - Consumer: ?page=cn_hourly_kpi (routers/cn_hourly_kpi.py + the read side of cn_kpl/cn_hourly_kpi_service.py); the Capacity/DNS tables feed ?page=cs_cn_kpi / ?page=ps_cn_kpi
 - When the upstream changes templates, re-export the xlsx over cn_kpl/KPI Template.xlsx — no code change needed
 
+#### CN Hourly KPI Sync（`cn_hourly_kpi_sync`）
+
+- Default cron: `20 6 * * *`　|　worker group: **n**
+- Workflow script: `services/cn_kpl/cn_hourly_kpi_service.py → run_cn_hourly_kpi_sync`
+
+**What it does**: Parses 3 templates from the UME "KPI Template" export file KPI Template.xlsx (PS_xGW_Session_Capacity_OSS / PS_xGW_Throughput_Capacity_OSS / CS_MRFP96_Resource_Utilization_OSS), queries them at hourly granularity (gr=3600) and writes the <template>_UME tables in DB CNN for the date-rangeable CN Hourly KPI board; Object Scope=ALL covers every NE, and only the Utilization family is kept because Utilization/Capacity duplicate each other (user decision 2026-11-18)
+
+**Workflow & data flow**:
+
+1. Parse KPI Template.xlsx (falls back to embedded configs with a warning if the file is missing)
+1. Log into CNN UME (shares the session cache with cnn_kpi_sync)
+1. Query each template at hourly granularity (2-day incremental window by default; first backfill via python -m ... --days 31)
+1. Upsert into db_ps_cs_cn tables named <template>_UME (PK Begin Time+NE(+SERVICE))
+
+**Maintenance**:
+
+- WARNING: a 0-row export is treated as an empty state and skipped, not a failure (same as the 5-minute task)
+- Runs in group n alongside cnn_kpi_sync / cnn_kpi_sync_5mins so the shared CNN UME session never gets kicked
+- Consumer: ?page=cn_hourly_kpi (routers/cn_hourly_kpi.py + the read side of cn_kpl/cn_hourly_kpi_service.py)
+- When the upstream changes templates, re-export the xlsx over cn_kpl/KPI Template.xlsx — no code change needed
+
 #### SP Spare Data Sync（`sp_data_sync`）
 
 - Default cron: `10 * * * *`　|　worker group: **s**
@@ -1163,6 +1185,7 @@ Workflow & maintenance notes per task:
 
 - On captcha/lock follow section 4 of the report — do not retry logins repeatedly (3 consecutive wrong passwords lock the account for 1440 minutes)
 - One report per day under outputs/auth_health/ — check the latest one first when troubleshooting
+- An OK line that merely says no captcha was found, or this task's own failure echo, is not a login failure (that self-trigger false-alarmed on 2026-11-12). A real hit quotes the upstream text, e.g. Image verification code
 
 #### MTTR/TT Wide Table Rebuild（`mttr_tt_sync`）
 

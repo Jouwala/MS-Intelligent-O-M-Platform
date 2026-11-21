@@ -1139,6 +1139,7 @@ worker 分组重启才生效（`backend/routers/task_configs.py`）。
 | 僵尸 running 回收 | `STALE_RUNNING_SECONDS = 30min`，并用 PID 存活核对，每 300s 扫一次 | `worker.py:78,82,302` |
 | 陈旧 pending 过期 | `STALE_PENDING_SECONDS = 6h`（漏分组/无 worker 认领时不再永久占住单飞名额），每 300s 扫一次 | `worker.py:_expire_orphan_pending` |
 | 失败自动重试 | `AUTO_RETRY_ENABLED=1`、`MAX_ATTEMPTS=2`、`COOLDOWN_MIN=15`、`SCAN_WINDOW_HOURS=24`、`MAX_PER_RUN=3` | `services/auto_retry.py:75-82` |
+| 验证码不重试 | 错误文本含 `图形验证码` / `verification code` 视为永久失败（与锁定、密码到期同级），不进鉴权宽限。2026-11-12：`auth_health_check` 把计划任务 stdout（`log/auth_health_check_*.log` 里的「未发现验证码」）和 auto_retry 回声扫成 CRITICAL，2 次重试 + 1 次宽限把条数从 2 滚到 4 | `scripts/auth_health_check.py`（`classify` / `OWN_REPORT_LOG_RE`）、`services/auto_retry.py`（`NON_RETRYABLE_KEYS`） |
 | 漏跑补投 | `MISS_GRACE_MIN=15`、`MISS_MIN_INTERVAL_MIN=30`（时效窗口内完全没有执行记录才补投） | 同上 |
 | 邮件类不参与补投 | 由 EWS 恢复补发机制 `email_recovery` 负责，默认排除 | `task_registry.py:320` |
 | 邮箱通道降级时延后执行 | 纯发信任务定时到点时，若 EWS 探测状态为 `down` 且探测不超过 **30 分钟**，**不执行**（不生成、不连 EWS、不告警），写一条 `trigger=deferred` + `EWS_DEFERRED` 记录；恢复后由 `email_recovery` 按 hourly / eight_hour / daily 时效窗口补发，过期丢弃。手动触发不受影响；`EWS_DEFER_ON_DOWN=0` 可整体关闭 | `services/email/ews_deferral.py`、`task_registry.EWS_DEFERRABLE_IDS`、`services/task/task_runner.py`（`run_task` 执行前） |
