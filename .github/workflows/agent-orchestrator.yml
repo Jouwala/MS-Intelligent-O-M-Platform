@@ -1,0 +1,82 @@
+# Agent orchestrator：只做机械触发，不做判断。
+#
+# ⛔ 已退役（2026-11-14 用户停用 Grok Bot）
+# =====================================================================
+# 冒烟与回写改由 D:\02 本机承担：计划任务 OLBR_SmokeWatcher 每 60 秒轮询，
+# CI 变绿且无 smoke-passed 的 open PR 就地检出该 PR head → 跑
+# ops\smoke\smoke.ps1 → 贴回评论 → 通过才打 smoke-passed → auto-merge 合入。
+# 全程 0 token、0 LLM。入口：ops/deploy/smoke-watcher.ps1。
+#
+# 本工作流原来负责向 Grok Routine 的 webhook POST 一次冒烟请求（三种触发：
+# state:qa-ready 标签 / 手动 dispatch / quality 变绿）。Grok 停掉之后 webhook
+# 拿不到响应，这个 job 会 exit 1，把每个 CI 变绿的 PR 都拖红，所以：
+#   1. 自动触发路径已从下面的 `on:` 里摘除（只留手动 dispatch）；
+#   2. 本工作流在 Actions 层面已 disabled_manually（gh workflow disable）。
+# 重新启用前先确认 Grok 是否真的回来；不回来就删掉本文件。
+#
+# webhook 地址和 sender key 仍留在仓库 secret 里（绝不写进代码），当前无人使用：
+#   GROK_ROUTINE_WEBHOOK_URL
+#   GROK_ROUTINE_WEBHOOK_KEY
+#
+# 实现（TASK-01 + TASK-07，2026-11-14 修复）：
+#   - 解析 / 去重 / webhook POST 全部移到
+#     `apps/control-plane/backend/dispatch/qa_dispatch.py`（可单测），本文件只
+#     负责触发与传参，不再用 curl + jq 在 YAML 里写业务逻辑。
+#   - 同一 head SHA 只触发一次：用 `POST /git/refs` 创建
+#     `refs/heads/dispatch/qa-trigger/pr-<N>-<head_sha>-<digest>` 做原子 CAS
+#     （422 = 已触发）。原实现查“本工作流按 head SHA 的运行记录”，两个并发
+#     运行会同时读到“还没触发过”，各 POST 一次 webhook。
+#   - 全量分页：open PR 列表等查询跟随 Link rel=next。
+#   - 失败语义：webhook 明确非 2xx → 回滚登记 ref 并失败（允许重试）；传输层
+#     超时（结果未知）→ 保留登记，宁可少重试一次也不重复触发同一 SHA。
+#   - 权限：创建 git ref 需要 `contents: write`。
+#
+# 安全阀（不变）：只认 quality success 结论；草稿 PR 跳过；已有
+# state:qa-ready 的跳过（打标签路径会触发）；无对应 open PR 只记日志；
+# smoke-passed 且该 SHA 已触发过的跳过；同一 head SHA 只触发一次。
+
+name: agent-orchestrator
+
+on:
+  # 2026-11-14：Grok 退役后只保留手动 dispatch；自动触发路径已摘除，
+  # 避免向已失效的 webhook POST 把 CI 拖红。本工作流同时已在 Actions 层面
+  # disabled_manually（gh workflow disable agent-orchestrator.yml）。
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to smoke-test'
+        required: true
+        type: number
+      issue_number:
+        description: 'Linked task Issue number (if any)'
+        required: false
+        type: number
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  trigger-grok-smoke:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.label.name == 'state:qa-ready') || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 解析 PR、按 head SHA 去重并 POST 冒烟请求
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          PR_NUMBER_EVENT: ${{ github.event.pull_request.number }}
+          PR_NUMBER_INPUT: ${{ inputs.pr_number }}
+          ISSUE_NUMBER_INPUT: ${{ inputs.issue_number }}
+          RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          WEBHOOK_URL: ${{ secrets.GROK_ROUTINE_WEBHOOK_URL }}
+          WEBHOOK_KEY: ${{ secrets.GROK_ROUTINE_WEBHOOK_KEY }}
+        run: |
+          python apps/control-plane/backend/dispatch/qa_dispatch.py

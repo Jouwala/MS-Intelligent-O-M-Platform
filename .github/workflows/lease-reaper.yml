@@ -1,0 +1,130 @@
+# 租约 / 孤儿范围锁回收（ADR-7 §3.7）
+#
+# GitHub refs 是权威层，不需要中央服务：定时 workflow 调
+# apps/control-plane/backend/dispatch/lease_reaper.py 删除过期 lease ref
+# 与孤儿 scope ref，并收敛残留的 state 标签。
+#
+# 设计要点：
+# - 每 5 分钟（cron 最小粒度）+ 可手动 workflow_dispatch；
+# - permissions 只需 contents: write（删 refs）与 issues: write（标签修正 /
+#   认领超时评论）；
+# - 并发组保证同一时刻只有一个 Reaper（多轮重叠没有意义，也浪费 API 配额）；
+# - 失败显式：脚本非零退出 → workflow 变红，看日志里的 [reaper] / [claim-expiry]
+#   原因；同时有失败告警（TASK #75）：failure() 步调 alert_inbox.py 把失败路由到
+#   Muse 1 告警收件箱（#143，只留最新一次失败，不另开 Issue、不刷屏；检出失败
+#   时退化为直接追加一条最小告警）。
+# - 每轮多一步「认领 / 分派超时过期」：认领后 4 小时无进展的 Issue 发
+#   CLAIM_EXPIRED 评论、标签收敛回 state:todo（日志末尾 [claim-expiry] 巡检 N 个 Issue），
+#   同时往收件箱发 no-progress 告警（#143）；分派后 24 小时无人认领由 auto-dispatch
+#   在就绪判断里放行重派，不在这里改标签。
+# - 每轮多一步「阻塞升级」：扫 state:blocked 的 open Issue，高优先级（P0/P1）立即、
+#   普通满 30 分钟后升级到收件箱（--alert-blocked，#143）。
+# - --fix-labels 每轮都开：租约回收后残留的 state:claimed 标签即时收敛回
+#   state:todo，不再等 4 小时认领过期（P1-4）。
+# - Reaper→dispatch：本轮释放了任务（reaped > 0）时即时触发一次自动分派，
+#   不等每小时巡检（P1-4）；无释放时不空跑。
+# - 静默卡住检查：每轮查无负责人（无 agent 标签）的 state:todo 任务，
+#   有则往 Muse 1 告警收件箱发 ownerless-task 告警（#176 并入统一
+#   路由；旧实现单独开同名告警 Issue、间歇重复建，已废弃）。
+# - 幂等：没有可删项也正常退出 0。HWM ref 默认永不删除。
+
+name: lease-reaper
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: lease-reaper
+  cancel-in-progress: false
+
+jobs:
+  reap:
+    name: 回收过期租约与孤儿范围锁
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 执行 Reaper（refs 权威层）
+        id: reap
+        env:
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 日志/错误是中文：固定 UTF-8，避免 runner locale 差异导致输出乱码
+          PYTHONIOENCODING: utf-8
+        # 默认只删过期租约 + 孤儿 scope（HWM 永不删）；--claim-expiry 是每轮
+        # 必跑的「认领超时过期」一步；--fix-labels 把回收后残留的 state:claimed
+        # 标签即时收敛回 state:todo（不再等 4 小时认领过期）；--alert-blocked
+        # 是每轮必跑的「阻塞升级」一步（#143）。
+        # Reaper 本轮释放了任务时（reaped > 0），下一步即时触发一次自动分派，
+        # 不等每小时巡检（P1-4）。
+        run: python apps/control-plane/backend/dispatch/lease_reaper.py --claim-expiry --fix-labels --alert-blocked
+
+      - name: 释放任务后即时分派（Reaper→dispatch）
+        if: steps.reap.outputs.reaped > 0
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: schedule
+          PYTHONIOENCODING: utf-8
+        run: python apps/control-plane/backend/dispatch/auto_dispatch.py
+
+      - name: 无负责人任务告警（路由到 Muse 1 告警收件箱）
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PYTHONIOENCODING: utf-8
+        # #176：旧实现在这一步用 bash 单独维护同名告警 Issue——marker 用
+        # 每轮唯一的时间戳、查找靠 Search 标题模糊匹配，间歇落空就新建
+        # 一个（#154/#164/#165/#167 四个重复 Issue）。改走 alert_inbox.py
+        # 统一路由：ownerless-task 类别、key=current，只往收件箱（#148）
+        # 发一条、清单变化才就地更新，清单不变零写操作。
+        run: python apps/control-plane/backend/dispatch/alert_inbox.py ownerless-scan
+
+      - name: 失败告警（路由到 Muse 1 告警收件箱）
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PYTHONIOENCODING: utf-8
+        run: |
+          if [ -f apps/control-plane/backend/dispatch/alert_inbox.py ]; then
+            python apps/control-plane/backend/dispatch/alert_inbox.py reaper-failure \
+              --run-id "${{ github.run_id }}" \
+              --run-url "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          else
+            # 检出失败时 CLI 不在磁盘上：退化为直接往收件箱追加一条最小告警
+            #（按标题找收件箱；下一轮 CLI 成功时会就地更新这条同 marker 评论）。
+            set -euo pipefail
+            API="https://api.github.com/repos/$REPO"
+            AUTH=(-H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json')
+            INBOX="$(curl -sS "${AUTH[@]}" "$API/search/issues?q=repo:$REPO+state:open+in:title+%22%E5%91%8A%E8%AD%A6%E6%94%B6%E4%BB%B6%E7%AE%B1%22" | jq -r '.items[] | select(.title == "[告警收件箱] Muse 1") | .number' | head -n 1)"
+            if [ -n "$INBOX" ]; then
+              {
+                echo "<!-- muse1-alert: reaper-failure:latest -->"
+                echo
+                echo "## lease-reaper 运行失败"
+                echo
+                echo "- 任务/PR：lease-reaper（每 5 分钟定时）"
+                echo "- 原因：本次运行失败（run ${{ github.run_id }}），且检出失败、告警 CLI 不可用（退化通知）。"
+                echo "- 运行记录：https://github.com/$REPO/actions/runs/${{ github.run_id }}"
+              } > /tmp/alert-fallback.md
+              jq -n --rawfile body /tmp/alert-fallback.md '{body: $body}' \
+                | curl -sS -X POST "${AUTH[@]}" "$API/issues/$INBOX/comments" --data-binary @- > /dev/null
+              echo "检出失败，已用退化方式往收件箱 #${INBOX} 追加告警。"
+            else
+              echo "检出失败且找不到收件箱 Issue，告警发不出去。"
+            fi
+          fi

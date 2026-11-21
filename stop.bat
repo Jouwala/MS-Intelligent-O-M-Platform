@@ -1,38 +1,45 @@
 @echo off
-REM OLBR portal - stop everything THIS directory runs.
+REM ============================================================
+REM  OLBR entry - STOP, routed by the runtime marker in this folder:
 REM
-REM Mode is chosen the same way start.bat chooses it (see that file):
-REM   * ISOLATED_COPY.flag present -> scripts\stop_all.ps1 (pid-file based; it
-REM     only ever stops processes this copy started)
-REM   * flag absent (promoted)     -> my_portal_ctl.ps1 9-stop-all (nginx ->
-REM     portal -> my_app -> bot, the production orchestrator)
+REM    PRODUCTION.flag present -> ops\deploy\portal-ctl.ps1 -Action stop
+REM                               (non-interactive by design: rollout and
+REM                                rollback scripts call this path. The
+REM                                interactive Y/N variant is
+REM                                ops\deploy\olbr-stop.bat and
+REM                                ops\shortcuts\2-stop-all.bat.)
+REM    otherwise               -> ops\deploy\stop_all.ps1
+REM                               (only stops pids recorded by start_all.ps1)
 REM
-REM stop_all.ps1 on a promoted copy is a silent no-op: it only knows the
-REM TMP\portable-*.pid files, and production processes are started by
-REM start_hidden.ps1 / watchdogs, which never write those. Saying "stopped"
-REM while everything keeps serving is the worst possible outcome here.
+REM  Two hard rules:
+REM    1) stop_all.ps1 runs "nginx -s quit" but only knows TMP\portable-*.pid,
+REM       which do not exist on a production tree - it would close the live
+REM       entry point and leave the backends running.
+REM    2) In production this entry takes NO arguments: "-DryRun" here would
+REM       stop the stack for real. A stray argument is refused instead.
+REM  Both scripts also carry their own guards; this file only routes.
 REM
-REM Keep this file ASCII-only and CRLF; non-ASCII breaks cmd parsing.
+REM  ASCII-only + CRLF on purpose; non-ASCII breaks cmd parsing.
+REM ============================================================
 setlocal
 cd /d "%~dp0"
+set "RC=0"
+if not exist "%~dp0PRODUCTION.flag" goto :isolated
+if not "%~1"=="" goto :prod_args
+echo [production] ops\deploy\portal-ctl.ps1 -Action stop
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0ops\deploy\portal-ctl.ps1" -Action stop
+set "RC=%ERRORLEVEL%"
+goto :done
 
-if exist "%~dp0ISOLATED_COPY.flag" goto isolated
-if exist "%~dp0my_portal_ctl.ps1" goto promoted
-
-echo [FAIL] Neither ISOLATED_COPY.flag nor my_portal_ctl.ps1 exists in %~dp0
-echo        Refusing to guess which mode this directory is in.
-exit /b 2
+:prod_args
+echo [production] this entry takes no arguments.
+echo              Use ops\deploy\portal-ctl.ps1 -Action start^|stop^|status directly.
+set "RC=2"
+goto :done
 
 :isolated
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\stop_all.ps1" %*
-exit /b %errorlevel%
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0ops\deploy\stop_all.ps1" %*
+set "RC=%ERRORLEVEL%"
 
-:promoted
-if not "%~1"=="" (
-    echo [FAIL] Promoted copy: switch arguments are isolated-only ^(-DryRun^).
-    echo        Refusing to stop with: %*
-    exit /b 2
-)
-echo [*] Promoted copy (no ISOLATED_COPY.flag): my_portal_ctl.ps1 9-stop-all
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0my_portal_ctl.ps1" 9-stop-all
-exit /b %errorlevel%
+:done
+endlocal & exit /b %RC%

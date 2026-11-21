@@ -1,0 +1,63 @@
+# 分派检查：对新开的 agent-task Issue 做自动检查——缺字段提醒、依赖阻塞打标签。
+#
+# 只做提醒与标签，不自动合并、不自动关闭 Issue；不替 builder 认领、不发分派
+# 评论（分派在 auto-dispatch.yml）。
+# 依据：docs/workspace/dispatch-rules.md 第五节、docs/workspace/agent-protocol.md。
+# 标签只用 .github/labels.yml 里已定义的（state:blocked 等），不自造新标签。
+#
+# 实现（TASK-01，2026-11-14 修复）：
+#   - 逻辑在 `apps/control-plane/backend/dispatch/dispatch_check.py`（可单测），
+#     本文件只负责触发与传参，不再维护大段内嵌 Python。
+#   - 全量分页：评论、待检查 Issue 列表、依赖方搜索全部跟随 Link rel=next。
+#     原实现只取第一页：评论 >100 条时第 2 页的 marker 读不到 → 重复提醒；
+#     Issue >100 条时第 2 页之后的任务巡检不到。定时巡检原先用
+#     `labels=state:todo,state:blocked`（REST 语义是“同时带两个标签”），
+#     实际永远查不到，已改为按标签分别查询再取并集。
+#   - 幂等：标签操作改成幂等写法（POST 加标签天然去重；DELETE 不存在的标签
+#     把 404/422 当成功），不再“先查标签再写”；提醒评论用分页 marker 扫描 +
+#     超时对账，重复执行不产生第二条。
+#   - 失败显式：分页 / 查询失败直接抛错让 workflow 变红，不再静默吞掉后用
+#     不完整数据判断“没有 marker”。
+#
+# 触发：
+#   - Issue 新建 / 编辑 / 关闭 / 标签变化时即时检查；
+#   - 每小时一次定时巡检兜底（覆盖“依赖任务关闭时没触发”的情况）。
+#
+# 行为：
+#   1. 缺必填字段（任务说明 / 负责人 / 优先级 / 文件修改范围 / 依赖任务 /
+#      验收标准 / 所属分支）→ 在 Issue 下发提醒评论，同一 Issue 只提醒一次。
+#   2. depends on #N 所指任务未完成 → 打 state:blocked 标签并评论说明。
+#   3. 依赖全部完成后 → 自动摘掉 state:blocked 标签并评论说明可以认领。
+
+name: dispatch-check
+
+on:
+  issues:
+    types: [opened, edited, closed, labeled, unlabeled]
+  schedule:
+    - cron: "0 * * * *"
+  # 手动触发：GitHub 定时器偶发漏跑（2026-11-18：11:24 之后 12:00–17:00 的
+  # 定时巡检全部未触发），有此入口才能手动恢复巡检，不必等下一档。
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  dispatch-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 检查必填字段与依赖
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+        run: |
+          python apps/control-plane/backend/dispatch/dispatch_check.py

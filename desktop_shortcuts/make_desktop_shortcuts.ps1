@@ -1,144 +1,100 @@
-# =============================================================================
-#  make_desktop_shortcuts.ps1 - create the 12 "my_portal" desktop shortcuts
-#
-#  REUSABLE MAINTENANCE SCRIPT (kept in version control on purpose - it is the
-#  only thing that can regenerate the shortcuts). Re-run it after moving
-#  my_portal_ctl.ps1, after renaming the desktop folder, or to repair a
-#  shortcut that was deleted by hand.
-#
-#  Usage:
-#    powershell -NoProfile -ExecutionPolicy Bypass `
-#      -File D:\01_RPA\desktop_shortcuts\make_desktop_shortcuts.ps1
-#
-#  WHY EVERY SHORTCUT POINTS AT my_portal_ctl.ps1:
-#  The portal directory name contains Chinese characters. This machine's ANSI
-#  codepage is Windows-1252, so those characters cannot be stored in a .lnk
-#  (they get mangled or lost). my_portal_ctl.ps1 is pure ASCII and resolves the
-#  portal directory at run time, so the shortcuts stay valid.
-#
-#  Each .lnk is built with the Windows Script Host Shell COM object, which is
-#  the standard way to write a real .lnk (a hand-written binary is fragile).
-# =============================================================================
+﻿<#
+  make_desktop_shortcuts.ps1 —— 生成 OLBR 的桌面快捷方式（总控 + 单组件）
+  ==========================================================================
+  2026-11-18 重写：
+    · 根目录不再写死，按本脚本位置推导（desktop_shortcuts\ -> 仓库根）；
+    · 不再依赖 my_portal_ctl.ps1（那是 01_RPA 时代的 12 键控制器）；
+    · 三个总控直接调 ops\deploy\olbr-*.bat（内部走 portal-ctl.ps1）；
+    · 六个单组件调各子系统自己的 start/stop（与以前一样：my_app / 门户 / nginx 分开起停）。
 
-# 2026-11-09 ISOLATED MODE: by default write shortcuts INSIDE this copy only.
-# Production is hosted by D:\01_RPA and the 12 desktop .lnk files belong to it.
-# Never overwrite them. Only -WriteDesktop writes to the desktop (post-promotion).
+  用法：
+    powershell -NoProfile -File desktop_shortcuts\make_desktop_shortcuts.ps1              # 只生成到 TMP\shortcuts
+    powershell -NoProfile -File desktop_shortcuts\make_desktop_shortcuts.ps1 -WriteDesktop  # 写到桌面
+#>
 param(
     [switch]$WriteDesktop
 )
 
 $ErrorActionPreference = 'Stop'
+$Root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
+$Deploy = Join-Path $Root 'ops\deploy'
+$Desktop = [Environment]::GetFolderPath('Desktop')
 
-$Root      = 'D:\01_olbr_portal'
-$CtlScript = Join-Path $Root 'my_portal_ctl.ps1'
-$Desktop   = [Environment]::GetFolderPath('Desktop')
-
-# Shortcuts live in a dedicated folder so the desktop stays tidy. The .lnk
-# files work identically from a subfolder - nothing inside them depends on
-# their own location (they carry absolute paths).
-if ($WriteDesktop) {
-    $OutDir = Join-Path $Desktop 'my_portal'
-} else {
-    $OutDir = Join-Path $Root 'my_portal\shortcuts'
+foreach ($need in 'ops\deploy\portal-ctl.ps1', 'apps\my_app\start_hidden.ps1', 'apps\portal\start_hidden.ps1', 'nginx-1.28.0\nginx.exe') {
+    if (-not (Test-Path -LiteralPath (Join-Path $Root $need))) { throw "根目录不像完整部署（缺 $need）：$Root" }
 }
 
-if (-not (Test-Path $CtlScript)) { throw "Control script not found: $CtlScript" }
-if (-not (Test-Path $Desktop))   { throw "Desktop not found: $Desktop" }
-if (-not (Test-Path -LiteralPath $OutDir)) {
-    New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
-}
+$OutDir = if ($WriteDesktop) { Join-Path $Desktop 'olbr_app' } else { Join-Path $Root 'TMP\shortcuts' }
+if (-not (Test-Path -LiteralPath $OutDir)) { New-Item -ItemType Directory -Path $OutDir -Force | Out-Null }
 
-# ---------------------------------------------------------------------------
-#  Shortcut definitions: 0-status .. 11-stop_bot
-# ---------------------------------------------------------------------------
-# Name      = .lnk file name (no extension)
-# Command   = argument passed to my_portal_ctl.ps1 (matches its dispatch table)
-# Comment   = tooltip shown on hover
-$Shortcuts = @(
-    @{ Name = '0-status';        Command = '0-status';        Comment = 'Check ports 80/443/7038/7090/9267/9268 and list entry URLs' }
-    @{ Name = '1-start_nginx';   Command = '1-start-nginx';   Comment = 'Start nginx (skipped if it is already running)' }
-    @{ Name = '2-stop_nginx';    Command = '2-stop-nginx';    Comment = 'Stop nginx (signal sent from the nginx directory itself)' }
-    @{ Name = '3-reload_nginx';  Command = '3-reload-nginx';  Comment = 'Reload nginx (nginx -t first; reload only if valid)' }
-    @{ Name = '4-start_myapp';   Command = '4-start-myapp';   Comment = 'Start my_app: backend 7038 + 7 worker groups + frontend 7090' }
-    @{ Name = '5-stop_myapp';    Command = '5-stop-myapp';    Comment = 'Stop my_app in layers and write backend\stopped.flag' }
-    @{ Name = '6-start_portal';  Command = '6-start-portal';  Comment = 'Start the portal: 9267 + WhatsApp analysis service 9268' }
-    @{ Name = '7-stop_portal';   Command = '7-stop-portal';   Comment = 'Stop the portal: 9267 and 9268' }
-    @{ Name = '8-start_all';     Command = '8-start-all';     Comment = 'Start everything: my_app -> portal -> whatsapp bot -> nginx' }
-    @{ Name = '9-stop_all';      Command = '9-stop-all';      Comment = 'Stop everything: nginx -> portal -> my_app -> whatsapp bot' }
-    @{ Name = '10-start_bot';    Command = '10-start-bot';    Comment = 'Start the WhatsApp knowledge-base bot (src/index.js)' }
-    @{ Name = '11-stop_bot';     Command = '11-stop-bot';     Comment = 'Stop the WhatsApp bot gracefully (flushes credentials)' }
-)
+$ws = New-Object -ComObject WScript.Shell
+$cmd = Join-Path $env:SystemRoot 'System32\cmd.exe'
+$ps = Join-Path $env:SystemRoot 'System32\powershell.exe'
+$icon = Join-Path $env:SystemRoot 'System32\shell32.dll'
 
-# ---------------------------------------------------------------------------
-#  Icon
-# ---------------------------------------------------------------------------
-# A console-ish icon that exists on every Windows box. Using a stable system
-# file avoids shipping a .ico and avoids the shortcut breaking if the file goes
-# away. shell32.dll index 137 is the "application window" glyph.
-$IconFile  = "$env:SystemRoot\System32\shell32.dll"
-$IconIndex = 137
-
-# ---------------------------------------------------------------------------
-#  Build
-# ---------------------------------------------------------------------------
-$shell = New-Object -ComObject WScript.Shell
-$made  = @()
-
-foreach ($s in $Shortcuts) {
-    $lnkPath = Join-Path $OutDir ($s.Name + '.lnk')
-
-    $lnk = $shell.CreateShortcut($lnkPath)
-
-    # Target is powershell.exe (Windows PowerShell 5.1 - this box has no pwsh.exe).
-    $lnk.TargetPath = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-
-    # -NoProfile      : do not run the user profile (keeps startup deterministic)
-    # -ExecutionPolicy Bypass : the repo has no signed scripts; the user already
-    #                           trusts this local file. This is scoped to this
-    #                           single invocation, not machine-wide.
-    # -File <ctl> <cmd>       : all ASCII, so it survives any codepage.
-    $lnk.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}" {1}' -f $CtlScript, $s.Command
-
-    # Run in the repo root so relative paths inside child bats behave
-    # consistently no matter how the shortcut is launched.
-    $lnk.WorkingDirectory = $Root
-
-    $lnk.Description = $s.Comment
-    $lnk.IconLocation = "$IconFile,$IconIndex"
-
-    # Normal window: the user asked for a visible console showing progress.
-    $lnk.WindowStyle = 1
-
+# 中文文件名的 .lnk 在这台机器上用 WScript.Shell 直接 Save 会失败（ANSI 代码页），
+# 所以统一先用 ASCII 名生成，再用文件系统 Move-Item 改成中文名。
+function New-Lnk {
+    param(
+        [string]$AsciiName,
+        [string]$Name,
+        [string]$Target,
+        [string]$Arguments,
+        [string]$WorkingDirectory,
+        [int]$IconIndex,
+        [string]$Description
+    )
+    $tmp = Join-Path $OutDir $AsciiName
+    $lnk = $ws.CreateShortcut($tmp)
+    $lnk.TargetPath = $Target
+    $lnk.Arguments = $Arguments
+    $lnk.WorkingDirectory = $WorkingDirectory
+    $lnk.IconLocation = "$icon,$IconIndex"
+    $lnk.Description = $Description
     $lnk.Save()
+    $final = Join-Path $OutDir $Name
+    # 组件类快捷方式的 ASCII 名与最终名相同（本来就是 ASCII），此时不能再「先删后移」，
+    # 否则会把刚生成的 .lnk 删掉（2026-11-18 实测）。
+    if ($final -ne $tmp) {
+        if (Test-Path -LiteralPath $final) { Remove-Item -LiteralPath $final -Force }
+        Move-Item -LiteralPath $tmp -Destination $final -Force
+    }
+    Write-Host ("  {0}" -f $Name) -ForegroundColor DarkGray
+}
 
-    if (Test-Path -LiteralPath $lnkPath) {
-        $made += $lnkPath
-    } else {
-        throw "Failed to create $lnkPath"
+Write-Host ("生成到：{0}" -f $OutDir) -ForegroundColor Cyan
+
+# ---------- 三个总控（桌面根目录也放一份） ----------
+$controls = @(
+    @{ ascii = 'OLBR-start.lnk';  name = 'OLBR 启动.lnk'; bat = 'olbr-start.bat';  icon = 137; desc = '启动 OLBR 生产栈（my_app + 门户 + nginx）' },
+    @{ ascii = 'OLBR-stop.lnk';   name = 'OLBR 停止.lnk'; bat = 'olbr-stop.bat';   icon = 27;  desc = '停止 OLBR 生产栈（二次确认）' },
+    @{ ascii = 'OLBR-status.lnk'; name = 'OLBR 状态.lnk'; bat = 'olbr-status.bat'; icon = 221; desc = '查看 OLBR 生产栈状态' }
+)
+foreach ($c in $controls) {
+    New-Lnk -AsciiName $c.ascii -Name $c.name -Target $cmd `
+        -Arguments ('/c ""{0}""' -f (Join-Path $Deploy $c.bat)) -WorkingDirectory $Root `
+        -IconIndex $c.icon -Description $c.desc
+    if ($WriteDesktop) {
+        Copy-Item -LiteralPath (Join-Path $OutDir $c.name) -Destination (Join-Path $Desktop $c.name) -Force
     }
 }
 
-Write-Host "Created $($made.Count) shortcuts in $OutDir :" -ForegroundColor Green
-foreach ($m in $made) { Write-Host "  $(Split-Path -Leaf $m)" }
-
-# ---------------------------------------------------------------------------
-#  Remove the old copies that used to sit loose on the desktop root
-# ---------------------------------------------------------------------------
-# Earlier runs put these 10 .lnk files directly on the desktop. Now that they# live in my_portal\, leaving the old ones behind would give the user two
-# identical-looking sets - and the stale pair would silently stop tracking any
-# future edit to my_portal_ctl.ps1's arguments. Only delete the exact names we
-# manage, never a wildcard over the desktop.
-$stale = @()
-foreach ($s in $Shortcuts) {
-    $old = Join-Path $Desktop ($s.Name + '.lnk')
-    # 2026-11-09: never delete any desktop file; historical cleanup disabled.
-if ($false -and (Test-Path -LiteralPath $old)) {
-        Remove-Item -LiteralPath $old -Force -ErrorAction SilentlyContinue
-        if (-not (Test-Path -LiteralPath $old)) { $stale += ($s.Name + '.lnk') }
-    }
+# ---------- 六个单组件（与以前一样：能各自起停） ----------
+$components = @(
+    @{ ascii = 'my_app-Start.lnk'; name = 'my_app-Start.lnk'; target = $ps; args = ('-NoProfile -ExecutionPolicy Bypass -File "{0}" -Force' -f (Join-Path $Root 'apps\my_app\start_hidden.ps1')); wd = (Join-Path $Root 'apps\my_app'); icon = 137; desc = '启动 my_app（后端 + workers + 前端；PG 不动）' },
+    @{ ascii = 'my_app-Stop.lnk';  name = 'my_app-Stop.lnk';  target = $cmd; args = ('/c ""{0}""' -f (Join-Path $Root 'apps\my_app\stop.bat')); wd = (Join-Path $Root 'apps\my_app'); icon = 27; desc = '停止 my_app（保留 PostgreSQL）' },
+    @{ ascii = 'Portal-Start.lnk'; name = 'Portal-Start.lnk'; target = $cmd; args = ('/c ""{0}""' -f (Join-Path $Root 'apps\portal\start.bat')); wd = (Join-Path $Root 'apps\portal'); icon = 137; desc = '启动门户 + WhatsApp 分析（9267/9268）' },
+    @{ ascii = 'Portal-Stop.lnk';  name = 'Portal-Stop.lnk';  target = $cmd; args = ('/c ""{0}""' -f (Join-Path $Root 'apps\portal\stop.bat')); wd = (Join-Path $Root 'apps\portal'); icon = 27; desc = '停止门户 + WhatsApp 分析' },
+    @{ ascii = 'nginx-Start.lnk';  name = 'nginx-Start.lnk';  target = (Join-Path $Root 'nginx-1.28.0\nginx.exe'); args = ''; wd = (Join-Path $Root 'nginx-1.28.0'); icon = 137; desc = '启动 nginx（80/443）' },
+    @{ ascii = 'nginx-Stop.lnk';   name = 'nginx-Stop.lnk';   target = (Join-Path $Root 'nginx-1.28.0\nginx.exe'); args = '-s quit'; wd = (Join-Path $Root 'nginx-1.28.0'); icon = 27; desc = '停止 nginx（在 nginx 目录内发信号）' }
+)
+foreach ($c in $components) {
+    New-Lnk -AsciiName $c.ascii -Name $c.name -Target $c.target -Arguments $c.args `
+        -WorkingDirectory $c.wd -IconIndex $c.icon -Description $c.desc
 }
-if ($stale.Count -gt 0) {
-    Write-Host ''
-    Write-Host "Removed $($stale.Count) old copy/copies from the desktop root:" -ForegroundColor Yellow
-    foreach ($s in $stale) { Write-Host "  $s" }
+
+Write-Host ''
+Write-Host ("完成：{0} 个快捷方式 -> {1}" -f ($controls.Count + $components.Count), $OutDir) -ForegroundColor Green
+if (-not $WriteDesktop) {
+    Write-Host '（未加 -WriteDesktop，只写进了 TMP\shortcuts；要放桌面请加该开关）' -ForegroundColor DarkGray
 }

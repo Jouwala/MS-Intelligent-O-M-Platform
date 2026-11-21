@@ -1,43 +1,44 @@
 @echo off
-REM OLBR portal - start everything in THIS directory.
+REM ============================================================
+REM  OLBR entry - START, routed by the runtime marker in this folder:
 REM
-REM Two modes, selected by the promotion switch (the copy-root flag):
-REM   * ISOLATED_COPY.flag present -> portable/isolated copy: scripts\start_all.ps1
-REM     (forces MY_APP_DISABLE_SCHEDULER=1, uses the bundled portable PG,
-REM      and refuses any port that production uses)
-REM   * flag absent (promoted)     -> production copy: my_portal_ctl.ps1 8-start-all
-REM     (same orchestrator as the 8-start_all desktop shortcut:
-REM      my_app -> portal -> whatsapp bot -> nginx; start_hidden.ps1 is
-REM      idempotent, so running it with services up only fills in gaps)
+REM    PRODUCTION.flag present -> ops\deploy\portal-ctl.ps1 -Action start
+REM                               (the live 80/443/7038/7090/9267/9268 stack,
+REM                                same path as the 5-minute self-heal tasks)
+REM    otherwise               -> ops\deploy\start_all.ps1
+REM                               (the isolated launcher: rewrites backend\.env,
+REM                                starts the portable PG on 55432 and binds the
+REM                                isolated ports - correct only for a copy)
 REM
-REM NEVER run start_all.ps1 on a promoted copy: it would disable the scheduler,
-REM start a portable PG on the production port and reject 80/443 - i.e. exactly
-REM the opposite of what this machine now needs. That is why the flag, not the
-REM file name, decides the mode.
+REM  Two hard rules:
+REM    1) start_all.ps1 is not "the start button", it is the ISOLATED start
+REM       button. Running it on a production tree fights the live stack.
+REM    2) In production this entry takes NO arguments. Swallowing something
+REM       like -DryRun and starting for real would be the worst outcome, so
+REM       a stray argument is refused instead. Use portal-ctl.ps1 directly.
+REM  Both scripts also carry their own guards; this file only routes.
 REM
-REM -DryRun / -SkipNginxConf belong to the isolated starter and are therefore
-REM only forwarded in isolated mode.
-REM Keep this file ASCII-only and CRLF; non-ASCII breaks cmd parsing.
+REM  ASCII-only + CRLF on purpose; non-ASCII breaks cmd parsing.
+REM ============================================================
 setlocal
 cd /d "%~dp0"
+set "RC=0"
+if not exist "%~dp0PRODUCTION.flag" goto :isolated
+if not "%~1"=="" goto :prod_args
+echo [production] ops\deploy\portal-ctl.ps1 -Action start
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0ops\deploy\portal-ctl.ps1" -Action start
+set "RC=%ERRORLEVEL%"
+goto :done
 
-if exist "%~dp0ISOLATED_COPY.flag" goto isolated
-if exist "%~dp0my_portal_ctl.ps1" goto promoted
-
-echo [FAIL] Neither ISOLATED_COPY.flag nor my_portal_ctl.ps1 exists in %~dp0
-echo        Refusing to guess which mode this directory is in.
-exit /b 2
+:prod_args
+echo [production] this entry takes no arguments.
+echo              Use ops\deploy\portal-ctl.ps1 -Action start^|stop^|status directly.
+set "RC=2"
+goto :done
 
 :isolated
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start_all.ps1" %*
-exit /b %errorlevel%
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0ops\deploy\start_all.ps1" %*
+set "RC=%ERRORLEVEL%"
 
-:promoted
-if not "%~1"=="" (
-    echo [FAIL] Promoted copy: switch arguments are isolated-only ^(-DryRun / -SkipNginxConf^).
-    echo        Refusing to start with: %*
-    exit /b 2
-)
-echo [*] Promoted copy (no ISOLATED_COPY.flag): my_portal_ctl.ps1 8-start-all
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0my_portal_ctl.ps1" 8-start-all
-exit /b %errorlevel%
+:done
+endlocal & exit /b %RC%

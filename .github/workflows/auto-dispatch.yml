@@ -1,0 +1,99 @@
+# 合并后自动分派下一个任务：PR 合入 main 后，把下一个就绪任务自动
+# 派给空闲的 builder，不再等每小时巡逻（dispatch-check.yml 只做检查
+# 与标签，不分派任务——见其文件头注释）。
+#
+# 就绪任务 = 同时满足以下四条的 OPEN Issue：
+#   1. 带 `state:todo` 标签；
+#   2. 带注册表白名单内的 agent 标签（docs/workspace/agent-registry.md 主表里
+#      「角色含 Worker 且未退役」的行，由 builder_registry.py 解析，不再写死）；
+#   3. 正文里 `depends on #N` 所指依赖全部已关闭；auto-fix 修复 Issue 对其原
+#      Issue 的自依赖自动忽略（原 Issue 要等本修复合入才关闭，否则死锁）；
+#   4. 没有认领评论（无 `agent-claim:` / TASK_ACCEPTED 消息头），
+#      且没有 24 小时内发出的 TASK_ASSIGNED 分派评论（超过 24h 无人认领视为
+#      分派超时，允许重新分派；48 小时无回应的协议升级仍由 Muse 1 负责）。
+#
+# 分派顺序：优先派给本次合并空闲出来的 builder（从合入 PR 的
+# agent: 标签、关联 Issue 的 agent: 标签、分支名依次判定），
+# 该 builder 无就绪任务时，退而取编号最小的就绪任务（任意 builder）。
+# 每次只派一个任务；没有就绪任务时只记日志，不报错。
+#
+# 实现（TASK-01 + TASK-07，2026-11-14 修复）：
+#   - 逻辑在 `apps/control-plane/backend/dispatch/auto_dispatch.py`（可单测，
+#     测试见同目录 tests/），本文件只负责触发与传参，不再维护大段内嵌 Python。
+#   - 全量分页：候选 Issue 与评论都跟随 Link rel=next（原实现只取第一页，
+#     评论 >100 条时漏认领 / 分派记录，Issue >100 条时漏第 2 页之后的任务）。
+#   - 幂等：选定任务后先 `POST /git/refs` 创建
+#     `refs/heads/dispatch/pr-merged/issue-<N>-<merge_sha>-<digest>` 做原子
+#     CAS（422 = 已登记），登记成功才发 TASK_ASSIGNED 评论，评论头带
+#     `dispatch_id`。并发 / 重复投递 / workflow 重试只有一个赢家；评论超时
+#     或上次登记后崩溃的对账补发也在模块内（分页查 dispatch_id）。
+#   - 权限：创建 git ref 需要 `contents: write`。
+#
+# 安全阀（不变）：
+#   - 只处理 merged == true 且 base 为 main 的 PR；
+#   - 依赖未满足的任务绝不分派；已认领 / 已分派的任务不动；
+#   - 只发一条 TASK_ASSIGNED 评论 + 补 state:todo 标签（若缺失），
+#     并摘掉已满足依赖任务上残留的 state:blocked 标签；
+#     不合并、不关闭 Issue、不改代码。
+#   - 分派评论的机器可读头 from 记为 github-actions（自动化执行者），
+#     与 pr-merged-writeback.yml 的口径一致。
+#
+# 触发（四条路，同一套逻辑、同一个逻辑来源）：
+#   - PR 关闭且 merged == true、base 为 main（手动在网页上合并时走这条）；
+#   - auto-merge 合并成功后显式 workflow_dispatch（填 PR 号）；
+#   - 每小时 :17 的 schedule 定时巡检（不看 PR，按 main HEAD 分派一个就绪
+#     任务）——兜住「任务早就绪、但一整天没有新 PR 合入」的空窗。
+#   - Issue 创建（opened）或关闭（closed，依赖解除）：即时分派，不等巡检。
+#     注意 PR 本身也是 Issue，job 层用 !github.event.issue.pull_request
+#     排除 PR 事件，避免与 pull_request[closed] 重复触发。
+#   第二条是必需的：auto-merge 用默认 GITHUB_TOKEN 合并，GitHub 不会为
+#   该 token 触发的事件再启动新工作流，pull_request closed 事件被抑制
+#   （2026-11-14 实测：PR #31 合入后本工作流 0 次运行）。workflow_dispatch
+#   与 schedule 都不受这条限制。前两条投递路径在模块里归一成同一个逻辑
+#   来源 `pr-merged`，定时路径记 `cron-sweep`，Issue 事件路径记
+#   `issue-event`，各自幂等。
+
+name: auto-dispatch
+
+on:
+  pull_request:
+    types: [closed]
+  issues:
+    types: [opened, closed, reopened]
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: '已合入 main 的 PR 编号'
+        required: true
+        type: number
+
+permissions:
+  contents: write
+  pull-requests: read
+  issues: write
+
+concurrency:
+  group: auto-dispatch
+  cancel-in-progress: false
+
+jobs:
+  dispatch-next:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event_name == 'issues' && !github.event.issue.pull_request) || (github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 找下一个就绪任务并分派
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          PR_NUMBER_EVENT: ${{ github.event.pull_request.number }}
+          PR_NUMBER_INPUT: ${{ inputs.pr_number }}
+          MERGE_SHA_EVENT: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          python apps/control-plane/backend/dispatch/auto_dispatch.py

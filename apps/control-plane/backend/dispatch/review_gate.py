@@ -1,0 +1,179 @@
+"""独立代码审核记录门禁（Phase 2 P2-1，Issue #131）。
+
+协议见 `docs/workspace/review-record-protocol.md`。审核结论以 PR 评论里
+的机器可读标记承载（惯例贴在评论首行），复用冒烟结果（smoke-result）
+的 SHA 绑定模式：
+
+    <!-- review-result: pr-<N> sha-<40 位 SHA> reviewer-<审核者> verdict=passed|changes-requested|blocked -->
+
+判定规则（唯一真相源，本模块与 `auto-merge.yml` 的门禁共用）：
+- 取 PR 评论里**最后一条** review-result 标记（按评论时间顺序；
+  同一评论含多条标记时取最后一条）；
+- 门禁通过当且仅当：标记的 pr 等于本 PR、verdict 是 passed、
+  标记的 sha 等于当前 head SHA；
+- 新提交（sha 变化）自动使旧审核失效；审核者事后改判（补一条
+  changes-requested / blocked）同样使旧 passed 失效。
+
+本模块**零第三方依赖**（只用标准库），供 CI（auto-merge 工作流）与
+单测共用；不要在这里引入 `dispatch.github_client` 等业务依赖——
+门禁脚本必须在只有 `GH_TOKEN` 的 Actions 环境里直接跑。
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+import urllib.request
+
+#: 审核记录标记。reviewer 只允许字母/数字/`_`/`-`/`.`（如 muse-1、muse-4）。
+#: verdict 后须跟空白、`--`（标记结尾）或串尾——没有这个边界，
+#: `verdict=passedXYZ` 也会被解析成 passed（放行方向，绝不允许）。
+REVIEW_MARKER_RE = re.compile(
+    r"review-result:\s*pr-(?P<pr>\d+)\s+"
+    r"sha-(?P<sha>[0-9a-f]{40})\s+"
+    r"reviewer-(?P<reviewer>[A-Za-z0-9_.\-]+)\s+"
+    r"verdict=(?P<verdict>passed|changes-requested|blocked)(?=(?:\s|--|$))"
+)
+
+#: 合法 verdict 全集；只有 passed 能放行合并。
+VERDICTS = ("passed", "changes-requested", "blocked")
+
+
+def format_review_marker(
+    pr_number: int, sha: str, reviewer: str, verdict: str
+) -> str:
+    """生成一条审核记录标记（贴评论首行用）。"""
+    if not isinstance(pr_number, int) or pr_number < 1:
+        raise ValueError(f"非法 PR 编号：{pr_number!r}")
+    if verdict not in VERDICTS:
+        raise ValueError(f"非法 verdict：{verdict!r}，只允许 {VERDICTS}")
+    if not re.fullmatch(r"[0-9a-f]{40}", sha or ""):
+        raise ValueError("sha 必须是 40 位小写十六进制")
+    if not re.fullmatch(r"[A-Za-z0-9_.\-]+", reviewer or ""):
+        raise ValueError(f"非法 reviewer：{reviewer!r}")
+    return (
+        f"<!-- review-result: pr-{pr_number} sha-{sha} "
+        f"reviewer-{reviewer} verdict={verdict} -->"
+    )
+
+
+def parse_review_markers(bodies: list[str]) -> list[dict]:
+    """按评论顺序抽取全部 review-result 标记（同一评论含多条时取最后一条）。
+
+    每条返回 {"pr": int, "sha": str, "reviewer": str, "verdict": str}。
+    格式不对的行直接跳过，不抛错——评论正文是人写的，门禁只认合规标记。
+    取最后一条是安全方向：同一评论先贴 passed、后贴 blocked 时，
+    blocked 说了算，不会把已改判的结论当成通过。
+    """
+    markers: list[dict] = []
+    for body in bodies or []:
+        matches = list(REVIEW_MARKER_RE.finditer(body or ""))
+        if not matches:
+            continue
+        match = matches[-1]
+        markers.append(
+            {
+                "pr": int(match.group("pr")),
+                "sha": match.group("sha"),
+                "reviewer": match.group("reviewer"),
+                "verdict": match.group("verdict"),
+            }
+        )
+    return markers
+
+
+def latest_review(bodies: list[str]) -> dict | None:
+    """最后一条审核记录；没有则返回 None。"""
+    markers = parse_review_markers(bodies)
+    return markers[-1] if markers else None
+
+
+def review_gate_passes(
+    bodies: list[str], pr_number: int, head_sha: str
+) -> tuple[bool, str]:
+    """判定审核门禁是否通过，返回 (通过与否, 原因说明）。
+
+    只看最后一条标记：passed + pr 一致 + sha 等于当前 head 才放行。
+    其余情况（无记录、改判、旧 head、pr 不符）一律不通过。
+    """
+    marker = latest_review(bodies)
+    if marker is None:
+        return False, "无审核记录标记（未审）"
+    if marker["pr"] != pr_number:
+        return False, f"最后一条审核记录属于 PR #{marker['pr']}，不是本 PR"
+    if marker["verdict"] != "passed":
+        return (
+            False,
+            f"最后一条审核结论是 {marker['verdict']}（审核者 "
+            f"{marker['reviewer']}），未通过",
+        )
+    if marker["sha"] != head_sha:
+        return (
+            False,
+            f"审核绑定的是旧 head {marker['sha'][:12]}，当前 head "
+            f"{head_sha[:12]}，审核已失效",
+        )
+    return True, f"审核通过（{marker['reviewer']}，sha {head_sha[:12]}）"
+
+
+def fetch_comment_bodies(repo: str, pr_number: int, token: str) -> list[str]:
+    """读 PR 的全部 Issue 评论正文（分页拉满，顺序即时间顺序）。
+
+    最多拉 100 页（10000 条评论）：服务端若永远返回满页就不再是
+    “分页”，而是异常——此时抛错，门禁 fail-closed（main 捕获后
+    exit 1），不让门禁脚本无限循环。
+    """
+    bodies: list[str] = []
+    page = 1
+    while True:
+        if page > 100:
+            raise RuntimeError(f"评论分页超过 100 页，疑似服务端异常")
+        url = (
+            f"https://api.github.com/repos/{repo}/issues/{pr_number}"
+            f"/comments?per_page=100&page={page}"
+        )
+        request = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=30) as response:
+            comments = json.loads(response.read().decode("utf-8"))
+        if not comments:
+            break
+        bodies.extend(comment.get("body") or "" for comment in comments)
+        if len(comments) < 100:
+            break
+        page += 1
+    return bodies
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI（供 auto-merge 工作流调用）：通过返回 0，不通过返回 1。"""
+    parser = argparse.ArgumentParser(description="审核记录门禁判定")
+    parser.add_argument("--repo", required=True, help="owner/repo")
+    parser.add_argument("--pr", required=True, type=int, help="PR 编号")
+    parser.add_argument("--head-sha", required=True, help="当前 head SHA")
+    args = parser.parse_args(argv)
+
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
+    if not token:
+        print("缺少 GH_TOKEN / GITHUB_TOKEN，无法读评论", flush=True)
+        return 1
+    try:
+        bodies = fetch_comment_bodies(args.repo, args.pr, token)
+    except Exception as exc:  # noqa: BLE001 - 门禁读不到证据时宁可不放行
+        print(f"读 PR 评论失败：{exc}，门禁不通过", flush=True)
+        return 1
+    passed, reason = review_gate_passes(bodies, args.pr, args.head_sha)
+    print(f"审核门禁：{'通过' if passed else '不通过'}——{reason}", flush=True)
+    return 0 if passed else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
