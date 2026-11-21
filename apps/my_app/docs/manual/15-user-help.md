@@ -167,7 +167,7 @@
 | WhatsApp 知识库同步（告警规则） | `whatsapp_kb_sync_alarm_rules` | `4 0 */3 * *` | n | `services/whatsapp/whatsapp_kb_service.py → run_whatsapp_kb_sync_after_alarm_rules → whatsapp-kb-bot/scripts/sync-kb.mjs` |
 | WhatsApp 知识库同步（TT 级别规则） | `whatsapp_kb_sync_tt_rules` | `35 4 * * *` | n | `services/whatsapp/whatsapp_kb_service.py → run_whatsapp_kb_sync_after_tt_rules → whatsapp-kb-bot/scripts/sync-kb.mjs` |
 | 日志文件清理 | `log_cleanup` | `17 3 * * *` | m | `services/cleanup/log_cleanup.py → run_log_cleanup` |
-| TMP 目录清理 | `tmp_cleanup` | `47 3 * * *` | m | `services/cleanup/tmp_cleanup.py → run_tmp_cleanup` |
+| 临时产物清理 | `tmp_cleanup` | `47 3 * * *` | m | `services/cleanup/tmp_cleanup.py → run_tmp_cleanup` |
 | TTs and MTTR 报表生成 | `tt_mttr_report_generate` | `20 7 * * *` | m | `services/tt/tt_mttr_report.py → run_tt_mttr_report` |
 | RAN 用户身份清单（VoLTE/N78） | `gp_ran_user_sync` | `20 13 * * *` | g | `services/gp_ran/gp_ran_sync.py → run_gp_ran_user_sync` |
 | IPT 站点电源采集 | `ipt_power_collect` | `*/5 * * * *` | m | `services/ipt_data/ipt_power_collector.py → run_ipt_power_collect` |
@@ -655,7 +655,7 @@
 
 - ⚠ 导出 0 行视为空态跳过、不计失败（与 5 分钟任务同约定）
 - 与 cnn_kpi_sync / cnn_kpi_sync_5mins 同在 n 组串行，避免共用 CNN UME 会话互踢
-- 页面消费方：?page=cn_hourly_kpi（routers/cn_hourly_kpi.py + cn_kpl/cn_hourly_kpi_service.py 读取侧）
+- 页面消费方：?page=cn_hourly_kpi（routers/cn_hourly_kpi.py + cn_kpl/cn_hourly_kpi_service.py 读取侧）；Capacity/DNS 表供 ?page=cs_cn_kpi / ?page=ps_cn_kpi
 - 上游改模板后重新导出 xlsx 覆盖 cn_kpl/KPI Template.xlsx 即可，无需改代码
 
 #### SP 备件数据同步（`sp_data_sync`）
@@ -667,7 +667,8 @@
 
 **工作流与数据流**:
 
-1. 登录备件 SFTP（凭据分组 sftp_sp）
+1. 登录备件 SFTP（凭据分组 sftp_sp / pict，路径 /home/pict/sp/...）
+1. OC Rule 另走 SSH pict→su root（凭据 sftp_sp_root）读 /home/ubuntu/OCAuto/OCAutoOutput
 1. 拉取 Inbound/Outbound/Inventory/OC Rule/Transfer 5 份报表
 1. 清洗后写主库，供仓库看板与 SP 报表使用；写库前 Material Name 按 Material No. 取物料主数据 sp_material 的最新名（物料改名后看板不会出现新旧两种写法）
 1. 全部落库后镜像写入 FineBI inventory.db（UNC 路径；普通表整表替换、Inventory 只追加新行）
@@ -681,6 +682,7 @@
 - 仓库看板「Inventory Quantity Trend」直接读取本表全部日期（无日期参数时返回全量），调小保留天数会直接缩短趋势图历史
 - 2026-09-20 起由每天 07:00 改为每小时 :10：上游 SFTP 本就每小时 :00:03 导出一份，而 MsPortal 的 QC 面板 SPMS 卡读本任务写的 inband_details/outband_details，按天同步时那个数字最长滞后 24 小时。排 :10 是为了避开同组的 eflow_sync(:00) 与 sp_online_sync(:35)
 - 单次耗时被末尾的 FineBI 镜像拖长（UNC inventory.db 偶发 database is locked，实测 1~9min）；队列有单飞保护，上一轮没跑完会跳过本轮触发，不会堆叠，但那一小时的数据就是旧的。若 QC 面板其它指标（TT/WO/CR/PMT）跟着一起变慢，先查本任务是否占住了 n 组 worker
+- 2026-11-20：普通表改 /home/pict/sp；OCAuto 仍在 /home/ubuntu，需 sftp_sp_root
 
 #### iPRAN UME KPI 同步（`ipran_kpi_sync`）
 
@@ -1674,23 +1676,25 @@
 - Windows 下被进程占用的日志无法外部重命名/删除，只能由写入方按日期分文件——这就是日志名带日期的原因
 - db/app.db（含凭据表）、backend/services/auth_cache/、data/ 下任务产物不在清理范围
 
-#### TMP 目录清理（`tmp_cleanup`）
+#### 临时产物清理（`tmp_cleanup`）
 
 - 默认 cron: `47 3 * * *`　|　worker 组: **m**
 - 工作流脚本: `services/cleanup/tmp_cleanup.py → run_tmp_cleanup`
 
-**功能**: 两段式回收 my_app/TMP 下超过保留期（默认 7 天）的临时产物：先同盘移进 TMP/_quarantine_YYYYMMDD/（可还原），隔离再满 7 天才真删
+**功能**: 两段式回收 TMP 下超保留期（默认 7 天）的临时产物，以及 data/ 下按次产物（网管导出中间文件 / 临时浏览器 profile / 损坏镜像快照 / 逐次运行摘要 / IP 追踪留档，保留期逐类设定）：先同盘移进 _quarantine_YYYYMMDD/（可还原），隔离期满才真删
 
 **工作流与数据流**:
 
-1. 每天 03:47 扫描 TMP/ 下超过保留期的条目
+1. 每天 03:47 扫描 TMP/ 与 data/ 下命中规则的条目
 1. 同盘 mv 进 _quarantine_<日期>/ 隔离（不直接删，留一次反悔机会）
-1. 隔离期满 7 天后彻底删除；服务在用路径按 WHITELIST 跳过
+1. TMP 隔离期满 7 天、data/ 隔离期满 30 天后彻底删除；服务在用路径与白名单规则跳过
 
 **维护要点**:
 
 - TMP/ 是临时产物的固定去处，但体积没人管（上线首日实测 462MB）——清理是必需的
-- charts/dl/状态文件等服务在用路径在 WHITELIST 里，永不处理；新增此类路径要补白名单
+- charts/dl/状态文件等服务在用路径在 TMP 的 WHITELIST 里，永不处理；新增此类路径要补白名单
+- data/ 只处理 data_residue_cleanup.RULES 里显式列出的按次产物 —— data/ 下绝大多数文件是业务库与报表源，通用「超过 N 天就删」是灾难；加一类只加一行 RULES 并写清「谁写的、为什么留着没用」
+- 2026-11-20 起并入 data/ 残留：此前 data/cnn_ume/exports 的 2026-07-31 导出文件躺了四个月无人发现（写入方改内存模式、删除逻辑只删刚读到的那一个、data/ 被 gitignore 挡住）
 - 与 log_cleanup（03:17）错峰，避免同一时段两次全盘扫描
 
 #### TTs and MTTR 报表生成（`tt_mttr_report_generate`）
@@ -2059,6 +2063,7 @@ UME 四层拓扑（IP RAN 光纤 / IP Core / Metro Ring / DWDM）：四层共用
 - 三种布局回答不同问题：**力导向（默认）**看环网与簇团，并把接入点往主归属的水平方向收拢；**地理**看断站影响哪个城市；**分层**看层级关系，适合导出。布局是确定性的，同一份数据每次位置一致。旧算法在真实图上扫到过 42 次边交叉，那组参数仍留在 layoutForceClassic
 - 三种着色：按层级（默认）/ 按在线状态 / 按最高告警级。**告警不着色是刻意的**：实测 74/93（80%）网元都有紧急告警，按告警级填色整张图会全红；告警只做节点右上角小红点
 - 第四种着色「按流量负载」把链路染成 Weathermap 的 8 档色阶（0-1% 灰白 … 85-100% 红），并从中间拆成两段：前半段是源→宿、后半段是宿→源，各标一个百分比。切到这一档才去取端口流量（多读 6 张 15 分钟表），切走不会重新取数。利用率 = 端口收发速率 ÷ 端口带宽；**没有采集到的链路是灰虚线 + N/A，不是 0%** —— 端口流量只覆盖 KPI 采集配置里的 13 个网元（实测 IP RAN 层 50/141 条边有数），页底会写明只覆盖多少条
+- 工具条右侧「Weathermap 视图」把整页切成一张流量气象图，也可直链 `?page=ipranTopo&view=weathermap&layer=ipran`：设备画成 NMS 风格图标，链路从中点拆成收发两段上 8 档色、百分比压在线上，图例与采样时刻叠在画布角上。位置复用同一份布局（两个视图位置一致），点图标或链路仍开详情抽屉；默认画全量（含接入层）保持密度，关掉「含接入层」只看骨干 22 个点；节点名默认只标核心与汇聚，接入点切「全部标签」再显示，滚轮缩放、拖动平移。工具条「编辑布局」可拖动节点、松手按层保存（仅本机或持令牌可写），「重置布局」恢复自动布局；后端未重启时先存本机并在工具条提示
 - 带宽只体现在**线宽**（100G / 25G / 10G / 其它四档），断链是红色虚线，有告警的链路转橙色；「折叠平行链路」开关可把 ×N 展开成扇面
 - 右侧栏（约 25%）上面是一行统计卡，下面是「紧急告警最多的网元」，两块同宽。数字下面的构成说明默认不显示，点数字才弹出；点卡片标题仍可下钻。左侧拓扑画布占约 75%，并吃掉工具条之下剩余的高度。点节点或点榜上的名字聚焦：其余节点变暗、只保留一跳邻居，详情从右侧滑出（概览 / 接口 / 告警 / 影响分析）。再点一次、点空白、点遮罩或按 Esc 关闭。滚轮缩放，拖空白处平移
 - 影响分析给出的是**根因候选**，不是已确认根因：只有失联设备、且上游没有更靠前的失联设备才会列入；接口没有告警发生时间。流量利用率没有数据时显示 N/A，不会用端口速率去估
@@ -2073,7 +2078,7 @@ UME 四层拓扑（IP RAN 光纤 / IP Core / Metro Ring / DWDM）：四层共用
 
 OLIB FO 全国光纤网络拓扑（静态参考页）：把 Orange Liberia 网络拓扑 PDF 的第 1 页物理图、第 2 页逻辑图原样嵌入，并在物理图上叠加 667 个提取站点。支持缩放 / 平移 / 站点搜索 / 骨干核心与 5G·ISP 筛选，点站点可看区域、原图相对位置和类型，并可全图定位或放大看周边链路。
 
-- 三个视图：「原图 · 物理拓扑」（叠加站点点位）/「原图 · 逻辑拓扑」/「骨干示意」（按第 2 页逻辑图梳理的 9 个核心节点与链路）
+- 两个视图：「原图 · 物理拓扑」（叠加站点点位）/「原图 · 逻辑拓扑」（第 2 页原图）。「骨干示意」页签已于 2026-11-20 按用户要求下线，需要看骨干节点与链路请用「OLIB 地理拓扑」（?page=olibTopo_v2）的「骨干核心」视图
 - 物理图点位：灰=普通、红=5G、蓝=ISP、紫=骨干核心；半径随缩放反向补偿，放大后仍是细小圆点。滚轮缩放、拖动平移，右下角缩略图可点击跳转，工具条可重置 / 全屏 / 隐藏点位
 - 右侧站点查询是模糊搜索：忽略大小写和标点，可以按站名或区域里的词匹配，打错一个字母或少写一两个字母也能找到；另有区域下拉与「全部 / 5G / ISP / 骨干核心」快捷筛选。结果超过 300 条时只渲染前 300 条并明确提示，不会静默截断。点一条结果会放大到该站
 - 点站点后详情卡显示区域、原图相对位置（近似值，不是 GPS）与类型；「全图定位」「放大看周边链路」两个按钮与参考页一致
@@ -2092,6 +2097,21 @@ OLIB 光纤网络的**地理版拓扑**：把 PDF 里的 667 个站点按 master
 - PDF 链路图层按原图颜色分组：40G 光缆、10G 光缆、IPRAN/DWDM、P26A–D 项目、在建/规划、基础链路（原图黑色细线）；虚线表示规划中。端点是把 PDF 坐标用薄板样条投到经纬度后吸附到最近站点，**位置误差约 1–10 km**，密集区可能吸到邻站；它只表示「原图上画了这条链路」，不代表光缆走向、容量或时延
 - 点站点看详情：PDF 区域、GPS、主数据站点与 ID、县/Region、匹配方式和核验状态；「地图定位」「放大」会把地图飞到该站
 - **静态数据页**：GPS 映射表是 public/olib/olib-site-geo.json（由 scripts/gen-olib-site-geo.mjs 生成），页面不直连 GIS 接口；自动刷新建议 1800 秒，内容不会变化
+
+#### NOC 网络拓扑中心（`nocTopology`）
+
+NOC 统一网络拓扑中心（1.0）：把 IPRAN、MW 微波、OLIB FO 三个来源收进**同一套数据模型与视觉语言**，提供全网总览 / 逻辑拓扑 / 流量视图 / 地理视图四个视图。它不是三个专页的替代品 —— IPRAN、MW、OLIB 原页面继续负责各自的深度分析，本页负责统一态势、跨域浏览与统一入口。
+
+- 顶部两个维度独立切换：**视图**（全网总览 / 逻辑拓扑 / 流量视图 / 地理视图）与**来源**（全部 / IPRAN / MW / OLIB FO）。可只看 MW 的地理分布，也可看全部来源的流量视图；URL 支持深链接 `?page=nocTopology&view=traffic&source=mw&layer=ipran&gran=rt`
+- **设备身份 = 来源 + 原生 ID**（如 `ipran:<UME uuid>`、`mw:<IP>`、`olib:<站点下标>`）。三个来源之间**不做自动合并**：站名相似、坐标接近都不算关联依据；IPRAN 的站点名来自 UME 且含近似匹配，不能当主数据 siteId 用
+- 流量口径：**TX = 源设备→宿设备，RX = 宿设备→源设备**，两个方向分别取原生值、不平均。8 档 Weathermap 色阶与 IPRAN 专页同一套；MW 自己的 healthy / minor / major / critical 四级（60 / 70 / 80 阈值）原样保留，8 档色只表达负载，不重新定义故障严重度
+- **没有流量采样显示 N/A，不显示 0%**：IPRAN 实测只有 50/141 条链路有端口流量（KPI 只覆盖配置里的 13 个网元），MW 有 20 条物理链路当期无 KPI，OLIB 全部没有实时流量。这些链路画中性灰虚线，图例与详情都写明原因
+- OLIB 的线与部分骨干连接是**示意连接**（PDF 第 1 页数字化 592 条 / 覆盖 411 站，第 2 页骨干 17 条），不是实际光缆路由，也没有实时利用率；适配层给所有 OLIB 边打 `schematic=true`，永远不参与流量着色
+- 链路详情里 MW 有历史趋势（日粒度全部日期 / 实时最近 96 个 15 分钟槽）；IPRAN 的 `topo_traffic.py` 只读最新 KPI 快照，**没有历史接口，不画曲线**（不拼伪历史）
+- 来源健康面板逐源显示 Connected / Partial / Stale / Unavailable / Static。取数是三个独立请求（`Promise.allSettled` 语义），一个来源失败只标红那一行，另外两个照常显示；总览卡与风险榜跟随来源筛选，不跟随搜索词
+- 画布交互：滚轮缩放、拖动平移、双击回全景；点设备聚焦一跳邻居并开详情，点链路看两端、带宽、端口明细与历史；搜索框回车定位（只在主动搜索时移动视口）
+- 自动刷新按来源节流：IPRAN 300 秒、MW 900 秒（15 分钟采集）、OLIB 1800 秒（静态资产）。顶栏「开启刷新」建议 300 秒，本页已登记为**原地刷新**（收到 `myapp-refresh` 只静默重取，不重建地图与画布）
+- 1.0 明确不做：跨系统设备/链路的自动关联、自动故障传播推理、给 OLIB 编造实时利用率、给 IPRAN 编造历史曲线
 
 #### MW 微波实时（`mwRealTime`，iframe 页）
 
@@ -2376,7 +2396,7 @@ LTE 丢包看板（RAN UME SDR / IPRAN IPPD）：最近 7 个完整自然日、�
 
 #### cn_kpi（`cn_kpi`）
 
-CN KPI 看板：原 FineBI「CN KPI」看板的原生重建，18 个组件（VLR / Voice / Data 用户数、USSD 成功率、位置更新成功率、USPP / MSC / xGW 利用率、FDD / TDD 流量、RG-6/11/12/30 等）。数据经远端只读 SQL API 读 db_ps_cs_cn，不依赖 my-finebi 进程。⚠ 本页数据来自两条彼此独立的流水线：人工导出的 _EMS 表（会停摆，且**粒度随导出区间变化**）与自动同步的 _UME 表；因此取数会逐级降级，并在卡片与页头**显式标注粒度**。
+CN KPI 看板：原 FineBI「CN KPI」看板的原生重建，23 个组件（VLR / Voice / Data 用户数、呼入 / 呼出应答率、国际 MOU、MGW32 资源利用率与资源占用、USSD 成功率、位置更新成功率、USPP / MSC / xGW 利用率、FDD / TDD 流量、RG-6/11/12/30 等）。数据经远端只读 SQL API 读 db_ps_cs_cn，不依赖 my-finebi 进程。⚠ 本页数据来自两条彼此独立的流水线：人工导出的 _EMS 表（会停摆，且**粒度随导出区间变化**）与自动同步的 _UME 表；因此取数会逐级降级，并在卡片与页头**显式标注粒度**。呼入 / 呼出应答率、国际 MOU、MGW32 两张卡（2026-11-20 新增）只有人工导出的 _EMS 表，**既没有 _UME 孪生表也没有 1month_* 月表**，停止导出时会直接空掉（不换源、不填 0）；MGW32 是小时粒度、图上按天取算术平均（不是峰值），且不含今天（今天只有已完成的若干小时）。
 
 - 默认为「近 31 天」；改时间区间后点查询，月粒度组件会自动改用近 13 个月窗口
 - 卡片右上角橙色「月粒度」标签表示该点代表一个月，**不是某一天**；金色「已切源」表示原表停更、已改用自动同步的同名数据源
@@ -2401,7 +2421,7 @@ CN KPI 5 分钟看板：把「今天（Day0）」「昨天（Day1）」「7 天�
 
 #### cn_hourly_kpi（`cn_hourly_kpi`）
 
-CN 小时 KPI 看板：xGW 会话/吞吐容量与 MGW/MRFP 资源利用率的**小时粒度**视图，可按日期区间（默认最近 7 天、上限 31 天）回看。数据源是 UME 网管「KPI 模板管理」导出件 KPI Template.xlsx（2026-11-17 新建模板批）解析出的 3 个模板，由任务 cn_hourly_kpi_sync 每天 06:20 以 gr=3600 增量拉取，写入 db_ps_cs_cn 的 <模板名>_UME 三张表。口径（2026-11-18 定）：Resource_Utilization 与 Resource_Capacity 两族模板重复，只保留 Utilization 一族；Object Scope=ALL，数据覆盖全部网元。
+CN 小时 KPI 看板：xGW 会话/吞吐容量与 MGW/MRFP 资源利用率的**小时粒度**视图，可按日期区间（默认最近 7 天、上限 31 天）回看。数据源是 UME 网管「KPI 模板管理」导出件 KPI Template.xlsx（2026-11-17 新建模板批）解析出的 4 个模板，由任务 cn_hourly_kpi_sync 每天 06:20 以 gr=3600 增量拉取，写入 db_ps_cs_cn 的 <模板名>_UME 四张表。口径（2026-11-18 定，2026-11-20 补 Capacity）：Resource_Utilization 与 Resource_Capacity 两族模板各自重复，各保留一张做载体（CS_MRFP96）；Object Scope=ALL，数据覆盖全部网元。
 
 - 页面 7 张组件卡：xGW PFCP 会话用量、xGW 会话占用率(%)、xGW 吞吐用量(Mbps)、xGW 吞吐占用率(%)、MGW/MRFP 的 TONE/TC/RTP 利用率(%)；前四张的线是 xGWU22/xGWU122 两个网元（占用率为全 NE 合并的 ALL 线），后三张的线是 MGW_91/MGW_92/MRFP_96 三个网元
 - 日期区间用右上角区间选择器改（含端点），改完立即重新取数；上限 31 天（与回补窗口同档）
