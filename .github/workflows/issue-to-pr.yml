@@ -7,7 +7,7 @@
 #      该行没有时取正文里第一个允许前缀的分支名；都没有时按
 #      agent/task-<编号>-<标题 ASCII slug> 生成（标题无 ASCII 时
 #      退化为 agent/task-<编号>）。
-#   2. 分支不存在 → 从最新 main 用 Git Data API 建一条脚手架提交（只新增
+#   2. 分支不存在 → 从最新 master 用 Git Data API 建一条脚手架提交（只新增
 #      .agent-work/tasks/active/task-<编号>.md 进度文件，见根 AGENTS.md
 #      第五节第 3 条），再建分支引用。这是本工作流的「自动 Commit」：
 #      PR 必须至少领先 base 一个提交才能开，脚手架提交就是这个提交；
@@ -102,7 +102,7 @@ jobs:
           # ---- 2. 分支不存在则建脚手架提交 + 分支 ----
           REF_CODE="$(curl -sS -o /dev/null -w '%{http_code}' "${AUTH[@]}" "$API/git/ref/heads/$BRANCH")"
           if [ "$REF_CODE" = "404" ]; then
-            MAIN_SHA="$(curl -sS "${AUTH[@]}" "$API/git/ref/heads/main" | jq -r '.object.sha')"
+            MAIN_SHA="$(curl -sS "${AUTH[@]}" "$API/git/ref/heads/master" | jq -r '.object.sha')"
             MAIN_TREE="$(curl -sS "${AUTH[@]}" "$API/git/commits/$MAIN_SHA" | jq -r '.tree.sha')"
             STUB_PATH=".agent-work/tasks/active/task-$ISSUE_NUMBER.md"
             {
@@ -176,7 +176,7 @@ jobs:
             # 「Allow GitHub Actions to create and approve pull requests」未开）
             # 是事后查设置才确认的。失败时把状态码与 message 打出来再退出。
             HTTP_CODE="$(jq -n --arg title "$TITLE" --arg head "$BRANCH" --rawfile body /tmp/pr-body.md \
-              '{title: $title, head: $head, base: "main", body: $body, draft: true}' \
+              '{title: $title, head: $head, base: "master", body: $body, draft: true}' \
               | curl -sS -o /tmp/pr-create-resp.json -w '%{http_code}' -X POST "${AUTH[@]}" "$API/pulls" --data-binary @-)"
             PR_NUMBER="$(jq -r '.number // empty' /tmp/pr-create-resp.json)"
             if [ -z "$PR_NUMBER" ]; then
@@ -190,7 +190,7 @@ jobs:
             echo '<!-- issue-to-pr: done -->'
             echo "自动化（issue-to-pr）：任务脚手架已就绪。"
             echo
-            echo "- 分支：\`$BRANCH\`（从最新 main 建，含脚手架提交：进度文件 \`.agent-work/tasks/active/task-$ISSUE_NUMBER.md\`）"
+            echo "- 分支：\`$BRANCH\`（从最新 master 建，含脚手架提交：进度文件 \`.agent-work/tasks/active/task-$ISSUE_NUMBER.md\`）"
             echo "- 草稿 PR：#$PR_NUMBER（描述已按 Issue 自动生成，含 Closes #$ISSUE_NUMBER）"
             echo
             echo "开发 Agent 在该分支提交代码即可；草稿转正式后走 CI → 冒烟 → 自动合并。"

@@ -1,4 +1,4 @@
-# 自动合并：CI 全绿 + smoke-passed 标签 + 独立审核通过的 PR 自动合入 main，
+# 自动合并：CI 全绿 + smoke-passed 标签 + 独立审核通过的 PR 自动合入 master，
 # 不经过 Muse、无需人工点批准。
 #
 # 双门禁（Phase 2 P2-3 #132）：QA 与独立审核针对同一 head SHA 才合入，
@@ -10,7 +10,7 @@
 #     协议见 docs/workspace/review-record-protocol.md）。
 #   新提交自动使旧审核失效（sha 对不上）；审核者事后改判
 #   （补 changes-requested / blocked 标记）同样阻断。无记录 = 未审，不合入。
-#   门禁脚本取自 main 检出（可信代码），不取 PR 分支的版本——PR 作者
+#   门禁脚本取自 master 检出（可信代码），不取 PR 分支的版本——PR 作者
 #   不得自带门禁脚本。双门禁上线前，审核无权阻断合并（#127、#136 两次
 #   竞态均因此发生）；上线后，REQUEST_CHANGES 的 PR 即使 CI 全绿也不会合入。
 #
@@ -22,7 +22,7 @@
 #   - quality 工作流跑完时，重新评估所有 open PR（覆盖“先打标签、后 CI 变绿”的情况）。
 #
 # 安全阀：
-#   - 只合 base 为 main、未关闭、非草稿的 PR；
+#   - 只合 base 为 master、未关闭、非草稿的 PR；
 #   - 有 do-not-merge 标签的一律不合；
 #   - smoke-passed 必须绑定当前 head SHA（TASK-06-A #48）：watcher 冒烟通过时
 #     在 PR 报告评论首行留机器可读标记
@@ -38,7 +38,7 @@
 #
 # 合并后显式触发下游（2026-11-14 修正；2026-11-18 加 status-view.yml）：
 # 合并成功后向 auto-dispatch.yml、pr-merged-writeback.yml 与 status-view.yml
-# 各 POST 一次 workflow dispatch（ref: main，inputs: pr_number）。必需的：
+# 各 POST 一次 workflow dispatch（ref: master，inputs: pr_number）。必需的：
 # auto-merge 用默认 GITHUB_TOKEN 合并，GitHub 不会为该 token 触发的事件再
 # 启动新工作流，pull_request closed 事件被抑制，下游收不到合入事件
 # （实测 PR #31 合入后两者均为 0 次运行）。
@@ -47,9 +47,9 @@
 # 手动在网页上合并（用人 token）时 pull_request closed 事件正常触发，
 # 两条路径都保留；下游工作流自身幂等，重复触发不重复评论/分派。
 #
-# TASK-07 扩展（2026-11-14）：新增 update-branches 作业——main 有新提交
+# TASK-07 扩展（2026-11-14）：新增 update-branches 作业——master 有新提交
 # （push）或手动 dispatch 时，把落后的 agent/* 任务分支自动更新到最新
-# main（PUT /pulls/{n}/update-branch，协议第六节定的机械动作）；有冲突
+# master（PUT /pulls/{n}/update-branch，协议第六节定的机械动作）；有冲突
 # 的分支不自动处理，由开发 Agent 自己 rebase。auto-merge 作业等它跑完
 # 再评估（push 触发时），其余触发路径行为不变。
 
@@ -62,7 +62,7 @@ on:
     workflows: ["quality"]
     types: [completed]
   push:
-    branches: [main]
+    branches: [master]
   workflow_dispatch:
 
 permissions:
@@ -84,7 +84,7 @@ jobs:
           API="https://api.github.com/repos/$REPO"
           AUTH=(-H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json')
 
-          PRS="$(curl -sS "${AUTH[@]}" "$API/pulls?state=open&base=main&per_page=100" | jq -r '.[].number')"
+          PRS="$(curl -sS "${AUTH[@]}" "$API/pulls?state=open&base=master&per_page=100" | jq -r '.[].number')"
           for PR in $PRS; do
             PR_JSON="$(curl -sS "${AUTH[@]}" "$API/pulls/$PR")"
             HEAD_REF="$(echo "$PR_JSON" | jq -r '.head.ref')"
@@ -100,10 +100,10 @@ jobs:
               echo "PR #$PR：mergeable_state=$MERGEABLE_STATE，非 behind，跳过"; continue
             fi
 
-            echo "PR #$PR 落后于 main，调用 update-branch"
+            echo "PR #$PR 落后于 master，调用 update-branch"
             HTTP_CODE="$(curl -sS -o /tmp/update.json -w '%{http_code}' -X PUT "${AUTH[@]}" "$API/pulls/$PR/update-branch")"
             case "$HTTP_CODE" in
-              202) echo "PR #$PR 已更新（合并最新 main 进分支），CI 将自动重跑" ;;
+              202) echo "PR #$PR 已更新（合并最新 master 进分支），CI 将自动重跑" ;;
               *) echo "PR #$PR 更新未成功（HTTP $HTTP_CODE）："; cat /tmp/update.json; echo; echo "只记录不报错——多为已有冲突，留给开发 Agent rebase。" ;;
             esac
           done
@@ -114,13 +114,13 @@ jobs:
     if: always() && (needs.update-branches.result == 'success' || needs.update-branches.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
-      # 检出 main 上的门禁脚本（可信代码）：review_gate.py 必须取 main 的
+      # 检出 master 上的门禁脚本（可信代码）：review_gate.py 必须取 master 的
       # 版本，不取 PR 分支的——否则 PR 作者可以自己改门禁脚本放行自己。
       # 稀疏检出只要这一个文件；后续评估循环里每个 PR 都调它判定。
-      - name: 检出 main 上的可信门禁脚本
+      - name: 检出 master 上的可信门禁脚本
         uses: actions/checkout@v4
         with:
-          ref: main
+          ref: master
           sparse-checkout: |
             apps/control-plane/backend/dispatch/review_gate.py
           sparse-checkout-cone-mode: false
@@ -143,7 +143,7 @@ jobs:
             local pr="$1"
             local wf d_code
             for wf in auto-dispatch.yml pr-merged-writeback.yml status-view.yml; do
-              d_code="$(curl -sS -o /tmp/dispatch.json -w '%{http_code}' -X POST "${AUTH[@]}" "$API/actions/workflows/$wf/dispatches" -H 'Content-Type: application/json' --data-binary "{\"ref\": \"main\", \"inputs\": {\"pr_number\": \"$pr\"}}" || true)"
+              d_code="$(curl -sS -o /tmp/dispatch.json -w '%{http_code}' -X POST "${AUTH[@]}" "$API/actions/workflows/$wf/dispatches" -H 'Content-Type: application/json' --data-binary "{\"ref\": \"master\", \"inputs\": {\"pr_number\": \"$pr\"}}" || true)"
               case "$d_code" in
                 204) echo "已触发 $wf（PR #$pr）" ;;
                 *) echo "$wf 触发未成功（HTTP ${d_code:-无响应}）："; cat /tmp/dispatch.json 2>/dev/null || true; echo; echo "只记录不报错——下游工作流未触发，可在 Actions 页手动 dispatch（填 PR 号 $pr）补救。" ;;
@@ -173,7 +173,7 @@ jobs:
 
             if [ "$STATE" != "open" ]; then echo "已关闭，跳过"; continue; fi
             if [ "$DRAFT" = "true" ]; then echo "草稿，跳过"; continue; fi
-            if [ "$BASE" != "main" ]; then echo "目标分支不是 main，跳过"; continue; fi
+            if [ "$BASE" != "master" ]; then echo "目标分支不是 master，跳过"; continue; fi
             if ! has_label 'smoke-passed'; then echo "没有 smoke-passed 标签，跳过"; continue; fi
             if has_label 'do-not-merge'; then echo "有 do-not-merge 标签，跳过"; continue; fi
 
@@ -190,7 +190,7 @@ jobs:
             # 独立审核门禁（Phase 2 P2-1 #131 / P2-3 #132）：取 PR 评论里
             # 最后一条 review-result 标记判定。无记录、改判、旧 head、pr
             # 不符一律不通过；读评论失败时脚本 exit 1（fail-closed）。
-            # 脚本取自本作业开头检出的 main 版本（可信代码）。
+            # 脚本取自本作业开头检出的 master 版本（可信代码）。
             if ! python3 apps/control-plane/backend/dispatch/review_gate.py --repo "$REPO" --pr "$PR" --head-sha "$HEAD_SHA"; then
               echo "独立审核门禁未通过，跳过"; continue
             fi
