@@ -138,7 +138,7 @@ $prs = Normalize-GitHubList (Invoke-GitHubApi "/repos/$Repo/pulls?state=open&per
 $rows = New-Object System.Collections.ArrayList
 
 foreach ($pr in $prs) {
-    if ($pr.draft -or $pr.base.ref -ne 'master') { continue }
+    if ($pr.draft -or $pr.base.ref -ne 'main') { continue }
     $n = $pr.number
     $sha = $pr.head.sha
     $short = $sha.Substring(0, 7)
@@ -261,7 +261,7 @@ Show-Group '等 CI' $wait
 Show-Group '跳过 / 阻塞' $blocked
 Show-Group '本机已记失败（需新 head 或 -OnlyPr 重跑）' $failedLocal
 Show-Group '已通过（本视角）' $done
-if (-not $rows.Count) { Write-Host '（无符合 base=master 的非草稿 open PR）' }
+if (-not $rows.Count) { Write-Host '（无符合 base=main 的非草稿 open PR）' }
 
 if ($ready.Count -gt 0) {
     Write-Host '手工补跑（示例）：'

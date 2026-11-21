@@ -1,4 +1,4 @@
-# 合并后自动分派下一个任务：PR 合入 master 后，把下一个就绪任务自动
+# 合并后自动分派下一个任务：PR 合入 main 后，把下一个就绪任务自动
 # 派给空闲的 builder，不再等每小时巡逻（dispatch-check.yml 只做检查
 # 与标签，不分派任务——见其文件头注释）。
 #
@@ -30,7 +30,7 @@
 #   - 权限：创建 git ref 需要 `contents: write`。
 #
 # 安全阀（不变）：
-#   - 只处理 merged == true 且 base 为 master 的 PR；
+#   - 只处理 merged == true 且 base 为 main 的 PR；
 #   - 依赖未满足的任务绝不分派；已认领 / 已分派的任务不动；
 #   - 只发一条 TASK_ASSIGNED 评论 + 补 state:todo 标签（若缺失），
 #     并摘掉已满足依赖任务上残留的 state:blocked 标签；
@@ -39,9 +39,9 @@
 #     与 pr-merged-writeback.yml 的口径一致。
 #
 # 触发（四条路，同一套逻辑、同一个逻辑来源）：
-#   - PR 关闭且 merged == true、base 为 master（手动在网页上合并时走这条）；
+#   - PR 关闭且 merged == true、base 为 main（手动在网页上合并时走这条）；
 #   - auto-merge 合并成功后显式 workflow_dispatch（填 PR 号）；
-#   - 每小时 :17 的 schedule 定时巡检（不看 PR，按 master HEAD 分派一个就绪
+#   - 每小时 :17 的 schedule 定时巡检（不看 PR，按 main HEAD 分派一个就绪
 #     任务）——兜住「任务早就绪、但一整天没有新 PR 合入」的空窗。
 #   - Issue 创建（opened）或关闭（closed，依赖解除）：即时分派，不等巡检。
 #     注意 PR 本身也是 Issue，job 层用 !github.event.issue.pull_request
@@ -65,7 +65,7 @@ on:
   workflow_dispatch:
     inputs:
       pr_number:
-        description: '已合入 master 的 PR 编号'
+        description: '已合入 main 的 PR 编号'
         required: true
         type: number
 
@@ -80,7 +80,7 @@ concurrency:
 
 jobs:
   dispatch-next:
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event_name == 'issues' && !github.event.issue.pull_request) || (github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'master')
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event_name == 'issues' && !github.event.issue.pull_request) || (github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

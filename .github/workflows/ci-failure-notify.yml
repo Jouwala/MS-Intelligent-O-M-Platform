@@ -12,7 +12,7 @@
 #     FIX 流程（QA/CI 失败返工见 agent-protocol.md 第四节）。
 #   - 去重：同一运行（run id）在同一 PR / Issue 只通知一次，评论里带
 #     <!-- ci-failure-notice: run-<id> --> 标记，重跑工作流不会刷屏。
-#   - 找不到 open PR（如直接推 master 的运行）只记日志，不报错。
+#   - 找不到 open PR（如直接推 main 的运行）只记日志，不报错。
 #   - 结论只认 failure / timed_out / cancelled 中的 failure 与 timed_out；
 #     cancelled 多为人工取消，不通知。
 

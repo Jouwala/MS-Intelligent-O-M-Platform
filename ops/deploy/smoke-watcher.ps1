@@ -16,7 +16,7 @@
   的 nginx 归属是否逐字未变，从不写入。
 
   触发条件（与 agent-orchestrator 的去重逻辑一致）：
-    · PR open、非草稿、base 是 master；
+    · PR open、非草稿、base 是 main；
     · 同一 head SHA 的 quality 工作流有一次 completed + success；
     · 该 PR 还没有绑定当前 head 的 smoke-passed 标签（绑定旧 head 的会被摘除重跑），也没有 do-not-merge；
     · 同一 head SHA 没被本机冒烟过（状态文件 TMP\smoke-watcher-state.json）。
@@ -503,7 +503,7 @@ function Invoke-OneCycle {
         $labels = @($pr.labels | ForEach-Object { $_.name })
 
         if ($pr.draft) { continue }
-        if ($pr.base.ref -ne 'master') { continue }
+        if ($pr.base.ref -ne 'main') { continue }
         if ($labels -contains 'do-not-merge') { Write-SkipOnce "dnm-$n-$sha" "PR #$n 有 do-not-merge，跳过。"; continue }
 
         $key = "$n"
